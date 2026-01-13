@@ -111,6 +111,8 @@ class EpsilonDivDivKerngen
     /// @brief Getter for grid member
     grid::Grid3DDataVec< ScalarT, 3 > get_grid() { return grid_; }
 
+    void set_treat_boundary( bool treat_boundary ) { treat_boundary_ = treat_boundary; }
+    
     /// @brief Getter for mask member
     KOKKOS_INLINE_FUNCTION
     bool has_flag(

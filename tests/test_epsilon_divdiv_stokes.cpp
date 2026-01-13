@@ -16,6 +16,9 @@
 #include "fe/wedge/operators/shell/vector_laplace_simple.hpp"
 #include "fe/wedge/operators/shell/vector_mass.hpp"
 #include "io/xdmf.hpp"
+#include "linalg/solvers/apply_solver.hpp"
+#include "linalg/solvers/bfbt/BFBTOperator.hpp"
+#include "linalg/solvers/bfbt/ZOperator.hpp"
 #include "linalg/solvers/block_preconditioner_2x2.hpp"
 #include "linalg/solvers/fgmres.hpp"
 #include "linalg/solvers/gca/gca.hpp"
@@ -86,9 +89,9 @@ struct SolutionVelocityInterpolator
 
         if ( !only_boundary_ || ( r == 0 || r == radii_.extent( 1 ) - 1 ) )
         {
-            data_u_( local_subdomain_id, x, y, r, 0 ) = -4 * Kokkos::cos( 4 * cz );
-            data_u_( local_subdomain_id, x, y, r, 1 ) = 8 * Kokkos::cos( 8 * cx );
-            data_u_( local_subdomain_id, x, y, r, 2 ) = -2 * Kokkos::cos( 2 * cy );
+            data_u_( local_subdomain_id, x, y, r, 0 ) = 0.0;//-4 * Kokkos::cos( 4 * cz );
+            data_u_( local_subdomain_id, x, y, r, 1 ) = 0.0;//8 * Kokkos::cos( 8 * cx );
+            data_u_( local_subdomain_id, x, y, r, 2 ) = 0.0;//-2 * Kokkos::cos( 2 * cy );
         }
     }
 };
@@ -122,8 +125,8 @@ struct SolutionPressureInterpolator
 
         if ( !only_boundary_ || ( r == 0 || r == radii_.extent( 1 ) - 1 ) )
         {
-            data_p_( local_subdomain_id, x, y, r ) =
-                Kokkos::sin( 4 * cx ) * Kokkos::sin( 8 * cy ) * Kokkos::sin( 2 * cz );
+            data_p_( local_subdomain_id, x, y, r ) = 0.0;
+              //  Kokkos::sin( 4 * cx ) * Kokkos::sin( 8 * cy ) * Kokkos::sin( 2 * cz );
         }
     }
 };
@@ -211,7 +214,7 @@ struct KInterpolator
     {
         const dense::Vec< double, 3 > coords = grid::shell::coords( local_subdomain_id, x, y, r, grid_, radii_ );
 
-        const double value                   = 2 + Kokkos::sin( coords( 2 ) );
+        const double value                   = 1;//2 + Kokkos::sin( coords( 2 ) );
         data_( local_subdomain_id, x, y, r ) = value;
         //data_( local_subdomain_id, x, y, r ) = value;
         /*if ( coords.norm() > 0.75 )
@@ -456,7 +459,8 @@ std::tuple< double, double, int >
             }
             else if ( gca == 1 )
             {
-                A_c.back().set_stored_matrix_mode( linalg::OperatorStoredMatrixMode::Full, std::nullopt, GCAElements.grid_data() );
+                A_c.back().set_stored_matrix_mode(
+                    linalg::OperatorStoredMatrixMode::Full, std::nullopt, GCAElements.grid_data() );
             }
             //P.emplace_back( coords_shell[level + 1], coords_radii[level + 1], linalg::OperatorApplyMode::Add );
             //R.emplace_back( domains[level], coords_shell[level + 1], coords_radii[level + 1] );
@@ -600,7 +604,7 @@ std::tuple< double, double, int >
     // Schur complement: lumped inverse diagonal of pressure mass
 
     //PrecStokes prec_stokes( K.block_11(), fe::wedge::operators::shell::Identity< ScalarType >(), prec_11, prec_22 );
-
+    /*
     VectorQ1Scalar< ScalarType > k_pm( "k_pm", domains[max_level - min_level], mask_data[max_level - min_level] );
     assign( k_pm, k );
     linalg::invert_entries( k_pm );
@@ -622,15 +626,62 @@ std::tuple< double, double, int >
 
     using PrecSchur = linalg::solvers::DiagonalSolver< PressureMass >;
     PrecSchur inv_lumped_pmass( lumped_diagonal_pmass );
+    */
 
+    // Z operator (BFBT subsystems): div * diag(A)^{-1} * grad "solved" by CG
+    using  ZOperator = terra::linalg::ZOperator< ScalarType >;
+    VectorQ1Vec< ScalarType >              tmp_zop( "tmp_zop", domains[velocity_level], mask_data[velocity_level] );
+    ZOperator zop(
+        K.block_21(), K.block_12(), inverse_diagonals[velocity_level], tmp_zop );
+
+    VectorQ1Vec< ScalarType >    v_tmp_bfbt1( "v_tmp_bfbt1", domains[velocity_level], mask_data[velocity_level] );
+    VectorQ1Vec< ScalarType >    v_tmp_bfbt2( "v_tmp_bfbt2", domains[velocity_level], mask_data[velocity_level] );
+    VectorQ1Scalar< ScalarType > p_tmp_bfbt( "p_tmp_bfbt", domains[pressure_level], mask_data[pressure_level] );
+
+    
+    std::vector< VectorQ1Scalar< ScalarType > > zsolver_tmps;
+    for ( int i = 0; i < 4; i++ )
+    {
+        zsolver_tmps.emplace_back( "zsolver_tmp", domains[pressure_level], mask_data[pressure_level] );
+    }
+    linalg::solvers::PCG< terra::linalg::ZOperator<ScalarType> > zsolver(
+        linalg::solvers::IterativeSolverParameters{ 1000, 1e-4, 1e-16 }, table, zsolver_tmps );
+    zsolver.set_tag( "zsolver_cg" );
+    
+   /*
+    constexpr auto                              num_tmps_fgmres_zsolver = 50;
+    std::vector< VectorQ1Scalar< ScalarType > > tmp_fgmres_zsolver;
+    for ( int i = 0; i < 2 * num_tmps_fgmres_zsolver + 4; ++i )
+    {
+        tmp_fgmres_zsolver.emplace_back(
+            "tmp_" + std::to_string( i ), domains[pressure_level], mask_data[pressure_level] );
+    }
+    linalg::solvers::FGMRESOptions< ScalarType > fgmres_options_zsolver;
+    fgmres_options_zsolver.restart                                     = num_tmps_fgmres_zsolver;
+    fgmres_options_zsolver.max_iterations                              = num_tmps_fgmres_zsolver;
+    fgmres_options_zsolver.relative_residual_tolerance                 = 1e-6;
+    linalg::solvers::FGMRES< ZOperator > zsolver( tmp_fgmres_zsolver, fgmres_options_zsolver );
+*/
+    using BFBT = terra::linalg::BFBTOperator< ScalarType >;
+    BFBT bfbt(
+        K.block_21(),
+        K.block_12(),
+        K.block_11(),
+        zop,
+        inverse_diagonals[velocity_level],
+        v_tmp_bfbt1,
+        v_tmp_bfbt2,
+        p_tmp_bfbt,
+        zsolver );
     // setup outer block-preconditioner
 
     //using PrecStokes =
     //    linalg::solvers::BlockDiagonalPreconditioner2x2< Stokes, Viscous, PressureMass, PrecVisc, PrecSchur >;
     //PrecStokes prec_stokes( K.block_11(), pmass, prec_11, inv_lumped_pmass );
 
-    using PrecStokes = linalg::solvers::
-        BlockTriangularPreconditioner2x2< Stokes, Viscous, PressureMass, Gradient, PrecVisc, PrecSchur >;
+    using BFBTApply = terra::linalg::solvers::ApplySolver< BFBT >;
+    using PrecStokes =
+        linalg::solvers::BlockTriangularPreconditioner2x2< Stokes, Viscous, BFBT, Gradient, PrecVisc, BFBTApply >;
     /*  BlockTriangularPreconditioner2x2<
             Stokes,
             Viscous,
@@ -651,7 +702,8 @@ std::tuple< double, double, int >
         prec_11,
         linalg::solvers::IdentitySolver< fe::wedge::operators::shell::Identity< ScalarType > >() );
 */
-    PrecStokes prec_stokes( K.block_11(), pmass, K.block_12(), triangular_prec_tmp, prec_11, inv_lumped_pmass );
+    //BFBTApply bfbt_apply();
+    PrecStokes prec_stokes( K.block_11(), bfbt, K.block_12(), triangular_prec_tmp, prec_11, BFBTApply() );
     /* PrecStokes prec_stokes(
         K.block_11(),
         fe::wedge::operators::shell::Identity< ScalarType >(),
@@ -721,9 +773,8 @@ std::tuple< double, double, int >
           { "l2_error_pre", l2_error_pressure },
           { "inf_res_vel", inf_residual_vel },
           { "inf_res_pre", inf_residual_pre },
-          { "h_vel", (r_max - r_min)/std::pow(2,velocity_level)},
-          { "h_p", (r_max - r_min)/std::pow(2,pressure_level)}
-    } );
+          { "h_vel", ( r_max - r_min ) / std::pow( 2, velocity_level ) },
+          { "h_p", ( r_max - r_min ) / std::pow( 2, pressure_level ) } } );
 
     io::XDMFOutput xdmf(
         "out_eps", domains[velocity_level], coords_shell[velocity_level], coords_radii[velocity_level] );
@@ -750,7 +801,7 @@ int main( int argc, char** argv )
 
     std::vector< int > kmaxs = { 1 };
 
-    std::vector< int > gcas = { 1 }; //, 1 };
+    std::vector< int > gcas = { 0 }; //, 1 };
 
     auto table_dca  = std::make_shared< util::Table >();
     auto table_gca  = std::make_shared< util::Table >();

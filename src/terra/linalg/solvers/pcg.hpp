@@ -10,12 +10,12 @@
 namespace terra::linalg::solvers {
 
 /// @brief Preconditioned Conjugate Gradient (PCG) iterative solver for symmetric positive definite linear systems.
-/// 
-/// See, e.g., 
+///
+/// See, e.g.,
 /// @code
-/// Elman, H. C., Silvester, D. J., & Wathen, A. J. (2014). 
-/// Finite elements and fast iterative solvers: with applications in incompressible fluid dynamics. 
-/// Oxford university press. 
+/// Elman, H. C., Silvester, D. J., & Wathen, A. J. (2014).
+/// Finite elements and fast iterative solvers: with applications in incompressible fluid dynamics.
+/// Oxford university press.
 /// @endcode
 ///
 /// Satisfies the SolverLike concept (see solver.hpp).
@@ -27,13 +27,13 @@ class PCG
 {
   public:
     /// @brief Operator type to be solved.
-    using OperatorType       = OperatorT;
+    using OperatorType = OperatorT;
     /// @brief Solution vector type.
     using SolutionVectorType = SrcOf< OperatorType >;
     /// @brief Right-hand side vector type.
-    using RHSVectorType      = DstOf< OperatorType >;
+    using RHSVectorType = DstOf< OperatorType >;
     /// @brief Scalar type for computations.
-    using ScalarType         = typename SolutionVectorType::ScalarType;
+    using ScalarType = typename SolutionVectorType::ScalarType;
 
     /// @brief Construct a PCG solver with default identity preconditioner.
     /// @param params Iterative solver parameters.
@@ -70,6 +70,8 @@ class PCG
     /// @param tag Tag string.
     void set_tag( const std::string& tag ) { tag_ = tag; }
 
+    std::shared_ptr< util::Table > get_statistics() { return statistics_; };
+
     /// @brief Solve the linear system \f$ Ax = b \f$ using PCG.
     /// Calls the iterative solver and updates statistics.
     /// @param A Operator (matrix).
@@ -95,11 +97,16 @@ class PCG
 
         if ( statistics_ )
         {
-            statistics_->add_row(
-                { { "tag", tag_ },
-                  { "iteration", 0 },
-                  { "relative_residual", 1.0 },
-                  { "absolute_residual", initial_residual } } );
+            util::Table::Row row = {
+                { "tag", tag_ },
+                { "iteration", 0 },
+                { "relative_residual", 1.0 },
+                { "absolute_residual", initial_residual } };
+            util::Table tmptable;
+            tmptable.add_row( row );
+            
+            tmptable.print_pretty();
+            statistics_->add_row( row );
         }
 
         if ( initial_residual < params_.absolute_residual_tolerance() )
@@ -126,11 +133,16 @@ class PCG
 
             if ( statistics_ )
             {
-                statistics_->add_row(
-                    { { "tag", tag_ },
-                      { "iteration", iteration },
-                      { "relative_residual", relative_residual },
-                      { "absolute_residual", absolute_residual } } );
+                util::Table::Row row = {
+                    { "tag", tag_ },
+                    { "iteration", iteration },
+                    { "relative_residual", relative_residual },
+                    { "absolute_residual", absolute_residual } };
+                util::Table tmptable;
+                tmptable.add_row( row );
+                if (iteration % 5 == 0)
+                    tmptable.print_pretty();
+                statistics_->add_row( row );
             }
 
             if ( relative_residual <= params_.relative_residual_tolerance() )

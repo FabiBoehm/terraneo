@@ -13,7 +13,7 @@ struct MeshParameters
 {
     int refinement_level_mesh_min   = 1;
     int refinement_level_mesh_max   = 4;
-    int refinement_level_subdomains = 0;
+    int refinement_level_subdomains = 1;
 
     double radius_min = 0.5;
     double radius_max = 1.0;

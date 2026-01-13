@@ -70,6 +70,8 @@ class Divergence
         operator_communication_mode_ = operator_communication_mode;
     }
 
+    void set_treat_boundary( bool treat_boundary ) { treat_boundary_ = treat_boundary; }
+
     void apply_impl( const SrcVectorType& src, DstVectorType& dst )
     {
         util::Timer timer_apply( "divergence_apply" );
