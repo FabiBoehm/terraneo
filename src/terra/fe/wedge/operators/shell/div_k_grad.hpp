@@ -1,6 +1,8 @@
 
 #pragma once
 
+#include <type_traits>
+
 #include "../../quadrature/quadrature.hpp"
 #include "communication/shell/communication.hpp"
 #include "dense/vec.hpp"
@@ -15,7 +17,12 @@
 
 namespace terra::fe::wedge::operators::shell {
 
-template < typename ScalarT >
+/// @brief Sentinel type indicating no exact coefficient evaluator is used (default FE interpolation mode).
+struct NoCoeffEval
+{
+};
+
+template < typename ScalarT, typename CoeffEval = NoCoeffEval >
 class DivKGrad
 {
   public:
@@ -36,6 +43,7 @@ class DivKGrad
     grid::Grid2DDataScalar< ScalarT >                        radii_;
     grid::Grid4DDataScalar< ScalarType >                     k_;
     grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag > mask_;
+    CoeffEval                                                coeff_eval_;
 
     bool treat_boundary_;
     bool diagonal_;
@@ -79,6 +87,43 @@ class DivKGrad
     , operator_communication_mode_( operator_communication_mode )
     , operator_stored_matrix_mode_( operator_stored_matrix_mode )
     // TODO: we can reuse the send and recv buffers and pass in from the outside somehow
+    , send_buffers_( domain )
+    , recv_buffers_( domain )
+    {
+        quadrature::quad_felippa_1x1_quad_points( quad_points_1x1_ );
+        quadrature::quad_felippa_1x1_quad_weights( quad_weights_1x1_ );
+        quadrature::quad_felippa_3x2_quad_points( quad_points_3x2_ );
+        quadrature::quad_felippa_3x2_quad_weights( quad_weights_3x2_ );
+    }
+
+    /// @brief Constructor for exact coefficient evaluation mode.
+    /// Instead of interpolating k from FE nodal values, the coefficient is evaluated
+    /// exactly at physical quadrature points using the provided evaluator functor.
+    /// The evaluator must be device-callable with signature:
+    ///   KOKKOS_INLINE_FUNCTION ScalarT operator()(const dense::Vec<ScalarT, 3>& phys_coords) const;
+    DivKGrad(
+        const grid::shell::DistributedDomain&                           domain,
+        const grid::Grid3DDataVec< ScalarT, 3 >&                        grid,
+        const grid::Grid2DDataScalar< ScalarT >&                        radii,
+        const grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag >& mask,
+        const CoeffEval&                                                coeff_eval,
+        bool                                                            treat_boundary,
+        bool                                                            diagonal,
+        linalg::OperatorApplyMode         operator_apply_mode = linalg::OperatorApplyMode::Replace,
+        linalg::OperatorCommunicationMode operator_communication_mode =
+            linalg::OperatorCommunicationMode::CommunicateAdditively,
+        linalg::OperatorStoredMatrixMode operator_stored_matrix_mode = linalg::OperatorStoredMatrixMode::Off )
+        requires( !std::is_same_v< CoeffEval, NoCoeffEval > )
+    : domain_( domain )
+    , grid_( grid )
+    , radii_( radii )
+    , mask_( mask )
+    , coeff_eval_( coeff_eval )
+    , treat_boundary_( treat_boundary )
+    , diagonal_( diagonal )
+    , operator_apply_mode_( operator_apply_mode )
+    , operator_communication_mode_( operator_communication_mode )
+    , operator_stored_matrix_mode_( operator_stored_matrix_mode )
     , send_buffers_( domain )
     , recv_buffers_( domain )
     {
@@ -320,8 +365,11 @@ class DivKGrad
             int num_quad_points = single_quadpoint_ ? quadrature::quad_felippa_1x1_num_quad_points :
                                                       quadrature::quad_felippa_3x2_num_quad_points;
 
-            dense::Vec< ScalarT, 6 > k_local_hex[num_wedges_per_hex_cell];
-            extract_local_wedge_scalar_coefficients( k_local_hex, local_subdomain_id, x_cell, y_cell, r_cell, k_ );
+            dense::Vec< ScalarT, 6 > k_local_hex[num_wedges_per_hex_cell] = {};
+            if constexpr ( std::is_same_v< CoeffEval, NoCoeffEval > )
+            {
+                extract_local_wedge_scalar_coefficients( k_local_hex, local_subdomain_id, x_cell, y_cell, r_cell, k_ );
+            }
 
             ScalarType src_local_hex[8] = { 0 };
             ScalarType dst_local_hex[8] = { 0 };
@@ -347,13 +395,8 @@ class DivKGrad
                     assemble_trial_test_vecs(
                         wedge, qp, w, r_1, r_2, wedge_phy_surf, k_local_hex, grad, jdet_keval_quadweight );
 
-                    // dot of coeff dofs and element-local shape functions to evaluate the coefficent on the current element
-                    ScalarType k_eval = 0.0;
-
-                    for ( int k = 0; k < num_nodes_per_wedge; k++ )
-                    {
-                        k_eval += shape( k, qp ) * k_local_hex[wedge]( k );
-                    }
+                    ScalarType k_eval =
+                        evaluate_k_at_qp( wedge_phy_surf[wedge], r_1, r_2, qp, k_local_hex[wedge] );
 
                     jdet_keval_quadweight *= k_eval;
 
@@ -397,6 +440,58 @@ class DivKGrad
         jdet_quadweight = quad_weight * abs_det;
     }
 
+    /// @brief Compute physical coordinates at a quadrature point within a wedge element.
+    /// phys = surface_interp * r_interp, where:
+    ///   surface_interp = (1-xi-eta)*p0 + xi*p1 + eta*p2
+    ///   r_interp = 0.5*(1-zeta)*r_1 + 0.5*(1+zeta)*r_2
+    KOKKOS_INLINE_FUNCTION
+    dense::Vec< ScalarT, 3 > physical_coords_at_qp(
+        const dense::Vec< ScalarT, 3 > ( &wedge_phy_surf )[num_nodes_per_wedge_surface],
+        const ScalarT                      r_1,
+        const ScalarT                      r_2,
+        const dense::Vec< ScalarT, 3 >&    qp ) const
+    {
+        const ScalarT xi   = qp( 0 );
+        const ScalarT eta  = qp( 1 );
+        const ScalarT zeta = qp( 2 );
+
+        // Lateral interpolation on the unit-sphere triangle.
+        dense::Vec< ScalarT, 3 > surface_interp =
+            wedge_phy_surf[0] * ( ScalarT( 1 ) - xi - eta ) + wedge_phy_surf[1] * xi + wedge_phy_surf[2] * eta;
+
+        // Radial interpolation.
+        const ScalarT r_interp = ScalarT( 0.5 ) * ( ScalarT( 1 ) - zeta ) * r_1 +
+                                 ScalarT( 0.5 ) * ( ScalarT( 1 ) + zeta ) * r_2;
+
+        return surface_interp * r_interp;
+    }
+
+    /// @brief Evaluate the coefficient k at a quadrature point.
+    /// In exact eval mode, uses the functor; otherwise, uses FE interpolation from nodal values.
+    KOKKOS_INLINE_FUNCTION
+    ScalarT evaluate_k_at_qp(
+        const dense::Vec< ScalarT, 3 > ( &wedge_phy_surf )[num_nodes_per_wedge_surface],
+        const ScalarT                      r_1,
+        const ScalarT                      r_2,
+        const dense::Vec< ScalarT, 3 >&    qp,
+        const dense::Vec< ScalarT, 6 >&    k_local_wedge ) const
+    {
+        if constexpr ( std::is_same_v< CoeffEval, NoCoeffEval > )
+        {
+            ScalarT k_eval = 0;
+            for ( int k = 0; k < num_nodes_per_wedge; k++ )
+            {
+                k_eval += shape( k, qp ) * k_local_wedge( k );
+            }
+            return k_eval;
+        }
+        else
+        {
+            dense::Vec< ScalarT, 3 > phys = physical_coords_at_qp( wedge_phy_surf, r_1, r_2, qp );
+            return coeff_eval_( phys );
+        }
+    }
+
     /// @brief assemble the local matrix and return it for a given element, wedge, and vectorial component
     /// (determined by dimi, dimj)
     KOKKOS_INLINE_FUNCTION
@@ -416,8 +511,11 @@ class DivKGrad
         const ScalarT r_1 = radii_( local_subdomain_id, r_cell );
         const ScalarT r_2 = radii_( local_subdomain_id, r_cell + 1 );
 
-        dense::Vec< ScalarT, 6 > k_local_hex[num_wedges_per_hex_cell];
-        extract_local_wedge_scalar_coefficients( k_local_hex, local_subdomain_id, x_cell, y_cell, r_cell, k_ );
+        dense::Vec< ScalarT, 6 > k_local_hex[num_wedges_per_hex_cell] = {};
+        if constexpr ( std::is_same_v< CoeffEval, NoCoeffEval > )
+        {
+            extract_local_wedge_scalar_coefficients( k_local_hex, local_subdomain_id, x_cell, y_cell, r_cell, k_ );
+        }
 
         // Compute the local element matrix.
         dense::Mat< ScalarT, LocalMatrixDim, LocalMatrixDim > A = { 0 };
@@ -435,13 +533,7 @@ class DivKGrad
             assemble_trial_test_vecs(
                 wedge, qp, w, r_1, r_2, wedge_phy_surf, k_local_hex, grad, jdet_keval_quadweight );
 
-            // dot of coeff dofs and element-local shape functions to evaluate the coefficent on the current element
-            ScalarType k_eval = 0.0;
-
-            for ( int k = 0; k < num_nodes_per_wedge; k++ )
-            {
-                k_eval += shape( k, qp ) * k_local_hex[wedge]( k );
-            }
+            ScalarType k_eval = evaluate_k_at_qp( wedge_phy_surf[wedge], r_1, r_2, qp, k_local_hex[wedge] );
 
             jdet_keval_quadweight *= k_eval;
 
@@ -571,5 +663,7 @@ class DivKGrad
 
 static_assert( linalg::GCACapable< DivKGrad< float > > );
 static_assert( linalg::GCACapable< DivKGrad< double > > );
+static_assert( linalg::GCACapable< DivKGrad< float, NoCoeffEval > > );
+static_assert( linalg::GCACapable< DivKGrad< double, NoCoeffEval > > );
 
 } // namespace terra::fe::wedge::operators::shell

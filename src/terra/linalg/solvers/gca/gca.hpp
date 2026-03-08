@@ -27,7 +27,7 @@ enum class InterpolationMode
 {
     Constant,
     Linear,
-    //OpDep?
+    OperatorDependent,
 };
 
 /// @brief: Galerkin coarse approximation (GCA).
@@ -59,6 +59,16 @@ class TwoGridGCA
     grid::Grid4DDataScalar< ScalarType > GCAElements_;
     InterpolationMode                    interpolation_mode_;
 
+    // Precomputed AMG weights for OperatorDependent mode.
+    grid::Grid4DDataScalar< ScalarT > parent_weight_0_;
+    grid::Grid4DDataScalar< ScalarT > parent_weight_1_;
+    grid::Grid4DDataScalar< ScalarT > parent_weight_2_;
+    grid::Grid4DDataScalar< ScalarT > parent_weight_3_;
+
+    int fine_num_cells_x_;
+    int fine_num_cells_y_;
+    int fine_num_cells_r_;
+
   public:
     /// @brief GCA Ctor
     /// Assembles Galerkin coarse-grid operators in the coarse-op passed.
@@ -86,6 +96,9 @@ class TwoGridGCA
     , level_range_( level_range )
     , treat_boundary_( treat_boundary )
     , interpolation_mode_( interpolation_mode )
+    , fine_num_cells_x_( fine_op.get_domain().domain_info().subdomain_num_nodes_per_side_laterally() - 1 )
+    , fine_num_cells_y_( fine_op.get_domain().domain_info().subdomain_num_nodes_per_side_laterally() - 1 )
+    , fine_num_cells_r_( fine_op.get_domain().domain_info().subdomain_num_nodes_radially() - 1 )
     {
         // assert( coarse_op_.get_stored_matrix_mode() != linalg::OperatorStoredMatrixMode::Off );
 
@@ -106,6 +119,16 @@ class TwoGridGCA
             throw std::runtime_error( "Prolongation: src and dst must have a compatible number of radial cells." );
         }
 
+        if ( interpolation_mode == InterpolationMode::OperatorDependent )
+        {
+            if ( Operator::LocalMatrixDim != 6 )
+            {
+                throw std::runtime_error(
+                    "OperatorDependent interpolation currently only supported for scalar operators (LocalMatrixDim == 6)." );
+            }
+            precompute_amg_weights();
+        }
+
         // Looping over the coarse grid.
         Kokkos::parallel_for(
             "gca_coarsening",
@@ -118,6 +141,253 @@ class TwoGridGCA
                     coarse_op.get_domain().domain_info().subdomain_num_nodes_radially() - 1,
                 } ),
             *this );
+
+        Kokkos::fence();
+    }
+
+    /// @brief Precomputes AMG-style interpolation weights for OperatorDependent mode.
+    /// Assembles the partial stiffness row at each fine node, communicates across
+    /// subdomain boundaries, then computes w_p = -a_ip / (a_ii + a_weak) with
+    /// negative weight clamping and min-weight clamping.
+    void precompute_amg_weights()
+    {
+        const auto& domain = domain_fine_;
+        const int   num_sd = static_cast< int >( domain.subdomains().size() );
+        const int   nx     = domain.domain_info().subdomain_num_nodes_per_side_laterally();
+        const int   ny     = nx;
+        const int   nr     = domain.domain_info().subdomain_num_nodes_radially();
+        const int   ncx    = fine_num_cells_x_;
+        const int   ncy    = fine_num_cells_y_;
+        const int   ncr    = fine_num_cells_r_;
+
+        // Allocate fields for partial stiffness entries.
+        grid::Grid4DDataScalar< ScalarT > a_ip_0( "a_ip_0", num_sd, nx, ny, nr );
+        grid::Grid4DDataScalar< ScalarT > a_ip_1( "a_ip_1", num_sd, nx, ny, nr );
+        grid::Grid4DDataScalar< ScalarT > a_ip_2( "a_ip_2", num_sd, nx, ny, nr );
+        grid::Grid4DDataScalar< ScalarT > a_ip_3( "a_ip_3", num_sd, nx, ny, nr );
+        grid::Grid4DDataScalar< ScalarT > a_denom( "a_denom", num_sd, nx, ny, nr );
+
+        parent_weight_0_ = grid::Grid4DDataScalar< ScalarT >( "pw0", num_sd, nx, ny, nr );
+        parent_weight_1_ = grid::Grid4DDataScalar< ScalarT >( "pw1", num_sd, nx, ny, nr );
+        parent_weight_2_ = grid::Grid4DDataScalar< ScalarT >( "pw2", num_sd, nx, ny, nr );
+        parent_weight_3_ = grid::Grid4DDataScalar< ScalarT >( "pw3", num_sd, nx, ny, nr );
+
+        auto pw0 = parent_weight_0_;
+        auto pw1 = parent_weight_1_;
+        auto pw2 = parent_weight_2_;
+        auto pw3 = parent_weight_3_;
+
+        auto fine_op = fine_op_;
+
+        // Phase 1: Assemble partial a_ip and a_denom for each fine node.
+        Kokkos::parallel_for(
+            "amg_weights_phase1",
+            Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >( { 0, 0, 0, 0 }, { num_sd, nx, ny, nr } ),
+            KOKKOS_LAMBDA( const int sd, const int x, const int y, const int r ) {
+                const bool x_even = ( x % 2 == 0 );
+                const bool y_even = ( y % 2 == 0 );
+                const bool r_even = ( r % 2 == 0 );
+                if ( x_even && y_even && r_even )
+                    return;
+
+                const int num_parents = ( x_even && y_even ) ? 2 : 4;
+
+                // Determine parent coordinates.
+                int r_bot = r / 2;
+                int r_top = r_bot + 1;
+
+                int px[4], py[4], pr[4];
+                if ( num_parents == 2 )
+                {
+                    px[0] = x;  py[0] = y;  pr[0] = 2 * r_bot;
+                    px[1] = x;  py[1] = y;  pr[1] = 2 * r_top;
+                    px[2] = 0;  py[2] = 0;  pr[2] = 0;
+                    px[3] = 0;  py[3] = 0;  pr[3] = 0;
+                }
+                else
+                {
+                    int x0, y0, x1, y1;
+                    if ( x_even )
+                    {
+                        x0 = x / 2;  x1 = x / 2;
+                        y0 = y / 2;  y1 = y / 2 + 1;
+                    }
+                    else if ( y_even )
+                    {
+                        x0 = x / 2;  x1 = x / 2 + 1;
+                        y0 = y / 2;  y1 = y / 2;
+                    }
+                    else
+                    {
+                        x0 = x / 2 + 1;  x1 = x / 2;
+                        y0 = y / 2;      y1 = y / 2 + 1;
+                    }
+                    px[0] = 2 * x0;  py[0] = 2 * y0;  pr[0] = 2 * r_bot;
+                    px[1] = 2 * x1;  py[1] = 2 * y1;  pr[1] = 2 * r_bot;
+                    px[2] = 2 * x0;  py[2] = 2 * y0;  pr[2] = 2 * r_top;
+                    px[3] = 2 * x1;  py[3] = 2 * y1;  pr[3] = 2 * r_top;
+                }
+
+                ScalarT aii   = 0;
+                ScalarT aip[4] = {};
+                ScalarT aweak = 0;
+
+                // Iterate over ALL fine hexes containing this node.
+                for ( int dhx = -1; dhx <= 0; dhx++ )
+                for ( int dhy = -1; dhy <= 0; dhy++ )
+                for ( int dhr = -1; dhr <= 0; dhr++ )
+                {
+                    int hx = x + dhx;
+                    int hy = y + dhy;
+                    int hr = r + dhr;
+                    if ( hx < 0 || hx >= ncx || hy < 0 || hy >= ncy || hr < 0 || hr >= ncr )
+                        continue;
+
+                    int dx = x - hx;
+                    int dy = y - hy;
+                    int dr = r - hr;
+
+                    for ( int w = 0; w < 2; w++ )
+                    {
+                        int lidx = local_index_in_wedge( dx, dy, dr, w );
+                        if ( lidx < 0 )
+                            continue;
+
+                        auto A = fine_op.get_local_matrix( sd, hx, hy, hr, w );
+
+                        // Get vertex coords for this wedge.
+                        dense::Vec< int, 4 > hex_idx = { sd, hx, hy, hr };
+                        dense::Vec< int, 4 > verts[6];
+                        if ( w == 0 )
+                        {
+                            verts[0] = hex_idx;
+                            verts[1] = hex_idx + dense::Vec< int, 4 >( { 0, 1, 0, 0 } );
+                            verts[2] = hex_idx + dense::Vec< int, 4 >( { 0, 0, 1, 0 } );
+                            verts[3] = hex_idx + dense::Vec< int, 4 >( { 0, 0, 0, 1 } );
+                            verts[4] = hex_idx + dense::Vec< int, 4 >( { 0, 1, 0, 1 } );
+                            verts[5] = hex_idx + dense::Vec< int, 4 >( { 0, 0, 1, 1 } );
+                        }
+                        else
+                        {
+                            verts[0] = hex_idx + dense::Vec< int, 4 >( { 0, 1, 1, 0 } );
+                            verts[1] = hex_idx + dense::Vec< int, 4 >( { 0, 0, 1, 0 } );
+                            verts[2] = hex_idx + dense::Vec< int, 4 >( { 0, 1, 0, 0 } );
+                            verts[3] = hex_idx + dense::Vec< int, 4 >( { 0, 1, 1, 1 } );
+                            verts[4] = hex_idx + dense::Vec< int, 4 >( { 0, 0, 1, 1 } );
+                            verts[5] = hex_idx + dense::Vec< int, 4 >( { 0, 1, 0, 1 } );
+                        }
+
+                        aii += A( lidx, lidx );
+                        for ( int col = 0; col < 6; col++ )
+                        {
+                            if ( col == lidx )
+                                continue;
+
+                            bool is_parent = false;
+                            for ( int p = 0; p < num_parents; p++ )
+                            {
+                                if ( verts[col]( 1 ) == px[p] && verts[col]( 2 ) == py[p] &&
+                                     verts[col]( 3 ) == pr[p] )
+                                {
+                                    aip[p] += A( lidx, col );
+                                    is_parent = true;
+                                    break;
+                                }
+                            }
+                            if ( !is_parent )
+                            {
+                                aweak += A( lidx, col );
+                            }
+                        }
+                    }
+                }
+
+                a_ip_0( sd, x, y, r ) = aip[0];
+                a_ip_1( sd, x, y, r ) = aip[1];
+                a_ip_2( sd, x, y, r ) = aip[2];
+                a_ip_3( sd, x, y, r ) = aip[3];
+                a_denom( sd, x, y, r ) = aii + aweak;
+            } );
+
+        Kokkos::fence();
+
+        // Phase 2: Communicate across subdomain boundaries (SUM reduction).
+        communication::shell::send_recv(
+            domain, a_ip_0, communication::CommunicationReduction::SUM );
+        communication::shell::send_recv(
+            domain, a_ip_1, communication::CommunicationReduction::SUM );
+        communication::shell::send_recv(
+            domain, a_ip_2, communication::CommunicationReduction::SUM );
+        communication::shell::send_recv(
+            domain, a_ip_3, communication::CommunicationReduction::SUM );
+        communication::shell::send_recv(
+            domain, a_denom, communication::CommunicationReduction::SUM );
+
+        // Phase 3: Compute final weights with clamping.
+        Kokkos::parallel_for(
+            "amg_weights_phase3",
+            Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >( { 0, 0, 0, 0 }, { num_sd, nx, ny, nr } ),
+            KOKKOS_LAMBDA( const int sd, const int x, const int y, const int r ) {
+                const bool x_even = ( x % 2 == 0 );
+                const bool y_even = ( y % 2 == 0 );
+                const bool r_even = ( r % 2 == 0 );
+                if ( x_even && y_even && r_even )
+                    return;
+
+                const int num_parents = ( x_even && y_even ) ? 2 : 4;
+
+                ScalarT denom = a_denom( sd, x, y, r );
+                if ( denom != ScalarT( 0 ) )
+                {
+                    ScalarT w[4];
+                    w[0] = -a_ip_0( sd, x, y, r ) / denom;
+                    w[1] = -a_ip_1( sd, x, y, r ) / denom;
+                    w[2] = ( num_parents > 2 ) ? -a_ip_2( sd, x, y, r ) / denom : ScalarT( 0 );
+                    w[3] = ( num_parents > 2 ) ? -a_ip_3( sd, x, y, r ) / denom : ScalarT( 0 );
+
+                    // Clamp negative weights to zero and rescale.
+                    ScalarT sum = 0;
+                    for ( int p = 0; p < num_parents; p++ )
+                    {
+                        if ( w[p] < ScalarT( 0 ) )
+                            w[p] = 0;
+                        sum += w[p];
+                    }
+                    if ( sum > ScalarT( 0 ) )
+                    {
+                        for ( int p = 0; p < num_parents; p++ )
+                            w[p] /= sum;
+                    }
+
+                    // Limit extreme weight ratios: clamp each weight to [w_min_clamp, 1].
+                    constexpr ScalarT w_min_clamp = 0.05;
+                    bool              needs_reclamp = false;
+                    for ( int p = 0; p < num_parents; p++ )
+                    {
+                        if ( w[p] > ScalarT( 0 ) && w[p] < w_min_clamp )
+                        {
+                            w[p]          = w_min_clamp;
+                            needs_reclamp = true;
+                        }
+                    }
+                    if ( needs_reclamp )
+                    {
+                        sum = 0;
+                        for ( int p = 0; p < num_parents; p++ )
+                            sum += w[p];
+                        if ( sum > ScalarT( 0 ) )
+                        {
+                            for ( int p = 0; p < num_parents; p++ )
+                                w[p] /= sum;
+                        }
+                    }
+
+                    pw0( sd, x, y, r ) = w[0];
+                    pw1( sd, x, y, r ) = w[1];
+                    pw2( sd, x, y, r ) = w[2];
+                    pw3( sd, x, y, r ) = w[3];
+                }
+            } );
 
         Kokkos::fence();
     }
@@ -148,6 +418,116 @@ class TwoGridGCA
             wedge_local_vertex_indices[3] = hex_idx + dense::Vec< int, 4 >( { 0, 1, 1, 1 } );
             wedge_local_vertex_indices[4] = hex_idx + dense::Vec< int, 4 >( { 0, 0, 1, 1 } );
             wedge_local_vertex_indices[5] = hex_idx + dense::Vec< int, 4 >( { 0, 1, 0, 1 } );
+        }
+    }
+
+    /// @brief Finds the local index (0-5) of a node within a wedge given its relative position in the hex.
+    /// @param dx, dy, dr: relative position of the node within the hex (0 or 1 each)
+    /// @param wedge: wedge index (0 or 1)
+    /// @return local index 0-5, or -1 if the node is not in this wedge
+    KOKKOS_INLINE_FUNCTION
+    static int local_index_in_wedge( int dx, int dy, int dr, int wedge )
+    {
+        if ( wedge == 0 )
+        {
+            if ( dx + dy > 1 )
+                return -1;
+            int base = dr * 3;
+            if ( dx == 0 && dy == 0 )
+                return base;
+            if ( dx == 1 && dy == 0 )
+                return base + 1;
+            if ( dx == 0 && dy == 1 )
+                return base + 2;
+            return -1;
+        }
+        else
+        {
+            if ( dx + dy < 1 )
+                return -1;
+            int base = dr * 3;
+            if ( dx == 1 && dy == 1 )
+                return base;
+            if ( dx == 0 && dy == 1 )
+                return base + 1;
+            if ( dx == 1 && dy == 0 )
+                return base + 2;
+            return -1;
+        }
+    }
+
+    /// @brief Computes AMG-style interpolation weights at a fine node.
+    /// Assembles the stiffness row at the fine node from all surrounding wedges
+    /// within the coarse hex and computes weights as w_j = -a_ij / (a_ii + sum_weak).
+    /// Note: contributions from wedges in adjacent coarse hexes are not included;
+    /// they are implicitly lumped into the modified diagonal.
+    KOKKOS_INLINE_FUNCTION
+    void compute_amg_weights_at_node(
+        int                                        local_subdomain_id,
+        dense::Vec< int, 4 >                       fine_node_idx,
+        dense::Vec< int, 4 >                       coarse_hex_base_fine,
+        int                                         num_parents,
+        const dense::Vec< int, 4 > ( &parents )[4],
+        ScalarT ( &weights )[4] ) const
+    {
+        ScalarT a_ii    = 0;
+        ScalarT a_ij[4] = {};
+        ScalarT a_weak  = 0;
+
+        dense::Vec< int, 4 > fhs[8] = {
+            { 0, 0, 0, 0 }, { 0, 1, 0, 0 }, { 0, 0, 1, 0 }, { 0, 1, 1, 0 },
+            { 0, 0, 0, 1 }, { 0, 1, 0, 1 }, { 0, 0, 1, 1 }, { 0, 1, 1, 1 },
+        };
+
+        for ( int fh = 0; fh < 8; fh++ )
+        {
+            auto fhi = coarse_hex_base_fine + fhs[fh];
+            int  dx  = fine_node_idx( 1 ) - fhi( 1 );
+            int  dy  = fine_node_idx( 2 ) - fhi( 2 );
+            int  dr  = fine_node_idx( 3 ) - fhi( 3 );
+            if ( dx < 0 || dx > 1 || dy < 0 || dy > 1 || dr < 0 || dr > 1 )
+                continue;
+
+            for ( int w = 0; w < 2; w++ )
+            {
+                int lidx = local_index_in_wedge( dx, dy, dr, w );
+                if ( lidx < 0 )
+                    continue;
+
+                auto A = fine_op_.get_local_matrix( local_subdomain_id, fhi( 1 ), fhi( 2 ), fhi( 3 ), w );
+
+                dense::Vec< int, 4 > verts[6];
+                wedge_vertex_indices( fhi, w, verts );
+
+                a_ii += A( lidx, lidx );
+                for ( int col = 0; col < num_nodes_per_wedge; col++ )
+                {
+                    if ( col == lidx )
+                        continue;
+
+                    bool found = false;
+                    for ( int p = 0; p < num_parents; p++ )
+                    {
+                        if ( verts[col]( 1 ) == parents[p]( 1 ) && verts[col]( 2 ) == parents[p]( 2 ) &&
+                             verts[col]( 3 ) == parents[p]( 3 ) )
+                        {
+                            a_ij[p] += A( lidx, col );
+                            found = true;
+                            break;
+                        }
+                    }
+                    if ( !found )
+                    {
+                        a_weak += A( lidx, col );
+                    }
+                }
+            }
+        }
+
+        ScalarT denom = a_ii + a_weak;
+        for ( int p = 0; p < num_parents; p++ )
+        {
+            weights[p] = ( denom != ScalarT( 0 ) ) ? -a_ij[p] / denom : ScalarT( 0 );
         }
     }
 
@@ -246,6 +626,13 @@ class TwoGridGCA
                             {
                                 weights( 0 ) = 0.5;
                                 weights( 1 ) = 0.5;
+                            }
+                            else if ( interpolation_mode_ == InterpolationMode::OperatorDependent )
+                            {
+                                weights( 0 ) = parent_weight_0_( local_subdomain_id, fine_dof_idx( 1 ),
+                                                                  fine_dof_idx( 2 ), fine_dof_idx( 3 ) );
+                                weights( 1 ) = parent_weight_1_( local_subdomain_id, fine_dof_idx( 1 ),
+                                                                  fine_dof_idx( 2 ), fine_dof_idx( 3 ) );
                             }
                             else
                             {
@@ -375,6 +762,17 @@ class TwoGridGCA
                                     x1_idx_coarse,
                                     y1_idx_coarse,
                                     r_idx_coarse_top );
+                        }
+                        else if ( interpolation_mode_ == InterpolationMode::OperatorDependent )
+                        {
+                            P( fine_dof_lidx, coarse_dof_lindices[0] ) = parent_weight_0_(
+                                local_subdomain_id, fine_dof_idx( 1 ), fine_dof_idx( 2 ), fine_dof_idx( 3 ) );
+                            P( fine_dof_lidx, coarse_dof_lindices[1] ) = parent_weight_1_(
+                                local_subdomain_id, fine_dof_idx( 1 ), fine_dof_idx( 2 ), fine_dof_idx( 3 ) );
+                            P( fine_dof_lidx, coarse_dof_lindices[2] ) = parent_weight_2_(
+                                local_subdomain_id, fine_dof_idx( 1 ), fine_dof_idx( 2 ), fine_dof_idx( 3 ) );
+                            P( fine_dof_lidx, coarse_dof_lindices[3] ) = parent_weight_3_(
+                                local_subdomain_id, fine_dof_idx( 1 ), fine_dof_idx( 2 ), fine_dof_idx( 3 ) );
                         }
                         else
                         {
