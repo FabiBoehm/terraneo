@@ -294,16 +294,66 @@ std::pair< double, double > test( int min_level, int max_level, const std::share
 
     using VankaPrec = linalg::solvers::Vanka< Stokes >;
 
+    // ====== Test Vanka as standalone Richardson iteration ======
+    // This tests if Vanka actually reduces the residual when applied directly.
+
+    VankaPrec vanka_standalone(
+        domains[velocity_level],
+        coords_shell[velocity_level],
+        coords_radii[velocity_level],
+        1,      // 1 iteration per sweep
+        stok_vecs["tmp_2"],
+        0.7,    // omega (2/3 is optimal for Jacobi on Laplacian)
+        true );
+
+    // Start from zero
+    linalg::assign( u, 0 );
+
+    // Set boundary values on u
+    Kokkos::parallel_for(
+        "boundary init",
+        local_domain_md_range_policy_nodes( domains[velocity_level] ),
+        SolutionVelocityInterpolator(
+            coords_shell[velocity_level],
+            coords_radii[velocity_level],
+            u.block_1().grid_data(),
+            true ) );
+
+    std::cout << "=== Vanka standalone Richardson iteration ===" << std::endl;
+    for ( int sweep = 0; sweep < 20; ++sweep )
+    {
+        // Compute residual norm
+        linalg::apply( K, u, stok_vecs["tmp_0"] );
+        linalg::lincomb( stok_vecs["tmp_1"], { 1.0, -1.0 }, { f, stok_vecs["tmp_0"] } );
+        const double res_norm = std::sqrt( linalg::dot( stok_vecs["tmp_1"], stok_vecs["tmp_1"] ) );
+        const double res_vel  = linalg::norm_inf( stok_vecs["tmp_1"].block_1() );
+        const double res_pre  = linalg::norm_inf( stok_vecs["tmp_1"].block_2() );
+        std::cout << "sweep " << sweep << ": ||r|| = " << res_norm
+                  << "  vel_inf=" << res_vel << "  pre_inf=" << res_pre << std::endl;
+
+        // Apply one Vanka sweep
+        linalg::solvers::solve( vanka_standalone, K, u, f );
+    }
+
+    // Now run FGMRES with Vanka preconditioner
+    linalg::assign( u, 0 );
+    Kokkos::parallel_for(
+        "boundary init",
+        local_domain_md_range_policy_nodes( domains[velocity_level] ),
+        SolutionVelocityInterpolator(
+            coords_shell[velocity_level],
+            coords_radii[velocity_level],
+            u.block_1().grid_data(),
+            true ) );
+
     VankaPrec vanka_prec(
         domains[velocity_level],
         coords_shell[velocity_level],
         coords_radii[velocity_level],
         3,      // iterations
         stok_vecs["tmp_2"],
-        0.5,    // omega
+        0.7,    // omega
         true );
-
-    // Set up FGMRES outer solver with Vanka preconditioner.
 
     linalg::solvers::FGMRESOptions< ScalarType > fgmres_options;
     fgmres_options.restart                    = 20;
@@ -312,7 +362,6 @@ std::pair< double, double > test( int min_level, int max_level, const std::share
     fgmres_options.max_iterations              = 200;
 
     std::vector< VectorQ1IsoQ2Q1< ScalarType > > tmp_fgmres;
-    // FGMRES(m) needs 2*m+4 temp vectors
     for ( int i = 0; i < 2 * fgmres_options.restart + 4; i++ )
     {
         tmp_fgmres.push_back( stok_vecs["tmp_" + std::to_string( i + 2 )] );

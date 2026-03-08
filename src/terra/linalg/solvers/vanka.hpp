@@ -10,25 +10,24 @@
 
 namespace terra::linalg::solvers {
 
-/// @brief Additive Vanka smoother for Stokes-type saddle-point systems.
+/// @brief Vertex-centered additive Vanka smoother for Stokes-type saddle-point systems.
 ///
 /// Satisfies the SolverLike concept (see solver.hpp).
-/// Solves small local saddle-point systems per fine hex cell, coupling velocity and pressure DOFs.
+/// Iterates over fine grid vertices. For each vertex, assembles the fully assembled
+/// diagonal block from ALL cells sharing that vertex (up to 8 for interior nodes),
+/// solving a small local system:
+/// - 3x3 for velocity-only vertices
+/// - 4x4 saddle-point at coarse-grid-aligned vertices (velocity + pressure DOF)
 ///
-/// For each fine hex cell, the local system has:
-/// - 8 velocity nodes x VecDim components = VecDim*8 velocity DOFs
-/// - 8 coarse pressure nodes = 8 pressure DOFs
-/// - Total: VecDim*8 + 8 DOFs (32 for VecDim=3)
-///
-/// The smoother assembles and solves these local systems via LU factorization,
-/// then applies corrections additively (in parallel) with relaxation.
+/// Since each vertex is visited exactly once, corrections are applied directly
+/// without atomic operations or overlap weighting.
 ///
 /// @tparam StokesOperatorT The Stokes operator type (must satisfy Block2x2OperatorLike).
 template < Block2x2OperatorLike StokesOperatorT >
 class Vanka
 {
   public:
-    using OperatorType      = StokesOperatorT;
+    using OperatorType       = StokesOperatorT;
     using SolutionVectorType = SrcOf< OperatorType >;
     using RHSVectorType      = DstOf< OperatorType >;
     using ScalarType         = typename SolutionVectorType::ScalarType;
@@ -38,12 +37,9 @@ class Vanka
         "Vanka requires block 2-vectors (velocity + pressure)." );
 
   private:
-    static constexpr int VecDim      = 3;
-    static constexpr int num_vel_dofs = 8 * VecDim;
-    static constexpr int num_pre_dofs = 8;
-    static constexpr int N           = num_vel_dofs + num_pre_dofs;
+    static constexpr int VecDim = 3;
 
-    grid::shell::DistributedDomain     domain_fine_;
+    grid::shell::DistributedDomain       domain_fine_;
     grid::Grid3DDataVec< ScalarType, 3 > grid_;
     grid::Grid2DDataScalar< ScalarType > radii_;
 
@@ -53,6 +49,11 @@ class Vanka
 
     SolutionVectorType tmp_;
 
+    // Grid dimensions
+    int cells_x_;
+    int cells_y_;
+    int cells_r_;
+
     // Kernel views (set before each kernel launch)
     grid::Grid4DDataVec< ScalarType, VecDim > res_vel_;
     grid::Grid4DDataScalar< ScalarType >      res_pre_;
@@ -60,18 +61,9 @@ class Vanka
     grid::Grid4DDataScalar< ScalarType >      sol_pre_;
 
   public:
-    /// @brief Construct a Vanka smoother.
-    ///
-    /// @param domain_fine Fine grid distributed domain (velocity level).
-    /// @param grid Fine grid unit sphere coordinates.
-    /// @param radii Fine grid radial node positions.
-    /// @param iterations Number of Vanka smoothing iterations.
-    /// @param tmp Temporary vector for residual computation (must be allocated).
-    /// @param omega Relaxation parameter (typically 0.3-0.7 for additive Vanka).
-    /// @param treat_boundary If true, enforce Dirichlet boundary conditions.
     Vanka(
-        const grid::shell::DistributedDomain&       domain_fine,
-        const grid::Grid3DDataVec< ScalarType, 3 >& grid,
+        const grid::shell::DistributedDomain&        domain_fine,
+        const grid::Grid3DDataVec< ScalarType, 3 >&  grid,
         const grid::Grid2DDataScalar< ScalarType >&  radii,
         int                                          iterations,
         SolutionVectorType&                          tmp,
@@ -84,20 +76,12 @@ class Vanka
     , omega_( omega )
     , treat_boundary_( treat_boundary )
     , tmp_( tmp )
-    {}
+    {
+        cells_x_ = domain_fine.domain_info().subdomain_num_nodes_per_side_laterally() - 1;
+        cells_y_ = cells_x_;
+        cells_r_ = domain_fine.domain_info().subdomain_num_nodes_radially() - 1;
+    }
 
-    /// @brief Solve (smooth) the Stokes system using additive Vanka iteration.
-    ///
-    /// For each iteration:
-    /// 1. Compute global residual r = b - A*x
-    /// 2. For each fine hex cell (in parallel):
-    ///    a. Assemble local 32x32 saddle-point system
-    ///    b. Solve via LU factorization
-    ///    c. Scatter correction to global solution with relaxation omega
-    ///
-    /// @param A Stokes operator.
-    /// @param x Solution vector (velocity + pressure, updated in-place).
-    /// @param b Right-hand side vector.
     void solve_impl( OperatorType& A, SolutionVectorType& x, const RHSVectorType& b )
     {
         for ( int iter = 0; iter < iterations_; ++iter )
@@ -112,76 +96,153 @@ class Vanka
             sol_vel_ = x.block_1().grid_data();
             sol_pre_ = x.block_2().grid_data();
 
-            // Launch Vanka kernel over fine hex cells
+            // Launch kernel over fine grid VERTICES (not cells)
             Kokkos::parallel_for(
-                "vanka_smooth", grid::shell::local_domain_md_range_policy_cells( domain_fine_ ), *this );
+                "vanka_vertex", grid::shell::local_domain_md_range_policy_nodes( domain_fine_ ), *this );
             Kokkos::fence();
         }
     }
 
-    /// @brief Kokkos kernel: per-cell Vanka local solve.
+    /// @brief Kokkos kernel: per-vertex Vanka local solve.
     KOKKOS_INLINE_FUNCTION void
-        operator()( const int local_subdomain_id, const int x_cell, const int y_cell, const int r_cell ) const
+        operator()( const int sd, const int x, const int y, const int r ) const
     {
         using namespace fe::wedge;
 
-        constexpr int num_wedges = num_wedges_per_hex_cell;
-        constexpr int num_nodes  = num_nodes_per_wedge;
-
         // Wedge-to-hex node mapping
         constexpr int w2h[2][6] = { { 0, 1, 2, 4, 5, 6 }, { 3, 2, 1, 7, 6, 5 } };
-        constexpr int hex_ox[8] = { 0, 1, 0, 1, 0, 1, 0, 1 };
-        constexpr int hex_oy[8] = { 0, 0, 1, 1, 0, 0, 1, 1 };
-        constexpr int hex_or[8] = { 0, 0, 0, 0, 1, 1, 1, 1 };
 
-        // Local system matrix and RHS
-        dense::Mat< ScalarType, N, N > K;
-        dense::Vec< ScalarType, N >    rhs;
-        K.fill( 0.0 );
-        rhs.fill( 0.0 );
+        // Skip boundary nodes (Dirichlet BCs - correction is zero)
+        if ( treat_boundary_ && ( r == 0 || r == cells_r_ ) )
+            return;
 
-        // ===== 1. Gather geometry =====
+        const bool is_coarse = ( x % 2 == 0 ) && ( y % 2 == 0 ) && ( r % 2 == 0 );
 
-        dense::Vec< ScalarType, 3 > wedge_phy_surf[num_wedges][num_nodes_per_wedge_surface] = {};
-        wedge_surface_physical_coords( wedge_phy_surf, grid_, local_subdomain_id, x_cell, y_cell );
+        // ===== 1. Assemble velocity diagonal from all cells sharing this vertex =====
+        // For vector Laplacian, K_vel(d1,d2) = a * delta(d1,d2), so we just compute scalar a.
 
-        const ScalarType r_1 = radii_( local_subdomain_id, r_cell );
-        const ScalarType r_2 = radii_( local_subdomain_id, r_cell + 1 );
+        ScalarType a = 0.0;      // assembled velocity diagonal
+        ScalarType b[VecDim];    // assembled coupling velocity->pressure (only for coarse nodes)
+        for ( int d = 0; d < VecDim; ++d )
+            b[d] = 0.0;
 
-        // ===== 2. Assemble A_uu (velocity-velocity block, VectorLaplace) =====
-
+        // Loop over all cells containing vertex (x, y, r)
+        for ( int dx = -1; dx <= 0; ++dx )
         {
-            constexpr auto              num_quad = quadrature::quad_felippa_3x2_num_quad_points;
-            dense::Vec< ScalarType, 3 > qp[num_quad];
-            ScalarType                  qw[num_quad];
-            quadrature::quad_felippa_3x2_quad_points( qp );
-            quadrature::quad_felippa_3x2_quad_weights( qw );
+            const int cx = x + dx;
+            if ( cx < 0 || cx >= cells_x_ )
+                continue;
 
-            for ( int wedge = 0; wedge < num_wedges; ++wedge )
+            for ( int dy = -1; dy <= 0; ++dy )
             {
-                for ( int q = 0; q < num_quad; ++q )
-                {
-                    const auto J       = jac( wedge_phy_surf[wedge], r_1, r_2, qp[q] );
-                    const auto det_val = J.det();
-                    const auto abs_det = Kokkos::abs( det_val );
-                    const auto J_inv_t = J.inv_transposed( det_val );
+                const int cy = y + dy;
+                if ( cy < 0 || cy >= cells_y_ )
+                    continue;
 
-                    dense::Vec< ScalarType, 3 > grad_phy[num_nodes];
-                    for ( int k = 0; k < num_nodes; ++k )
+                // Gather lateral surface geometry for cell (cx, cy)
+                dense::Vec< ScalarType, 3 > phy_surf[2][num_nodes_per_wedge_surface] = {};
+                wedge_surface_physical_coords( phy_surf, grid_, sd, cx, cy );
+
+                for ( int dr = -1; dr <= 0; ++dr )
+                {
+                    const int cr = r + dr;
+                    if ( cr < 0 || cr >= cells_r_ )
+                        continue;
+
+                    // Hex node index of (x,y,r) within cell (cx, cy, cr)
+                    const int hi = 4 * ( r - cr ) + 2 * ( y - cy ) + ( x - cx );
+
+                    const ScalarType r_1 = radii_( sd, cr );
+                    const ScalarType r_2 = radii_( sd, cr + 1 );
+
+                    // --- Velocity diagonal contribution (quad_felippa_3x2) ---
                     {
-                        grad_phy[k] = J_inv_t * grad_shape( k, qp[q] );
+                        constexpr auto              nq = quadrature::quad_felippa_3x2_num_quad_points;
+                        dense::Vec< ScalarType, 3 > qp[nq];
+                        ScalarType                  qw[nq];
+                        quadrature::quad_felippa_3x2_quad_points( qp );
+                        quadrature::quad_felippa_3x2_quad_weights( qw );
+
+                        for ( int wedge = 0; wedge < 2; ++wedge )
+                        {
+                            // Find local index of hi in this wedge
+                            int local_i = -1;
+                            for ( int k = 0; k < 6; ++k )
+                            {
+                                if ( w2h[wedge][k] == hi )
+                                {
+                                    local_i = k;
+                                    break;
+                                }
+                            }
+                            if ( local_i < 0 )
+                                continue;
+
+                            for ( int q = 0; q < nq; ++q )
+                            {
+                                const auto J       = jac( phy_surf[wedge], r_1, r_2, qp[q] );
+                                const auto det_val = J.det();
+                                const auto abs_det = Kokkos::abs( det_val );
+                                const auto J_inv_t = J.inv_transposed( det_val );
+
+                                const auto grad_phy = J_inv_t * grad_shape( local_i, qp[q] );
+                                a += qw[q] * grad_phy.dot( grad_phy ) * abs_det;
+                            }
+                        }
                     }
 
-                    for ( int i = 0; i < num_nodes; ++i )
+                    // --- Coupling contribution (quad_felippa_1x1) ---
+                    if ( is_coarse )
                     {
-                        const int hi = w2h[wedge][i];
-                        for ( int j = 0; j < num_nodes; ++j )
+                        const int px = x / 2;
+                        const int py = y / 2;
+                        const int pr = r / 2;
+
+                        // Pressure hex node within coarse cell (cx/2, cy/2, cr/2)
+                        const int hj = 4 * ( pr - cr / 2 ) + 2 * ( py - cy / 2 ) + ( px - cx / 2 );
+
+                        // Check hj is valid (0-7)
+                        if ( hj < 0 || hj > 7 )
+                            continue;
+
+                        constexpr auto              nq = quadrature::quad_felippa_1x1_num_quad_points;
+                        dense::Vec< ScalarType, 3 > qp[nq];
+                        ScalarType                  qw[nq];
+                        quadrature::quad_felippa_1x1_quad_points( qp );
+                        quadrature::quad_felippa_1x1_quad_weights( qw );
+
+                        const int fine_radial_wedge_index = cr % 2;
+
+                        for ( int wedge = 0; wedge < 2; ++wedge )
                         {
-                            const int        hj  = w2h[wedge][j];
-                            const ScalarType val = qw[q] * grad_phy[i].dot( grad_phy[j] ) * abs_det;
-                            for ( int d = 0; d < VecDim; ++d )
+                            // Both hi and hj must be in this wedge
+                            int local_i = -1, local_j = -1;
+                            for ( int k = 0; k < 6; ++k )
                             {
-                                K( hi * VecDim + d, hj * VecDim + d ) += val;
+                                if ( w2h[wedge][k] == hi )
+                                    local_i = k;
+                                if ( w2h[wedge][k] == hj )
+                                    local_j = k;
+                            }
+                            if ( local_i < 0 || local_j < 0 )
+                                continue;
+
+                            const int fine_lat_wedge_index = fine_lateral_wedge_idx( cx, cy, wedge );
+
+                            for ( int q = 0; q < nq; ++q )
+                            {
+                                const auto J       = jac( phy_surf[wedge], r_1, r_2, qp[q] );
+                                const auto det_val = Kokkos::abs( J.det() );
+                                const auto J_inv_t = J.inv().transposed();
+
+                                const auto grad_i = grad_shape( local_i, qp[q] );
+                                const auto shape_j = shape_coarse(
+                                    local_j, fine_radial_wedge_index, fine_lat_wedge_index, qp[q] );
+
+                                for ( int d = 0; d < VecDim; ++d )
+                                {
+                                    b[d] += qw[q] * ( -( J_inv_t * grad_i )( d ) * shape_j ) * det_val;
+                                }
                             }
                         }
                     }
@@ -189,150 +250,58 @@ class Vanka
             }
         }
 
-        // ===== 3. Assemble A_up and A_pu (gradient/divergence coupling) =====
-        // Uses the same quad_felippa_1x1 rule as the gradient/divergence operators to
-        // ensure the local system matches the global operator. With 1x1 quadrature, the
-        // coupling block has rank at most 6 (< 8 needed), so we add pressure regularization
-        // after assembly to make the saddle-point system non-singular.
+        // ===== 2. Gather residual =====
+        ScalarType rhs_vel[VecDim];
+        for ( int d = 0; d < VecDim; ++d )
+            rhs_vel[d] = res_vel_( sd, x, y, r, d );
 
+        // ===== 3. Solve and apply correction =====
+
+        if ( a <= 0.0 )
+            return; // degenerate node, skip
+
+        if ( is_coarse )
         {
-            constexpr auto              num_quad = quadrature::quad_felippa_1x1_num_quad_points;
-            dense::Vec< ScalarType, 3 > qp[num_quad];
-            ScalarType                  qw[num_quad];
-            quadrature::quad_felippa_1x1_quad_points( qp );
-            quadrature::quad_felippa_1x1_quad_weights( qw );
+            // 4x4 saddle-point system:
+            // [aI   b ] [du]   [r_u]
+            // [b^T -ε ] [dp] = [r_p]
+            //
+            // where aI is a*I_{3x3}, b is 3x1 coupling vector
 
-            const int fine_radial_wedge_index = r_cell % 2;
+            const ScalarType rhs_pre = res_pre_( sd, x / 2, y / 2, r / 2 );
+            const ScalarType eps     = 1e-2 * a;
+            const ScalarType a_inv   = 1.0 / a;
 
-            for ( int q = 0; q < num_quad; ++q )
-            {
-                for ( int wedge = 0; wedge < num_wedges; ++wedge )
-                {
-                    const int fine_lat_wedge_index = fine_lateral_wedge_idx( x_cell, y_cell, wedge );
+            // Schur complement: S = b^T * (aI)^{-1} * b + eps = (b.b)/a + eps
+            ScalarType b_dot_b = 0.0;
+            for ( int d = 0; d < VecDim; ++d )
+                b_dot_b += b[d] * b[d];
 
-                    const auto J       = jac( wedge_phy_surf[wedge], r_1, r_2, qp[q] );
-                    const auto det_val = Kokkos::abs( J.det() );
-                    const auto J_inv_t = J.inv().transposed();
+            const ScalarType S = b_dot_b * a_inv + eps;
 
-                    for ( int i = 0; i < num_nodes; ++i )
-                    {
-                        const int  hi     = w2h[wedge][i];
-                        const auto grad_i = grad_shape( i, qp[q] );
+            // dp = (b^T * (aI)^{-1} * r_u - r_p) / S
+            ScalarType bT_ainv_ru = 0.0;
+            for ( int d = 0; d < VecDim; ++d )
+                bT_ainv_ru += b[d] * rhs_vel[d] * a_inv;
 
-                        for ( int j = 0; j < num_nodes; ++j )
-                        {
-                            const int        hj      = w2h[wedge][j];
-                            const ScalarType shape_j = shape_coarse(
-                                j, fine_radial_wedge_index, fine_lat_wedge_index, qp[q] );
+            const ScalarType dp = ( bT_ainv_ru - rhs_pre ) / S;
 
-                            for ( int d = 0; d < VecDim; ++d )
-                            {
-                                const ScalarType val =
-                                    qw[q] * ( -( J_inv_t * grad_i )( d ) * shape_j ) * det_val;
-                                K( hi * VecDim + d, num_vel_dofs + hj ) += val; // A_up (gradient)
-                                K( num_vel_dofs + hj, hi * VecDim + d ) += val; // A_pu (divergence)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // ===== 4. Extract local residual =====
-
-        // Velocity residual from fine grid
-        for ( int i = 0; i < 8; ++i )
-        {
+            // du_d = (r_u_d - b_d * dp) / a
             for ( int d = 0; d < VecDim; ++d )
             {
-                rhs( i * VecDim + d ) = res_vel_(
-                    local_subdomain_id, x_cell + hex_ox[i], y_cell + hex_oy[i], r_cell + hex_or[i], d );
+                const ScalarType du = ( rhs_vel[d] - b[d] * dp ) * a_inv;
+                sol_vel_( sd, x, y, r, d ) += omega_ * du;
             }
+            sol_pre_( sd, x / 2, y / 2, r / 2 ) += omega_ * dp;
         }
-
-        // Pressure residual from coarse grid
-        for ( int i = 0; i < 8; ++i )
+        else
         {
-            rhs( num_vel_dofs + i ) = res_pre_(
-                local_subdomain_id, x_cell / 2 + hex_ox[i], y_cell / 2 + hex_oy[i], r_cell / 2 + hex_or[i] );
-        }
-
-        // ===== 5. Apply boundary treatment =====
-
-        if ( treat_boundary_ )
-        {
-            const bool is_inner = ( r_cell == 0 );
-            const bool is_outer = ( r_cell + 1 == static_cast< int >( radii_.extent( 1 ) ) - 1 );
-
-            if ( is_inner || is_outer )
-            {
-                for ( int i = 0; i < 8; ++i )
-                {
-                    const bool is_boundary_node =
-                        ( is_inner && hex_or[i] == 0 ) || ( is_outer && hex_or[i] == 1 );
-
-                    if ( is_boundary_node )
-                    {
-                        for ( int d = 0; d < VecDim; ++d )
-                        {
-                            const int dof = i * VecDim + d;
-                            // Zero out row and column, set diagonal to 1
-                            for ( int k = 0; k < N; ++k )
-                            {
-                                K( dof, k ) = 0.0;
-                                K( k, dof ) = 0.0;
-                            }
-                            K( dof, dof ) = 1.0;
-                            rhs( dof )    = 0.0;
-                        }
-                    }
-                }
-            }
-        }
-
-        // ===== 6. Pressure regularization =====
-        // With quad_felippa_1x1 (1 point per wedge), the coupling block has rank ~6 < 8,
-        // so the saddle-point system is rank-deficient. Add a small negative diagonal
-        // perturbation to the pressure block to regularize the system:
-        //   [A_uu  A_up ] [du]   [r_u]
-        //   [A_pu  -εI  ] [dp] = [r_p]
-        {
-            ScalarType max_diag = 0.0;
-            for ( int i = 0; i < num_vel_dofs; ++i )
-            {
-                max_diag = Kokkos::fmax( max_diag, Kokkos::abs( K( i, i ) ) );
-            }
-            const ScalarType eps = 1e-2 * max_diag;
-            for ( int i = 0; i < num_pre_dofs; ++i )
-            {
-                K( num_vel_dofs + i, num_vel_dofs + i ) -= eps;
-            }
-        }
-
-        // ===== 7. Solve local system via LU =====
-        dense::lu_solve( K, rhs );
-
-        // ===== 8. Scatter corrections =====
-
-        // Velocity corrections to fine grid
-        for ( int i = 0; i < 8; ++i )
-        {
+            // 3x3 diagonal system: du_d = r_u_d / a
+            const ScalarType a_inv = 1.0 / a;
             for ( int d = 0; d < VecDim; ++d )
             {
-                Kokkos::atomic_add(
-                    &sol_vel_(
-                        local_subdomain_id, x_cell + hex_ox[i], y_cell + hex_oy[i], r_cell + hex_or[i], d ),
-                    omega_ * rhs( i * VecDim + d ) );
+                sol_vel_( sd, x, y, r, d ) += omega_ * rhs_vel[d] * a_inv;
             }
-        }
-
-        // Pressure corrections to coarse grid
-        for ( int i = 0; i < 8; ++i )
-        {
-            Kokkos::atomic_add(
-                &sol_pre_(
-                    local_subdomain_id, x_cell / 2 + hex_ox[i], y_cell / 2 + hex_oy[i], r_cell / 2 + hex_or[i] ),
-                omega_ * rhs( num_vel_dofs + i ) );
         }
     }
 };
