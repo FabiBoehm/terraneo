@@ -190,6 +190,10 @@ class Vanka
         }
 
         // ===== 3. Assemble A_up and A_pu (gradient/divergence coupling) =====
+        // Uses the same quad_felippa_1x1 rule as the gradient/divergence operators to
+        // ensure the local system matches the global operator. With 1x1 quadrature, the
+        // coupling block has rank at most 6 (< 8 needed), so we add pressure regularization
+        // after assembly to make the saddle-point system non-singular.
 
         {
             constexpr auto              num_quad = quadrature::quad_felippa_1x1_num_quad_points;
@@ -286,11 +290,29 @@ class Vanka
             }
         }
 
-        // ===== 6. Solve local system via LU =====
+        // ===== 6. Pressure regularization =====
+        // With quad_felippa_1x1 (1 point per wedge), the coupling block has rank ~6 < 8,
+        // so the saddle-point system is rank-deficient. Add a small negative diagonal
+        // perturbation to the pressure block to regularize the system:
+        //   [A_uu  A_up ] [du]   [r_u]
+        //   [A_pu  -εI  ] [dp] = [r_p]
+        {
+            ScalarType max_diag = 0.0;
+            for ( int i = 0; i < num_vel_dofs; ++i )
+            {
+                max_diag = Kokkos::fmax( max_diag, Kokkos::abs( K( i, i ) ) );
+            }
+            const ScalarType eps = 1e-2 * max_diag;
+            for ( int i = 0; i < num_pre_dofs; ++i )
+            {
+                K( num_vel_dofs + i, num_vel_dofs + i ) -= eps;
+            }
+        }
 
+        // ===== 7. Solve local system via LU =====
         dense::lu_solve( K, rhs );
 
-        // ===== 7. Scatter corrections =====
+        // ===== 8. Scatter corrections =====
 
         // Velocity corrections to fine grid
         for ( int i = 0; i < 8; ++i )

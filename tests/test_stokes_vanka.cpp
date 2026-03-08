@@ -298,9 +298,9 @@ std::pair< double, double > test( int min_level, int max_level, const std::share
         domains[velocity_level],
         coords_shell[velocity_level],
         coords_radii[velocity_level],
-        3,     // iterations
+        3,      // iterations
         stok_vecs["tmp_2"],
-        0.5,   // omega
+        0.5,    // omega
         true );
 
     // Set up FGMRES outer solver with Vanka preconditioner.
