@@ -15,12 +15,12 @@ namespace terra::linalg::solvers {
 /// Satisfies the SolverLike concept (see solver.hpp).
 /// Iterates over fine grid vertices. For each vertex, assembles the fully assembled
 /// diagonal block from ALL cells sharing that vertex (up to 8 for interior nodes),
-/// solving a small local system:
-/// - 3x3 for velocity-only vertices
-/// - 4x4 saddle-point at coarse-grid-aligned vertices (velocity + pressure DOF)
+/// solving a small 11x11 local saddle-point system:
+/// - 3 velocity DOFs (diagonal due to vector Laplacian structure)
+/// - 8 pressure DOFs from the containing coarse cell
 ///
-/// Since each vertex is visited exactly once, corrections are applied directly
-/// without atomic operations or overlap weighting.
+/// Pressure corrections are only applied at coarse-grid-aligned vertices to
+/// avoid double-counting.
 ///
 /// @tparam StokesOperatorT The Stokes operator type (must satisfy Block2x2OperatorLike).
 template < Block2x2OperatorLike StokesOperatorT >
@@ -37,7 +37,8 @@ class Vanka
         "Vanka requires block 2-vectors (velocity + pressure)." );
 
   private:
-    static constexpr int VecDim = 3;
+    static constexpr int VecDim   = 3;
+    static constexpr int SYS_SIZE = 11; // 3 velocity + 8 pressure
 
     grid::shell::DistributedDomain       domain_fine_;
     grid::Grid3DDataVec< ScalarType, 3 > grid_;
@@ -103,7 +104,7 @@ class Vanka
         }
     }
 
-    /// @brief Kokkos kernel: per-vertex Vanka local solve.
+    /// @brief Kokkos kernel: per-vertex Vanka local solve with 11x11 saddle-point system.
     KOKKOS_INLINE_FUNCTION void
         operator()( const int sd, const int x, const int y, const int r ) const
     {
@@ -118,15 +119,19 @@ class Vanka
 
         const bool is_coarse = ( x % 2 == 0 ) && ( y % 2 == 0 ) && ( r % 2 == 0 );
 
-        // ===== 1. Assemble velocity diagonal from all cells sharing this vertex =====
-        // For vector Laplacian, K_vel(d1,d2) = a * delta(d1,d2), so we just compute scalar a.
+        // Determine containing coarse cell for pressure DOFs
+        const int ccx = Kokkos::min( x / 2, cells_x_ / 2 - 1 );
+        const int ccy = Kokkos::min( y / 2, cells_y_ / 2 - 1 );
+        const int ccr = Kokkos::min( r / 2, cells_r_ / 2 - 1 );
 
-        ScalarType a = 0.0;      // assembled velocity diagonal
-        ScalarType b[VecDim];    // assembled coupling velocity->pressure (only for coarse nodes)
-        for ( int d = 0; d < VecDim; ++d )
-            b[d] = 0.0;
+        // ===== 1. Assemble local system entries =====
+        // Velocity diagonal: K_vel(d1,d2) = a * delta(d1,d2)
+        ScalarType a = 0.0;
 
-        // Loop over all cells containing vertex (x, y, r)
+        // Coupling matrix B(d, pk) for d=0..2, pk=0..7
+        ScalarType B[VecDim][8] = {};
+
+        // Loop over all fine cells containing vertex (x, y, r)
         for ( int dx = -1; dx <= 0; ++dx )
         {
             const int cx = x + dx;
@@ -165,7 +170,6 @@ class Vanka
 
                         for ( int wedge = 0; wedge < 2; ++wedge )
                         {
-                            // Find local index of hi in this wedge
                             int local_i = -1;
                             for ( int k = 0; k < 6; ++k )
                             {
@@ -192,18 +196,10 @@ class Vanka
                     }
 
                     // --- Coupling contribution (quad_felippa_1x1) ---
-                    if ( is_coarse )
                     {
-                        const int px = x / 2;
-                        const int py = y / 2;
-                        const int pr = r / 2;
-
-                        // Pressure hex node within coarse cell (cx/2, cy/2, cr/2)
-                        const int hj = 4 * ( pr - cr / 2 ) + 2 * ( py - cy / 2 ) + ( px - cx / 2 );
-
-                        // Check hj is valid (0-7)
-                        if ( hj < 0 || hj > 7 )
-                            continue;
+                        const int cell_ccx = cx / 2;
+                        const int cell_ccy = cy / 2;
+                        const int cell_ccr = cr / 2;
 
                         constexpr auto              nq = quadrature::quad_felippa_1x1_num_quad_points;
                         dense::Vec< ScalarType, 3 > qp[nq];
@@ -213,35 +209,61 @@ class Vanka
 
                         const int fine_radial_wedge_index = cr % 2;
 
-                        for ( int wedge = 0; wedge < 2; ++wedge )
+                        // Loop over pressure nodes of this cell's coarse cell
+                        for ( int pox = 0; pox <= 1; ++pox )
+                        for ( int poy = 0; poy <= 1; ++poy )
+                        for ( int por = 0; por <= 1; ++por )
                         {
-                            // Both hi and hj must be in this wedge
-                            int local_i = -1, local_j = -1;
-                            for ( int k = 0; k < 6; ++k )
-                            {
-                                if ( w2h[wedge][k] == hi )
-                                    local_i = k;
-                                if ( w2h[wedge][k] == hj )
-                                    local_j = k;
-                            }
-                            if ( local_i < 0 || local_j < 0 )
+                            // Pressure node in global coarse coords
+                            const int px = cell_ccx + pox;
+                            const int py = cell_ccy + poy;
+                            const int pr = cell_ccr + por;
+
+                            // Map to local pressure index in our 8-DOF block
+                            const int lox = px - ccx;
+                            const int loy = py - ccy;
+                            const int lor = pr - ccr;
+                            if ( lox < 0 || lox > 1 || loy < 0 || loy > 1 || lor < 0 || lor > 1 )
                                 continue;
+                            const int pk = 4 * lor + 2 * loy + lox;
 
-                            const int fine_lat_wedge_index = fine_lateral_wedge_idx( cx, cy, wedge );
+                            // Hex node of pressure DOF within fine cell
+                            const int hj = 4 * por + 2 * poy + pox;
 
-                            for ( int q = 0; q < nq; ++q )
+                            for ( int wedge = 0; wedge < 2; ++wedge )
                             {
-                                const auto J       = jac( phy_surf[wedge], r_1, r_2, qp[q] );
-                                const auto det_val = Kokkos::abs( J.det() );
-                                const auto J_inv_t = J.inv().transposed();
-
-                                const auto grad_i = grad_shape( local_i, qp[q] );
-                                const auto shape_j = shape_coarse(
-                                    local_j, fine_radial_wedge_index, fine_lat_wedge_index, qp[q] );
-
-                                for ( int d = 0; d < VecDim; ++d )
+                                // Both hi and hj must be in this wedge
+                                int local_i = -1, local_j = -1;
+                                for ( int k = 0; k < 6; ++k )
                                 {
-                                    b[d] += qw[q] * ( -( J_inv_t * grad_i )( d ) * shape_j ) * det_val;
+                                    if ( w2h[wedge][k] == hi )
+                                        local_i = k;
+                                    if ( w2h[wedge][k] == hj )
+                                        local_j = k;
+                                }
+                                if ( local_i < 0 || local_j < 0 )
+                                    continue;
+
+                                const int fine_lat_wedge_index =
+                                    fine_lateral_wedge_idx( cx, cy, wedge );
+
+                                for ( int q = 0; q < nq; ++q )
+                                {
+                                    const auto J = jac( phy_surf[wedge], r_1, r_2, qp[q] );
+                                    const auto det_val = Kokkos::abs( J.det() );
+                                    const auto J_inv_t = J.inv().transposed();
+
+                                    const auto grad_i  = grad_shape( local_i, qp[q] );
+                                    const auto shape_j = shape_coarse(
+                                        local_j, fine_radial_wedge_index, fine_lat_wedge_index,
+                                        qp[q] );
+
+                                    for ( int d = 0; d < VecDim; ++d )
+                                    {
+                                        B[d][pk] +=
+                                            qw[q] *
+                                            ( -( J_inv_t * grad_i )( d ) * shape_j ) * det_val;
+                                    }
                                 }
                             }
                         }
@@ -250,58 +272,60 @@ class Vanka
             }
         }
 
-        // ===== 2. Gather residual =====
-        ScalarType rhs_vel[VecDim];
-        for ( int d = 0; d < VecDim; ++d )
-            rhs_vel[d] = res_vel_( sd, x, y, r, d );
-
-        // ===== 3. Solve and apply correction =====
-
+        // ===== 2. Build and solve 11x11 local system =====
         if ( a <= 0.0 )
             return; // degenerate node, skip
 
+        dense::Mat< ScalarType, SYS_SIZE, SYS_SIZE > M;
+        dense::Vec< ScalarType, SYS_SIZE >           rhs;
+        M.fill( 0.0 );
+
+        // Velocity block: M(d,d) = a
+        for ( int d = 0; d < VecDim; ++d )
+            M( d, d ) = a;
+
+        // Coupling blocks: M(d, 3+pk) = B(d,pk) and M(3+pk, d) = B(d,pk)
+        for ( int d = 0; d < VecDim; ++d )
+            for ( int pk = 0; pk < 8; ++pk )
+            {
+                M( d, 3 + pk )     = B[d][pk];
+                M( 3 + pk, d ) = B[d][pk];
+            }
+
+        // Pressure stabilization: M(3+pk, 3+pk) = -eps
+        const ScalarType eps = 1e-2 * a;
+        for ( int pk = 0; pk < 8; ++pk )
+            M( 3 + pk, 3 + pk ) = -eps;
+
+        // Gather residual
+        for ( int d = 0; d < VecDim; ++d )
+            rhs( d ) = res_vel_( sd, x, y, r, d );
+
+        for ( int pk = 0; pk < 8; ++pk )
+        {
+            const int lox = pk & 1;
+            const int loy = ( pk >> 1 ) & 1;
+            const int lor = ( pk >> 2 ) & 1;
+            rhs( 3 + pk ) = res_pre_( sd, ccx + lox, ccy + loy, ccr + lor );
+        }
+
+        // Solve the 11x11 system in-place
+        dense::lu_solve( M, rhs );
+
+        // ===== 3. Apply corrections =====
+
+        // Velocity correction at ALL vertices
+        for ( int d = 0; d < VecDim; ++d )
+            sol_vel_( sd, x, y, r, d ) += omega_ * rhs( d );
+
+        // Pressure correction ONLY at coarse-aligned vertices (one pressure node)
         if ( is_coarse )
         {
-            // 4x4 saddle-point system:
-            // [aI   b ] [du]   [r_u]
-            // [b^T -ε ] [dp] = [r_p]
-            //
-            // where aI is a*I_{3x3}, b is 3x1 coupling vector
-
-            const ScalarType rhs_pre = res_pre_( sd, x / 2, y / 2, r / 2 );
-            const ScalarType eps     = 1e-2 * a;
-            const ScalarType a_inv   = 1.0 / a;
-
-            // Schur complement: S = b^T * (aI)^{-1} * b + eps = (b.b)/a + eps
-            ScalarType b_dot_b = 0.0;
-            for ( int d = 0; d < VecDim; ++d )
-                b_dot_b += b[d] * b[d];
-
-            const ScalarType S = b_dot_b * a_inv + eps;
-
-            // dp = (b^T * (aI)^{-1} * r_u - r_p) / S
-            ScalarType bT_ainv_ru = 0.0;
-            for ( int d = 0; d < VecDim; ++d )
-                bT_ainv_ru += b[d] * rhs_vel[d] * a_inv;
-
-            const ScalarType dp = ( bT_ainv_ru - rhs_pre ) / S;
-
-            // du_d = (r_u_d - b_d * dp) / a
-            for ( int d = 0; d < VecDim; ++d )
-            {
-                const ScalarType du = ( rhs_vel[d] - b[d] * dp ) * a_inv;
-                sol_vel_( sd, x, y, r, d ) += omega_ * du;
-            }
-            sol_pre_( sd, x / 2, y / 2, r / 2 ) += omega_ * dp;
-        }
-        else
-        {
-            // 3x3 diagonal system: du_d = r_u_d / a
-            const ScalarType a_inv = 1.0 / a;
-            for ( int d = 0; d < VecDim; ++d )
-            {
-                sol_vel_( sd, x, y, r, d ) += omega_ * rhs_vel[d] * a_inv;
-            }
+            const int lox = x / 2 - ccx;
+            const int loy = y / 2 - ccy;
+            const int lor = r / 2 - ccr;
+            const int pk  = 4 * lor + 2 * loy + lox;
+            sol_pre_( sd, x / 2, y / 2, r / 2 ) += omega_ * rhs( 3 + pk );
         }
     }
 };
