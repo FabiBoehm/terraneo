@@ -179,8 +179,8 @@ std::pair< double, double > test( int min_level, int max_level, const std::share
     std::map< std::string, VectorQ1IsoQ2Q1< ScalarType > > stok_vecs;
     std::vector< std::string >                             stok_vec_names = { "u", "f", "solution", "error" };
 
-    // FGMRES needs 2*m+4 vectors for restart m. With m=20, that's 44 vectors.
-    constexpr int num_stok_tmps = 46;
+    // FGMRES needs 2*m+4 vectors for restart m. With m=30, that's 64 vectors.
+    constexpr int num_stok_tmps = 66;
 
     for ( int i = 0; i < num_stok_tmps; i++ )
     {
@@ -303,7 +303,7 @@ std::pair< double, double > test( int min_level, int max_level, const std::share
         coords_radii[velocity_level],
         1,      // 1 iteration per sweep
         stok_vecs["tmp_2"],
-        0.7,    // omega (2/3 is optimal for Jacobi on Laplacian)
+        0.7,    // omega
         true );
 
     // Start from zero
@@ -356,7 +356,7 @@ std::pair< double, double > test( int min_level, int max_level, const std::share
         true );
 
     linalg::solvers::FGMRESOptions< ScalarType > fgmres_options;
-    fgmres_options.restart                    = 20;
+    fgmres_options.restart                    = 30;
     fgmres_options.relative_residual_tolerance = 1e-8;
     fgmres_options.absolute_residual_tolerance = 1e-12;
     fgmres_options.max_iterations              = 200;
