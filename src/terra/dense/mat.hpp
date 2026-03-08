@@ -402,4 +402,72 @@ std::ostream& operator<<( std::ostream& os, const Mat< T, Rows, Cols >& A )
     return os;
 }
 
+/// @brief Solve A*x = b in-place using Gaussian elimination with partial pivoting.
+///
+/// On exit, b contains the solution x. The matrix A is destroyed.
+///
+/// @tparam T Scalar type.
+/// @tparam N System size.
+/// @param A [inout] The system matrix (destroyed on exit).
+/// @param b [inout] The right-hand side vector (contains solution on exit).
+template < typename T, int N >
+KOKKOS_INLINE_FUNCTION void lu_solve( Mat< T, N, N >& A, Vec< T, N >& b )
+{
+    static_assert( N > 0, "System size must be positive" );
+
+    // Forward elimination with partial pivoting
+    for ( int k = 0; k < N; ++k )
+    {
+        // Find pivot
+        int max_row = k;
+        T   max_val = Kokkos::abs( A( k, k ) );
+        for ( int i = k + 1; i < N; ++i )
+        {
+            const T val = Kokkos::abs( A( i, k ) );
+            if ( val > max_val )
+            {
+                max_val = val;
+                max_row = i;
+            }
+        }
+
+        // Swap rows
+        if ( max_row != k )
+        {
+            for ( int j = 0; j < N; ++j )
+            {
+                const T tmp = A( k, j );
+                A( k, j )       = A( max_row, j );
+                A( max_row, j ) = tmp;
+            }
+            const T tmp = b( k );
+            b( k )       = b( max_row );
+            b( max_row ) = tmp;
+        }
+
+        // Eliminate below pivot
+        const T pivot = A( k, k );
+        for ( int i = k + 1; i < N; ++i )
+        {
+            const T factor = A( i, k ) / pivot;
+            for ( int j = k + 1; j < N; ++j )
+            {
+                A( i, j ) -= factor * A( k, j );
+            }
+            b( i ) -= factor * b( k );
+        }
+    }
+
+    // Back substitution
+    for ( int i = N - 1; i >= 0; --i )
+    {
+        T sum = b( i );
+        for ( int j = i + 1; j < N; ++j )
+        {
+            sum -= A( i, j ) * b( j );
+        }
+        b( i ) = sum / A( i, i );
+    }
+}
+
 } // namespace terra::dense

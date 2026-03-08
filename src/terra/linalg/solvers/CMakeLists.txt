@@ -9,6 +9,7 @@ target_sources(terra
         pcg.hpp
         pminres.hpp
         richardson.hpp
-        solver.hpp)
+        solver.hpp
+        vanka.hpp)
 
 add_subdirectory(gca)
