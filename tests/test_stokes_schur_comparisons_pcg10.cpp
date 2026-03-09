@@ -1038,115 +1038,15 @@ void test(
     // Exact BD⁻¹Bᵀ subsystem — Neumann BCs, 100 inner iterations
     // =====================================================================
 
-    // ====================================================================
-    // BFBT with R·DKG_fine·P as substitute for BD⁻¹Bᵀ
-    // DKG on the velocity level, prolongated/restricted to pressure level
-    // ====================================================================
+    for ( double omega : { 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0 } )
     {
-        // Create DKG at velocity level (one level finer than pressure)
-        VectorQ1Scalar< ScalarType > k_inv_vel( "k_inv_vel", domains[velocity_level], mask_data[velocity_level] );
-        linalg::assign( k_inv_vel, k );
-        linalg::invert_entries( k_inv_vel );
-
-        PressureDKG dkg_vel(
-            domains[velocity_level], coords_shell[velocity_level], coords_radii[velocity_level],
-            boundary_mask_data[velocity_level], k_inv_vel.grid_data(), true, false );
-
-        // Prolongation and restriction between pressure_level and velocity_level
-        ScalarProlongation P_pv( linalg::OperatorApplyMode::Replace );
-        ScalarRestriction  R_vp( domains[pressure_level] );
-
-        // Temporaries at velocity level
-        VectorQ1Scalar< ScalarType > tmp_fine_1( "tmp_fine_1", domains[velocity_level], mask_data[velocity_level] );
-        VectorQ1Scalar< ScalarType > tmp_fine_2( "tmp_fine_2", domains[velocity_level], mask_data[velocity_level] );
-
-        // Wrapper: R · DKG_fine · P as OperatorLike (pressure -> pressure)
-        // We use ComposedRDkgP defined inline
-        struct ComposedRDkgP
-        {
-            using SrcVectorType = VectorQ1Scalar< ScalarType >;
-            using DstVectorType = VectorQ1Scalar< ScalarType >;
-            using ScalarType_   = ScalarType;
-
-            PressureDKG&           dkg_;
-            ScalarProlongation&    P_;
-            ScalarRestriction&     R_;
-            VectorQ1Scalar< ScalarType >& tmp1_;
-            VectorQ1Scalar< ScalarType >& tmp2_;
-
-            ComposedRDkgP( PressureDKG& dkg, ScalarProlongation& P, ScalarRestriction& R,
-                           VectorQ1Scalar< ScalarType >& t1, VectorQ1Scalar< ScalarType >& t2 )
-            : dkg_( dkg ), P_( P ), R_( R ), tmp1_( t1 ), tmp2_( t2 ) {}
-
-            void apply_impl( const SrcVectorType& src, DstVectorType& dst )
-            {
-                linalg::apply( P_, src, tmp1_ );
-                linalg::apply( dkg_, tmp1_, tmp2_ );
-                linalg::apply( R_, tmp2_, dst );
-            }
-        };
-
-        ComposedRDkgP rdkgp( dkg_vel, P_pv, R_vp, tmp_fine_1, tmp_fine_2 );
-
-        // Compute lumped diagonal of R·DKG·P
-        VectorQ1Scalar< ScalarType > rdkgp_diag( "rdkgp_diag", domains[pressure_level], mask_data[pressure_level] );
-        {
-            VectorQ1Scalar< ScalarType > ones_p( "ones_p", domains[pressure_level], mask_data[pressure_level] );
-            linalg::assign( ones_p, 1.0 );
-            linalg::apply( rdkgp, ones_p, rdkgp_diag );
-        }
-
-        // BFBT with R·DKG·P replacing BD⁻¹Bᵀ, diagonal-preconditioned PCG inner solves
-        using RDkgPDiagPrec    = DiagonalSolver< ComposedRDkgP >;
-        using RDkgPInnerSolver = linalg::solvers::PCG< ComposedRDkgP, RDkgPDiagPrec >;
-        using RDkgPSolverAdapt = SolverAdapter< BDinvBT, RDkgPInnerSolver >;
-
-        for ( int inner_iters : { 5, 10 } )
-        {
-            for ( double omega : { 0.05, 0.1, 0.2 } )
-            {
-                BDinvBT bdinvbt_dummy( K_neumann.block_12(), K_neumann.block_21(), inv_diag_A, bfbt_tmp_vel_1 );
-                BDinvADinvBT bdinvadinvbt( K_neumann.block_12(), K_neumann.block_21(), K_neumann.block_11(),
-                                           inv_diag_A, bfbt_tmp_vel_3, bfbt_tmp_vel_4 );
-
-                VectorQ1Scalar< ScalarType > diag_copy( "rdkgp_diag_c", domains[pressure_level], mask_data[pressure_level] );
-                linalg::assign( diag_copy, rdkgp_diag );
-
-                RDkgPDiagPrec inner_prec( diag_copy );
-
-                std::vector< VectorQ1Scalar< ScalarType > > rdkgp_pcg_tmps;
-                for ( int i = 0; i < 4; i++ )
-                    rdkgp_pcg_tmps.emplace_back( "rdkgp_pcg_" + std::to_string( i ), domains[pressure_level], mask_data[pressure_level] );
-
-                auto inner_table = std::make_shared< util::Table >();
-                RDkgPInnerSolver inner_solver(
-                    linalg::solvers::IterativeSolverParameters{ inner_iters, 1e-6, 1e-16 },
-                    inner_table, rdkgp_pcg_tmps, inner_prec );
-
-                RDkgPSolverAdapt rdkgp_adapter( inner_solver, rdkgp );
-
-                using BFBTPrec = linalg::solvers::BFBTPreconditioner< BDinvBT, BDinvBT, BDinvADinvBT, RDkgPSolverAdapt >;
-                BFBTPrec bfbt_prec( bdinvbt_dummy, bdinvadinvbt, rdkgp_adapter, bfbt_t1, bfbt_t2, omega );
-
-                using PrecStokes = linalg::solvers::BlockTriangularPreconditioner2x2<
-                    Stokes, Viscous, BDinvBT, Gradient, PrecVisc, BFBTPrec >;
-
-                PrecStokes prec( K_op.block_11(), bdinvbt_dummy, K_op.block_12(), tri_prec_tmp, prec_11, bfbt_prec );
-
-                char om_buf[8];
-                std::snprintf( om_buf, sizeof( om_buf ), "%.2f", omega );
-                std::string n_str = std::to_string( inner_iters );
-
-                int iters = run_fgmres_solve( K_op, prec, u, f, tmp_fgmres, max_iters,
-                    "BFBT-RDkgP(PCG" + n_str + ",w=" + std::string(om_buf) + ")" );
-                results_table->add_row( {
-                    { "viscosity", viscosity_label },
-                    { "preconditioner", "BFBT_RDkgP_PCG" + n_str + "_w" + std::string(om_buf) },
-                    { "iterations", iters },
-                    { "dofs_vel", num_dofs_velocity },
-                    { "dofs_pre", num_dofs_pressure } } );
-            }
-        }
+        std::string om_str = std::to_string( omega ).substr( 0, 3 );
+        run_bfbt_pcg( inv_diag_A, dkg_diags[pressure_level], 25, omega,
+                      "neum(diagA,PCG25,w=" + om_str + ")", "neum_diagA_PCG25_w" + om_str );
+        run_bfbt_pcg( inv_diag_MuK, dkg_diags[pressure_level], 25, omega,
+                      "neum(MuK,PCG25,w=" + om_str + ")", "neum_MuK_PCG25_w" + om_str );
+        run_bfbt_pcg( inv_diag_MuK_sqrt, dkg_diags[pressure_level], 25, omega,
+                      "neum(MuK_sqrt,PCG25,w=" + om_str + ")", "neum_MuK_sqrt_PCG25_w" + om_str );
     }
 
 }

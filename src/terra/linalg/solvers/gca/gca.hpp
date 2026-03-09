@@ -28,6 +28,8 @@ enum class InterpolationMode
     Constant,
     Linear,
     OperatorDependent,
+    UnknownBasedAMG,
+    UnknownBasedAMGLateral,
 };
 
 /// @brief: Galerkin coarse approximation (GCA).
@@ -64,6 +66,9 @@ class TwoGridGCA
     grid::Grid4DDataScalar< ScalarT > parent_weight_1_;
     grid::Grid4DDataScalar< ScalarT > parent_weight_2_;
     grid::Grid4DDataScalar< ScalarT > parent_weight_3_;
+
+    // Unknown-based AMG: per-component weights. Indexed as (dim*4 + parent, sd, x, y, r).
+    Kokkos::View< ScalarT*****, Kokkos::LayoutRight > ub_weights_;
 
     int fine_num_cells_x_;
     int fine_num_cells_y_;
@@ -121,12 +126,15 @@ class TwoGridGCA
 
         if ( interpolation_mode == InterpolationMode::OperatorDependent )
         {
-            if ( Operator::LocalMatrixDim != 6 )
-            {
-                throw std::runtime_error(
-                    "OperatorDependent interpolation currently only supported for scalar operators (LocalMatrixDim == 6)." );
-            }
             precompute_amg_weights();
+        }
+        else if ( interpolation_mode == InterpolationMode::UnknownBasedAMG )
+        {
+            precompute_unknown_based_weights( false );
+        }
+        else if ( interpolation_mode == InterpolationMode::UnknownBasedAMGLateral )
+        {
+            precompute_unknown_based_weights( true );
         }
 
         // Looping over the coarse grid.
@@ -147,10 +155,12 @@ class TwoGridGCA
 
     /// @brief Precomputes operator-dependent interpolation weights.
     ///
-    /// Uses a ratio-corrected approach: computes standard AMG weights (w_amg)
-    /// for the actual operator and reference AMG weights (w_ref) for a unit-
-    /// coefficient operator. The ratio w_amg/w_ref isolates the coefficient
-    /// effect, which is then applied as a correction to geometric linear weights.
+    /// Uses k-weighted constant interpolation: modulates constant prolongation
+    /// weights by the viscosity/coefficient value at each parent node.
+    /// For k=1, this exactly recovers constant weights. For variable k,
+    /// parents with higher coefficient receive more weight, reflecting
+    /// the stronger coupling through high-viscosity regions.
+    /// Works for both scalar and vectorial operators via k_grid_data().
     void precompute_amg_weights()
     {
         const auto& domain = domain_fine_;
@@ -158,23 +168,6 @@ class TwoGridGCA
         const int   nx     = domain.domain_info().subdomain_num_nodes_per_side_laterally();
         const int   ny     = nx;
         const int   nr     = domain.domain_info().subdomain_num_nodes_radially();
-        const int   ncx    = fine_num_cells_x_;
-        const int   ncy    = fine_num_cells_y_;
-        const int   ncr    = fine_num_cells_r_;
-
-        // Allocate fields for stiffness entries and diagonal-normalized reference.
-        grid::Grid4DDataScalar< ScalarT > a_ip_0( "a_ip_0", num_sd, nx, ny, nr );
-        grid::Grid4DDataScalar< ScalarT > a_ip_1( "a_ip_1", num_sd, nx, ny, nr );
-        grid::Grid4DDataScalar< ScalarT > a_ip_2( "a_ip_2", num_sd, nx, ny, nr );
-        grid::Grid4DDataScalar< ScalarT > a_ip_3( "a_ip_3", num_sd, nx, ny, nr );
-        grid::Grid4DDataScalar< ScalarT > a_denom( "a_denom", num_sd, nx, ny, nr );
-
-        grid::Grid4DDataScalar< ScalarT > a_ip_ref_0( "a_ip_ref_0", num_sd, nx, ny, nr );
-        grid::Grid4DDataScalar< ScalarT > a_ip_ref_1( "a_ip_ref_1", num_sd, nx, ny, nr );
-        grid::Grid4DDataScalar< ScalarT > a_ip_ref_2( "a_ip_ref_2", num_sd, nx, ny, nr );
-        grid::Grid4DDataScalar< ScalarT > a_ip_ref_3( "a_ip_ref_3", num_sd, nx, ny, nr );
-        grid::Grid4DDataScalar< ScalarT > a_denom_ref( "a_denom_ref", num_sd, nx, ny, nr );
-
         parent_weight_0_ = grid::Grid4DDataScalar< ScalarT >( "pw0", num_sd, nx, ny, nr );
         parent_weight_1_ = grid::Grid4DDataScalar< ScalarT >( "pw1", num_sd, nx, ny, nr );
         parent_weight_2_ = grid::Grid4DDataScalar< ScalarT >( "pw2", num_sd, nx, ny, nr );
@@ -185,15 +178,14 @@ class TwoGridGCA
         auto pw2 = parent_weight_2_;
         auto pw3 = parent_weight_3_;
 
-        auto fine_op    = fine_op_;
-        auto grid_fine  = grid_fine_;
-        auto radii_fine = radii_fine_;
+        // Deep-copy k data into a fresh device view to avoid CUDA capture issues.
+        const auto& k_ref = fine_op_.k_grid_data();
+        grid::Grid4DDataScalar< ScalarT > k_data( "k_data_copy", k_ref.extent( 0 ), k_ref.extent( 1 ),
+                                                    k_ref.extent( 2 ), k_ref.extent( 3 ) );
+        Kokkos::deep_copy( k_data, k_ref );
 
-        // Phase 1: Assemble stiffness entries. For the diagonal-proxy reference,
-        // each element's off-diagonal entries are normalized by its diagonal entry
-        // A(i,j)/A(i,i), removing element-volume scaling while preserving connectivity.
         Kokkos::parallel_for(
-            "amg_weights_phase1",
+            "precompute_opdep_weights",
             Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >( { 0, 0, 0, 0 }, { num_sd, nx, ny, nr } ),
             KOKKOS_LAMBDA( const int sd, const int x, const int y, const int r ) {
                 const bool x_even = ( x % 2 == 0 );
@@ -204,17 +196,19 @@ class TwoGridGCA
 
                 const int num_parents = ( x_even && y_even ) ? 2 : 4;
 
-                // Determine parent coordinates.
                 int r_bot = r / 2;
                 int r_top = r_bot + 1;
 
-                int px[4], py[4], pr[4];
+                // Parent fine-grid coordinates and constant weights.
+                int     ppx[4], ppy[4], ppr[4];
+                ScalarT w_c[4] = {};
+
                 if ( num_parents == 2 )
                 {
-                    px[0] = x;  py[0] = y;  pr[0] = 2 * r_bot;
-                    px[1] = x;  py[1] = y;  pr[1] = 2 * r_top;
-                    px[2] = 0;  py[2] = 0;  pr[2] = 0;
-                    px[3] = 0;  py[3] = 0;  pr[3] = 0;
+                    ppx[0] = x;  ppy[0] = y;  ppr[0] = 2 * r_bot;
+                    ppx[1] = x;  ppy[1] = y;  ppr[1] = 2 * r_top;
+                    w_c[0] = ScalarT( 0.5 );
+                    w_c[1] = ScalarT( 0.5 );
                 }
                 else
                 {
@@ -234,277 +228,280 @@ class TwoGridGCA
                         x0 = x / 2 + 1;  x1 = x / 2;
                         y0 = y / 2;      y1 = y / 2 + 1;
                     }
-                    px[0] = 2 * x0;  py[0] = 2 * y0;  pr[0] = 2 * r_bot;
-                    px[1] = 2 * x1;  py[1] = 2 * y1;  pr[1] = 2 * r_bot;
-                    px[2] = 2 * x0;  py[2] = 2 * y0;  pr[2] = 2 * r_top;
-                    px[3] = 2 * x1;  py[3] = 2 * y1;  pr[3] = 2 * r_top;
-                }
+                    ppx[0] = 2 * x0;  ppy[0] = 2 * y0;  ppr[0] = 2 * r_bot;
+                    ppx[1] = 2 * x1;  ppy[1] = 2 * y1;  ppr[1] = 2 * r_bot;
+                    ppx[2] = 2 * x0;  ppy[2] = 2 * y0;  ppr[2] = 2 * r_top;
+                    ppx[3] = 2 * x1;  ppy[3] = 2 * y1;  ppr[3] = 2 * r_top;
 
-                ScalarT aii       = 0;
-                ScalarT aip[4]    = {};
-                ScalarT aweak     = 0;
-                ScalarT aii_ref   = 0;
-                ScalarT aip_ref[4] = {};
-                ScalarT aweak_ref = 0;
-
-                // Iterate over ALL fine hexes containing this node.
-                for ( int dhx = -1; dhx <= 0; dhx++ )
-                for ( int dhy = -1; dhy <= 0; dhy++ )
-                for ( int dhr = -1; dhr <= 0; dhr++ )
-                {
-                    int hx = x + dhx;
-                    int hy = y + dhy;
-                    int hr = r + dhr;
-                    if ( hx < 0 || hx >= ncx || hy < 0 || hy >= ncy || hr < 0 || hr >= ncr )
-                        continue;
-
-                    int dx = x - hx;
-                    int dy = y - hy;
-                    int dr = r - hr;
-
-                    for ( int w = 0; w < 2; w++ )
+                    if ( r_even )
                     {
-                        int lidx = local_index_in_wedge( dx, dy, dr, w );
-                        if ( lidx < 0 )
-                            continue;
-
-                        auto A = fine_op.get_local_matrix( sd, hx, hy, hr, w );
-
-                        // Diagonal-proxy: normalize off-diagonals by this element's diagonal.
-                        ScalarT diag     = A( lidx, lidx );
-                        ScalarT inv_diag = ( Kokkos::abs( diag ) > ScalarT( 1e-15 ) )
-                                               ? ScalarT( 1 ) / diag
-                                               : ScalarT( 0 );
-
-                        // Get vertex coords for this wedge.
-                        dense::Vec< int, 4 > hex_idx = { sd, hx, hy, hr };
-                        dense::Vec< int, 4 > verts[6];
-                        if ( w == 0 )
-                        {
-                            verts[0] = hex_idx;
-                            verts[1] = hex_idx + dense::Vec< int, 4 >( { 0, 1, 0, 0 } );
-                            verts[2] = hex_idx + dense::Vec< int, 4 >( { 0, 0, 1, 0 } );
-                            verts[3] = hex_idx + dense::Vec< int, 4 >( { 0, 0, 0, 1 } );
-                            verts[4] = hex_idx + dense::Vec< int, 4 >( { 0, 1, 0, 1 } );
-                            verts[5] = hex_idx + dense::Vec< int, 4 >( { 0, 0, 1, 1 } );
-                        }
-                        else
-                        {
-                            verts[0] = hex_idx + dense::Vec< int, 4 >( { 0, 1, 1, 0 } );
-                            verts[1] = hex_idx + dense::Vec< int, 4 >( { 0, 0, 1, 0 } );
-                            verts[2] = hex_idx + dense::Vec< int, 4 >( { 0, 1, 0, 0 } );
-                            verts[3] = hex_idx + dense::Vec< int, 4 >( { 0, 1, 1, 1 } );
-                            verts[4] = hex_idx + dense::Vec< int, 4 >( { 0, 0, 1, 1 } );
-                            verts[5] = hex_idx + dense::Vec< int, 4 >( { 0, 1, 0, 1 } );
-                        }
-
-                        aii     += A( lidx, lidx );
-                        aii_ref += ScalarT( 1 );  // diagonal-normalized diagonal = A(i,i)/A(i,i) = 1
-                        for ( int col = 0; col < 6; col++ )
-                        {
-                            if ( col == lidx )
-                                continue;
-
-                            ScalarT a_val     = A( lidx, col );
-                            ScalarT a_val_ref = a_val * inv_diag;
-
-                            bool is_parent = false;
-                            for ( int p = 0; p < num_parents; p++ )
-                            {
-                                if ( verts[col]( 1 ) == px[p] && verts[col]( 2 ) == py[p] &&
-                                     verts[col]( 3 ) == pr[p] )
-                                {
-                                    aip[p]     += a_val;
-                                    aip_ref[p] += a_val_ref;
-                                    is_parent = true;
-                                    break;
-                                }
-                            }
-                            if ( !is_parent )
-                            {
-                                aweak     += a_val;
-                                aweak_ref += a_val_ref;
-                            }
-                        }
-                    }
-                }
-
-                a_ip_0( sd, x, y, r ) = aip[0];
-                a_ip_1( sd, x, y, r ) = aip[1];
-                a_ip_2( sd, x, y, r ) = aip[2];
-                a_ip_3( sd, x, y, r ) = aip[3];
-                a_denom( sd, x, y, r ) = aii + aweak;
-
-                a_ip_ref_0( sd, x, y, r ) = aip_ref[0];
-                a_ip_ref_1( sd, x, y, r ) = aip_ref[1];
-                a_ip_ref_2( sd, x, y, r ) = aip_ref[2];
-                a_ip_ref_3( sd, x, y, r ) = aip_ref[3];
-                a_denom_ref( sd, x, y, r ) = aii_ref + aweak_ref;
-            } );
-
-        Kokkos::fence();
-
-        // Phase 2: Communicate across subdomain boundaries (SUM reduction).
-        communication::shell::send_recv( domain, a_ip_0, communication::CommunicationReduction::SUM );
-        communication::shell::send_recv( domain, a_ip_1, communication::CommunicationReduction::SUM );
-        communication::shell::send_recv( domain, a_ip_2, communication::CommunicationReduction::SUM );
-        communication::shell::send_recv( domain, a_ip_3, communication::CommunicationReduction::SUM );
-        communication::shell::send_recv( domain, a_denom, communication::CommunicationReduction::SUM );
-        communication::shell::send_recv( domain, a_ip_ref_0, communication::CommunicationReduction::SUM );
-        communication::shell::send_recv( domain, a_ip_ref_1, communication::CommunicationReduction::SUM );
-        communication::shell::send_recv( domain, a_ip_ref_2, communication::CommunicationReduction::SUM );
-        communication::shell::send_recv( domain, a_ip_ref_3, communication::CommunicationReduction::SUM );
-        communication::shell::send_recv( domain, a_denom_ref, communication::CommunicationReduction::SUM );
-
-        // Phase 3: Compute ratio-corrected weights using diagonal proxy.
-        // w_amg = -a_ip / (a_ii + a_weak): standard AMG weights (biased by geometry).
-        // w_ref = -a_ip_ref / (a_ii_ref + a_weak_ref): diagonal-normalized AMG weights
-        //   (geometry removed per-element, approximates k=1 weights).
-        // correction = w_amg / w_ref: isolates coefficient effect.
-        // w_final = w_lin * correction: applies coefficient effect to geometric weights.
-        Kokkos::parallel_for(
-            "amg_weights_phase3",
-            Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >( { 0, 0, 0, 0 }, { num_sd, nx, ny, nr } ),
-            KOKKOS_LAMBDA( const int sd, const int x, const int y, const int r ) {
-                const bool x_even = ( x % 2 == 0 );
-                const bool y_even = ( y % 2 == 0 );
-                const bool r_even = ( r % 2 == 0 );
-                if ( x_even && y_even && r_even )
-                    return;
-
-                const int num_parents = ( x_even && y_even ) ? 2 : 4;
-
-                // Compute standard AMG weights.
-                ScalarT denom     = a_denom( sd, x, y, r );
-                ScalarT denom_ref = a_denom_ref( sd, x, y, r );
-
-                ScalarT w_amg[4], w_ref[4];
-                if ( denom != ScalarT( 0 ) )
-                {
-                    w_amg[0] = -a_ip_0( sd, x, y, r ) / denom;
-                    w_amg[1] = -a_ip_1( sd, x, y, r ) / denom;
-                    w_amg[2] = ( num_parents > 2 ) ? -a_ip_2( sd, x, y, r ) / denom : ScalarT( 0 );
-                    w_amg[3] = ( num_parents > 2 ) ? -a_ip_3( sd, x, y, r ) / denom : ScalarT( 0 );
-                }
-                else
-                {
-                    for ( int p = 0; p < 4; p++ ) w_amg[p] = ScalarT( 0 );
-                }
-
-                if ( denom_ref != ScalarT( 0 ) )
-                {
-                    w_ref[0] = -a_ip_ref_0( sd, x, y, r ) / denom_ref;
-                    w_ref[1] = -a_ip_ref_1( sd, x, y, r ) / denom_ref;
-                    w_ref[2] = ( num_parents > 2 ) ? -a_ip_ref_2( sd, x, y, r ) / denom_ref : ScalarT( 0 );
-                    w_ref[3] = ( num_parents > 2 ) ? -a_ip_ref_3( sd, x, y, r ) / denom_ref : ScalarT( 0 );
-                }
-                else
-                {
-                    for ( int p = 0; p < 4; p++ ) w_ref[p] = ScalarT( 0 );
-                }
-
-                // Compute geometric linear weights.
-                int r_bot = r / 2;
-                ScalarT w_lin[4];
-
-                if ( num_parents == 2 )
-                {
-                    auto weights_lin = fe::wedge::shell::prolongation_linear_weights(
-                        dense::Vec< int, 4 >{ sd, x, y, r },
-                        dense::Vec< int, 4 >{ sd, x / 2, y / 2, r_bot },
-                        grid_fine, radii_fine );
-                    w_lin[0] = weights_lin( 0 );
-                    w_lin[1] = weights_lin( 1 );
-                    w_lin[2] = ScalarT( 0 );
-                    w_lin[3] = ScalarT( 0 );
-                }
-                else
-                {
-                    int x0, y0, x1, y1;
-                    if ( x_even )
-                    {
-                        x0 = x / 2;  x1 = x / 2;
-                        y0 = y / 2;  y1 = y / 2 + 1;
-                    }
-                    else if ( y_even )
-                    {
-                        x0 = x / 2;  x1 = x / 2 + 1;
-                        y0 = y / 2;  y1 = y / 2;
+                        w_c[0] = ScalarT( 0.5 );
+                        w_c[1] = ScalarT( 0.5 );
                     }
                     else
                     {
-                        x0 = x / 2 + 1;  x1 = x / 2;
-                        y0 = y / 2;      y1 = y / 2 + 1;
+                        w_c[0] = ScalarT( 0.25 );
+                        w_c[1] = ScalarT( 0.25 );
+                        w_c[2] = ScalarT( 0.25 );
+                        w_c[3] = ScalarT( 0.25 );
                     }
-                    auto weights_lin = fe::wedge::shell::prolongation_linear_weights(
-                        dense::Vec< int, 4 >{ sd, x, y, r },
-                        dense::Vec< int, 4 >{ sd, x0, y0, r_bot },
-                        dense::Vec< int, 4 >{ sd, x1, y1, r_bot },
-                        grid_fine, radii_fine );
-                    w_lin[0] = weights_lin( 0 );  // bot_0
-                    w_lin[1] = weights_lin( 0 );  // bot_1 (same radial layer)
-                    w_lin[2] = weights_lin( 1 );  // top_0
-                    w_lin[3] = weights_lin( 1 );  // top_1
                 }
 
-                // Apply ratio correction: w_final = w_lin * (w_amg / w_ref).
-                // Per-weight fallback: if w_ref is near zero, correction = 1 (use w_lin).
-                constexpr ScalarT eps = ScalarT( 1e-12 );
-                ScalarT w[4];
+                // Scale constant weights by k at each parent, then renormalize.
+                ScalarT w[4] = {};
+                ScalarT wsum = 0;
                 for ( int p = 0; p < num_parents; p++ )
                 {
-                    ScalarT correction = ( Kokkos::abs( w_ref[p] ) > eps )
-                                             ? w_amg[p] / w_ref[p]
-                                             : ScalarT( 1 );
-                    // Clamp correction to prevent extreme distortions.
-                    if ( correction < ScalarT( 0.2 ) ) correction = ScalarT( 0.2 );
-                    if ( correction > ScalarT( 5.0 ) ) correction = ScalarT( 5.0 );
-                    w[p] = w_lin[p] * correction;
+                    if ( w_c[p] > ScalarT( 0 ) )
+                    {
+                        ScalarT k_parent = k_data( sd, ppx[p], ppy[p], ppr[p] );
+                        w[p] = w_c[p] * k_parent;
+                        wsum += w[p];
+                    }
                 }
-                for ( int p = num_parents; p < 4; p++ )
-                    w[p] = ScalarT( 0 );
 
-                // Clamp negative weights to zero and rescale.
-                ScalarT sum = 0;
-                for ( int p = 0; p < num_parents; p++ )
-                {
-                    if ( w[p] < ScalarT( 0 ) )
-                        w[p] = 0;
-                    sum += w[p];
-                }
-                if ( sum > ScalarT( 0 ) )
+                if ( wsum > ScalarT( 0 ) )
                 {
                     for ( int p = 0; p < num_parents; p++ )
-                        w[p] /= sum;
+                        w[p] /= wsum;
                 }
-
-                // Limit extreme weight ratios: clamp each weight to [w_min_clamp, 1].
-                constexpr ScalarT w_min_clamp = 0.05;
-                bool              needs_reclamp = false;
-                for ( int p = 0; p < num_parents; p++ )
+                else
                 {
-                    if ( w[p] > ScalarT( 0 ) && w[p] < w_min_clamp )
-                    {
-                        w[p]          = w_min_clamp;
-                        needs_reclamp = true;
-                    }
-                }
-                if ( needs_reclamp )
-                {
-                    sum = 0;
                     for ( int p = 0; p < num_parents; p++ )
-                        sum += w[p];
-                    if ( sum > ScalarT( 0 ) )
-                    {
-                        for ( int p = 0; p < num_parents; p++ )
-                            w[p] /= sum;
-                    }
+                        w[p] = w_c[p];
                 }
 
                 pw0( sd, x, y, r ) = w[0];
                 pw1( sd, x, y, r ) = w[1];
                 pw2( sd, x, y, r ) = w[2];
                 pw3( sd, x, y, r ) = w[3];
+            } );
+
+        Kokkos::fence();
+    }
+
+    /// @brief Precomputes unknown-based AMG interpolation weights.
+    ///
+    /// For vectorial operators (LocalMatrixDim=18), each vector component d gets
+    /// its own interpolation weights computed from the d-th diagonal block of the
+    /// assembled stiffness matrix: w_j^d = |A(i+d*6, j+d*6)| / sum_k |A(i+d*6, k+d*6)|.
+    /// For scalar operators, this reduces to standard |a_ij|-normalized AMG.
+    void precompute_unknown_based_weights( bool radial_constant )
+    {
+        const auto& domain = domain_fine_;
+        const int   num_sd = static_cast< int >( domain.subdomains().size() );
+        const int   nx     = domain.domain_info().subdomain_num_nodes_per_side_laterally();
+        const int   ny     = nx;
+        const int   nr     = domain.domain_info().subdomain_num_nodes_radially();
+
+        constexpr int num_comp = ( Operator::LocalMatrixDim == 18 ) ? 3 : 1;
+
+        ub_weights_ = Kokkos::View< ScalarT*****, Kokkos::LayoutRight >(
+            "ub_weights", num_comp * 4, num_sd, nx, ny, nr );
+
+        // Also allocate standard parent_weight views (will hold dim-0 weights for P building).
+        parent_weight_0_ = grid::Grid4DDataScalar< ScalarT >( "pw0", num_sd, nx, ny, nr );
+        parent_weight_1_ = grid::Grid4DDataScalar< ScalarT >( "pw1", num_sd, nx, ny, nr );
+        parent_weight_2_ = grid::Grid4DDataScalar< ScalarT >( "pw2", num_sd, nx, ny, nr );
+        parent_weight_3_ = grid::Grid4DDataScalar< ScalarT >( "pw3", num_sd, nx, ny, nr );
+
+        auto ub_w = ub_weights_;
+        auto pw0  = parent_weight_0_;
+        auto pw1  = parent_weight_1_;
+        auto pw2  = parent_weight_2_;
+        auto pw3  = parent_weight_3_;
+
+        auto fine_op = fine_op_;
+        const int ncx = fine_num_cells_x_;
+        const int ncy = fine_num_cells_y_;
+        const int ncr = fine_num_cells_r_;
+
+        // Local device-callable version of local_index_in_wedge.
+        auto local_idx_in_wedge = KOKKOS_LAMBDA( int dx, int dy, int dr, int w ) -> int
+        {
+            if ( w == 0 )
+            {
+                if ( dx + dy > 1 )
+                    return -1;
+                int base = dr * 3;
+                if ( dx == 0 && dy == 0 )
+                    return base;
+                if ( dx == 1 && dy == 0 )
+                    return base + 1;
+                if ( dx == 0 && dy == 1 )
+                    return base + 2;
+                return -1;
+            }
+            else
+            {
+                if ( dx + dy < 1 )
+                    return -1;
+                int base = dr * 3;
+                if ( dx == 1 && dy == 1 )
+                    return base;
+                if ( dx == 0 && dy == 1 )
+                    return base + 1;
+                if ( dx == 1 && dy == 0 )
+                    return base + 2;
+                return -1;
+            }
+        };
+
+        Kokkos::parallel_for(
+            "precompute_ub_weights",
+            Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >( { 0, 0, 0, 0 }, { num_sd, nx, ny, nr } ),
+            KOKKOS_LAMBDA( const int sd, const int x, const int y, const int r ) {
+                const bool x_even = ( x % 2 == 0 );
+                const bool y_even = ( y % 2 == 0 );
+                const bool r_even = ( r % 2 == 0 );
+                if ( x_even && y_even && r_even )
+                    return;
+
+                const int num_parents = ( x_even && y_even ) ? 2 : 4;
+
+                // For radial_constant mode, 2-parent (radially aligned) nodes use constant [0.5, 0.5].
+                if ( radial_constant && num_parents == 2 )
+                {
+                    for ( int d = 0; d < num_comp; d++ )
+                    {
+                        ub_w( d * 4 + 0, sd, x, y, r ) = ScalarT( 0.5 );
+                        ub_w( d * 4 + 1, sd, x, y, r ) = ScalarT( 0.5 );
+                    }
+                    pw0( sd, x, y, r ) = ScalarT( 0.5 );
+                    pw1( sd, x, y, r ) = ScalarT( 0.5 );
+                    pw2( sd, x, y, r ) = ScalarT( 0 );
+                    pw3( sd, x, y, r ) = ScalarT( 0 );
+                    return;
+                }
+
+                int r_bot = r / 2;
+                int r_top = r_bot + 1;
+
+                int     ppx[4] = {}, ppy[4] = {}, ppr[4] = {};
+                ScalarT w_c[4] = {};
+
+                if ( num_parents == 2 )
+                {
+                    ppx[0] = x;  ppy[0] = y;  ppr[0] = 2 * r_bot;
+                    ppx[1] = x;  ppy[1] = y;  ppr[1] = 2 * r_top;
+                    w_c[0] = ScalarT( 0.5 );
+                    w_c[1] = ScalarT( 0.5 );
+                }
+                else
+                {
+                    int x0, y0, x1, y1;
+                    if ( x_even )
+                    {
+                        x0 = x / 2;  x1 = x / 2;
+                        y0 = y / 2;  y1 = y / 2 + 1;
+                    }
+                    else if ( y_even )
+                    {
+                        x0 = x / 2;  x1 = x / 2 + 1;
+                        y0 = y / 2;  y1 = y / 2;
+                    }
+                    else
+                    {
+                        x0 = x / 2 + 1;  x1 = x / 2;
+                        y0 = y / 2;      y1 = y / 2 + 1;
+                    }
+                    ppx[0] = 2 * x0;  ppy[0] = 2 * y0;  ppr[0] = 2 * r_bot;
+                    ppx[1] = 2 * x1;  ppy[1] = 2 * y1;  ppr[1] = 2 * r_bot;
+                    ppx[2] = 2 * x0;  ppy[2] = 2 * y0;  ppr[2] = 2 * r_top;
+                    ppx[3] = 2 * x1;  ppy[3] = 2 * y1;  ppr[3] = 2 * r_top;
+
+                    if ( r_even )
+                    {
+                        w_c[0] = ScalarT( 0.5 );
+                        w_c[1] = ScalarT( 0.5 );
+                    }
+                    else
+                    {
+                        w_c[0] = ScalarT( 0.25 );
+                        w_c[1] = ScalarT( 0.25 );
+                        w_c[2] = ScalarT( 0.25 );
+                        w_c[3] = ScalarT( 0.25 );
+                    }
+                }
+
+                // Assemble per-component couplings from all surrounding fine hexes.
+                ScalarT coupling[3][4] = {};
+
+                for ( int dhx = 0; dhx <= 1; dhx++ )
+                {
+                    for ( int dhy = 0; dhy <= 1; dhy++ )
+                    {
+                        for ( int dhr = 0; dhr <= 1; dhr++ )
+                        {
+                            int hx = x - dhx;
+                            int hy = y - dhy;
+                            int hr = r - dhr;
+                            if ( hx < 0 || hx >= ncx || hy < 0 || hy >= ncy || hr < 0 || hr >= ncr )
+                                continue;
+
+                            for ( int w = 0; w < 2; w++ )
+                            {
+                                int fine_lidx = local_idx_in_wedge( dhx, dhy, dhr, w );
+                                if ( fine_lidx < 0 )
+                                    continue;
+
+                                auto A = fine_op.get_local_matrix( sd, hx, hy, hr, w );
+
+                                for ( int p = 0; p < num_parents; p++ )
+                                {
+                                    int pdx = ppx[p] - hx;
+                                    int pdy = ppy[p] - hy;
+                                    int pdr = ppr[p] - hr;
+                                    if ( pdx < 0 || pdx > 1 || pdy < 0 || pdy > 1 || pdr < 0 || pdr > 1 )
+                                        continue;
+
+                                    int parent_lidx = local_idx_in_wedge( pdx, pdy, pdr, w );
+                                    if ( parent_lidx < 0 )
+                                        continue;
+
+                                    if constexpr ( Operator::LocalMatrixDim == 18 )
+                                    {
+                                        for ( int d = 0; d < 3; d++ )
+                                        {
+                                            ScalarT val = A( fine_lidx + d * 6, parent_lidx + d * 6 );
+                                            coupling[d][p] += ( val > 0 ) ? val : -val;
+                                        }
+                                    }
+                                    else
+                                    {
+                                        ScalarT val = A( fine_lidx, parent_lidx );
+                                        coupling[0][p] += ( val > 0 ) ? val : -val;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Normalize per component.
+                for ( int d = 0; d < num_comp; d++ )
+                {
+                    ScalarT sum = 0;
+                    for ( int p = 0; p < num_parents; p++ )
+                        sum += coupling[d][p];
+
+                    if ( sum > ScalarT( 0 ) )
+                    {
+                        for ( int p = 0; p < num_parents; p++ )
+                            ub_w( d * 4 + p, sd, x, y, r ) = coupling[d][p] / sum;
+                    }
+                    else
+                    {
+                        for ( int p = 0; p < num_parents; p++ )
+                            ub_w( d * 4 + p, sd, x, y, r ) = w_c[p];
+                    }
+                }
+
+                // Copy dim-0 weights to standard parent_weight views.
+                pw0( sd, x, y, r ) = ub_w( 0, sd, x, y, r );
+                pw1( sd, x, y, r ) = ub_w( 1, sd, x, y, r );
+                pw2( sd, x, y, r ) = ub_w( 2, sd, x, y, r );
+                pw3( sd, x, y, r ) = ub_w( 3, sd, x, y, r );
             } );
 
         Kokkos::fence();
@@ -745,8 +742,11 @@ class TwoGridGCA
                                 weights( 0 ) = 0.5;
                                 weights( 1 ) = 0.5;
                             }
-                            else if ( interpolation_mode_ == InterpolationMode::OperatorDependent )
+                            else if ( interpolation_mode_ == InterpolationMode::OperatorDependent ||
+                                      interpolation_mode_ == InterpolationMode::UnknownBasedAMG ||
+                                      interpolation_mode_ == InterpolationMode::UnknownBasedAMGLateral )
                             {
+                                // For UnknownBasedAMG, pw0/pw1 hold dim-0 weights; dims 1,2 handled in P_vec.
                                 weights( 0 ) = parent_weight_0_( local_subdomain_id, fine_dof_idx( 1 ),
                                                                   fine_dof_idx( 2 ), fine_dof_idx( 3 ) );
                                 weights( 1 ) = parent_weight_1_( local_subdomain_id, fine_dof_idx( 1 ),
@@ -881,8 +881,11 @@ class TwoGridGCA
                                     y1_idx_coarse,
                                     r_idx_coarse_top );
                         }
-                        else if ( interpolation_mode_ == InterpolationMode::OperatorDependent )
+                        else if ( interpolation_mode_ == InterpolationMode::OperatorDependent ||
+                                  interpolation_mode_ == InterpolationMode::UnknownBasedAMG ||
+                                  interpolation_mode_ == InterpolationMode::UnknownBasedAMGLateral )
                         {
+                            // For UnknownBasedAMG*, pw0-pw3 hold dim-0 weights; dims 1,2 handled in P_vec.
                             P( fine_dof_lidx, coarse_dof_lindices[0] ) = parent_weight_0_(
                                 local_subdomain_id, fine_dof_idx( 1 ), fine_dof_idx( 2 ), fine_dof_idx( 3 ) );
                             P( fine_dof_lidx, coarse_dof_lindices[1] ) = parent_weight_1_(
@@ -907,16 +910,86 @@ class TwoGridGCA
                     dense::Mat< ScalarT, Operator::LocalMatrixDim, Operator::LocalMatrixDim > P_vec = { 0 };
                     if constexpr ( Operator::LocalMatrixDim == 18 )
                     {
-                        // in a vectorial operator we need to setup a vectorial interpolation
-                        for ( int dim = 0; dim < 3; ++dim )
+                        // Dim 0: always use the scalar P (built above with dim-0 weights).
+                        for ( int i = 0; i < 6; ++i )
+                            for ( int j = 0; j < 6; ++j )
+                                P_vec( i, j ) = P( i, j );
+
+                        if ( interpolation_mode_ == InterpolationMode::UnknownBasedAMG ||
+                             interpolation_mode_ == InterpolationMode::UnknownBasedAMGLateral )
                         {
-                            for ( int i = 0; i < 6; ++i )
+                            // Dims 1, 2: per-component weights from ub_weights_.
+                            for ( int dim = 1; dim < 3; ++dim )
                             {
-                                for ( int j = 0; j < 6; ++j )
+                                for ( int fli = 0; fli < num_nodes_per_wedge; fli++ )
                                 {
-                                    P_vec( i + dim * num_nodes_per_wedge, j + dim * num_nodes_per_wedge ) = P( i, j );
+                                    auto fdi = wedge_local_vertex_indices_fine[fli];
+
+                                    // On coarse grid: identity.
+                                    if ( fdi( 1 ) % 2 == 0 && fdi( 2 ) % 2 == 0 && fdi( 3 ) % 2 == 0 )
+                                    {
+                                        P_vec( fli + dim * 6, fli + dim * 6 ) = 1.0;
+                                        continue;
+                                    }
+
+                                    // 2-parent: radially aligned.
+                                    if ( fdi( 1 ) % 2 == 0 && fdi( 2 ) % 2 == 0 )
+                                    {
+                                        ScalarT w0 = ub_weights_( dim * 4 + 0, local_subdomain_id,
+                                                                   fdi( 1 ), fdi( 2 ), fdi( 3 ) );
+                                        ScalarT w1 = ub_weights_( dim * 4 + 1, local_subdomain_id,
+                                                                   fdi( 1 ), fdi( 2 ), fdi( 3 ) );
+                                        if ( fli == 2 || fli == 5 )
+                                        {
+                                            P_vec( fli + dim * 6, 2 + dim * 6 ) = w0;
+                                            P_vec( fli + dim * 6, 5 + dim * 6 ) = w1;
+                                        }
+                                        else if ( fli == 0 || fli == 3 )
+                                        {
+                                            P_vec( fli + dim * 6, 0 + dim * 6 ) = w0;
+                                            P_vec( fli + dim * 6, 3 + dim * 6 ) = w1;
+                                        }
+                                        else if ( fli == 1 || fli == 4 )
+                                        {
+                                            P_vec( fli + dim * 6, 1 + dim * 6 ) = w0;
+                                            P_vec( fli + dim * 6, 4 + dim * 6 ) = w1;
+                                        }
+                                        continue;
+                                    }
+
+                                    // 4-parent: determine coarse DOF local indices.
+                                    int cdl[4];
+                                    if ( fdi( 1 ) % 2 == 0 )
+                                    {
+                                        cdl[0] = 0; cdl[1] = 2; cdl[2] = 3; cdl[3] = 5;
+                                    }
+                                    else if ( fdi( 2 ) % 2 == 0 )
+                                    {
+                                        cdl[0] = 0; cdl[1] = 1; cdl[2] = 3; cdl[3] = 4;
+                                    }
+                                    else
+                                    {
+                                        cdl[0] = 1; cdl[1] = 2; cdl[2] = 4; cdl[3] = 5;
+                                    }
+
+                                    P_vec( fli + dim * 6, cdl[0] + dim * 6 ) = ub_weights_(
+                                        dim * 4 + 0, local_subdomain_id, fdi( 1 ), fdi( 2 ), fdi( 3 ) );
+                                    P_vec( fli + dim * 6, cdl[1] + dim * 6 ) = ub_weights_(
+                                        dim * 4 + 1, local_subdomain_id, fdi( 1 ), fdi( 2 ), fdi( 3 ) );
+                                    P_vec( fli + dim * 6, cdl[2] + dim * 6 ) = ub_weights_(
+                                        dim * 4 + 2, local_subdomain_id, fdi( 1 ), fdi( 2 ), fdi( 3 ) );
+                                    P_vec( fli + dim * 6, cdl[3] + dim * 6 ) = ub_weights_(
+                                        dim * 4 + 3, local_subdomain_id, fdi( 1 ), fdi( 2 ), fdi( 3 ) );
                                 }
                             }
+                        }
+                        else
+                        {
+                            // Standard: replicate P for dims 1, 2.
+                            for ( int dim = 1; dim < 3; ++dim )
+                                for ( int i = 0; i < 6; ++i )
+                                    for ( int j = 0; j < 6; ++j )
+                                        P_vec( i + dim * 6, j + dim * 6 ) = P( i, j );
                         }
                     }
                     else

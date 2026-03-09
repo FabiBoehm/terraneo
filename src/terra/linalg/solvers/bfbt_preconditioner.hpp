@@ -46,20 +46,23 @@ class BFBTPreconditioner
     /// @param inner_solver  Solver for \f$ (B D^{-1} B^T) \f$ systems.
     /// @param t1            Temporary pressure vector.
     /// @param t2            Temporary pressure vector.
+    /// @param omega         Relaxation parameter (default 1.0).
     BFBTPreconditioner(
         BDinvBTT&          bdinvbt,
         BDinvADinvBTT&     bdinvadinvbt,
         InnerSolverT&      inner_solver,
         SolutionVectorType& t1,
-        SolutionVectorType& t2 )
+        SolutionVectorType& t2,
+        double              omega = 1.0 )
     : bdinvbt_( bdinvbt )
     , bdinvadinvbt_( bdinvadinvbt )
     , inner_solver_( inner_solver )
     , t1_( t1 )
     , t2_( t2 )
+    , omega_( omega )
     {}
 
-    /// @brief Apply the BFBT preconditioner: \f$ x = S_{\text{BFBT}}^{-1} b \f$.
+    /// @brief Apply the BFBT preconditioner: \f$ x = \omega \, S_{\text{BFBT}}^{-1} b \f$.
     /// @param A  Ignored (the BFBT preconditioner uses its own internal operators).
     /// @param x  Solution vector (output).
     /// @param b  Right-hand side vector (input).
@@ -75,6 +78,12 @@ class BFBTPreconditioner
         // Step 3: solve (B D^{-1} B^T) x = t2
         assign( x, 0.0 );
         solve( inner_solver_, bdinvbt_, x, t2_ );
+
+        // Step 4: relaxation
+        if ( omega_ != 1.0 )
+        {
+            lincomb( x, { omega_ }, { x } );
+        }
     }
 
   private:
@@ -83,6 +92,7 @@ class BFBTPreconditioner
     InnerSolverT&       inner_solver_;
     SolutionVectorType& t1_;
     SolutionVectorType& t2_;
+    double              omega_;
 };
 
 } // namespace terra::linalg::solvers
