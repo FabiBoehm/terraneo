@@ -456,6 +456,9 @@ class TwoGridGCA
                     ScalarT correction = ( Kokkos::abs( w_ref[p] ) > eps )
                                              ? w_amg[p] / w_ref[p]
                                              : ScalarT( 1 );
+                    // Clamp correction to prevent extreme distortions.
+                    if ( correction < ScalarT( 0.2 ) ) correction = ScalarT( 0.2 );
+                    if ( correction > ScalarT( 5.0 ) ) correction = ScalarT( 5.0 );
                     w[p] = w_lin[p] * correction;
                 }
                 for ( int p = num_parents; p < 4; p++ )
