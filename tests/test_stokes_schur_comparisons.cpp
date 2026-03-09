@@ -7,16 +7,21 @@
 //   1. BlockTri + lumped M_p(1/mu)  (inverse-viscosity-weighted pressure mass)
 //
 //   BFBT variants with exact BD⁻¹Bᵀ (Neumann BCs), omega sweep 0.1–1.0:
-//     Diagonal choices: diag(A), diag(M_u(mu)), diag(M_u(sqrt(mu)))
+//     Diagonal choices: diag(A), diag(M_u(mu)), diag(M_u(sqrt(mu))), diag(M_u)
 //
 //   2. BFBT + PCG(25) + diagonal inner preconditioner
 //   3. BFBT + naked MG V-cycle inner solver
-//   4. BFBT + PCG(10) + DivKGrad MG V-cycle inner preconditioner
+//   4. BFBT + MG-PCG(10/50/100) inner solver  (isolate inner-solve error)
 //   5. BFBT + DKG substitute subsystem + diagonal PCG(25) inner solver
-//   6. BFBT + DKG substitute subsystem + MG PCG(10) inner solver
+//   6. BFBT + DKG substitute subsystem + MG-PCG(10/50/100) inner solver
+//
+//   Simplified BFBT — middle operator BD⁻¹AD⁻¹B^T replaced by cheaper
+//   pressure-space operators:
+//   7. sBFBT with M_p(mu) as middle operator  (viscosity-weighted mass)
+//   8. sBFBT with DKG(1/mu) as middle operator
 //
 //   BFBT with R·DKG_fine·P replacing BD⁻¹Bᵀ:
-//   7. BFBT-RDkgP + PCG(5/10) + diagonal inner preconditioner
+//   9. BFBT-RDkgP + PCG(5/10) + diagonal inner preconditioner
 //
 // Each configuration is tested for:
 //   - Constant viscosity (k=1)
@@ -660,10 +665,11 @@ void test(
     //
     // S_BFBT^{-1} = (B D^{-1} B^T)^{-1} (B D^{-1} A D^{-1} B^T) (B D^{-1} B^T)^{-1}
     //
-    // Three choices for D:
-    //   (a) diag(M_u)         — lumped velocity mass
-    //   (b) diag(A)           — diagonal of the viscous operator
-    //   (c) diag(M_u(mu))     — lumped viscosity-weighted velocity mass
+    // Four choices for D:
+    //   (a) diag(A)           — diagonal of the viscous operator
+    //   (b) diag(M_u(mu))     — lumped viscosity-weighted velocity mass
+    //   (c) diag(M_u(sqrt(mu))) — lumped sqrt-viscosity-weighted velocity mass
+    //   (d) diag(M_u)         — unweighted lumped velocity mass (classical LSC)
     // ====================================================================
 
     // ---- Velocity-space inverse diagonals for BFBT ----
@@ -705,6 +711,16 @@ void test(
         linalg::assign( ones, 1.0 );
         linalg::apply( MK_sqrt, ones, inv_diag_MuK_sqrt );
         linalg::invert_entries( inv_diag_MuK_sqrt );
+    }
+
+    // (d) inv_diag(M_u) — unweighted lumped velocity mass (classical LSC / original BFBt choice)
+    VectorQ1Vec< ScalarType > inv_diag_M( "inv_diag_M", domains[velocity_level], mask_data[velocity_level] );
+    {
+        ViscousMass M_diag( domains[velocity_level], coords_shell[velocity_level], coords_radii[velocity_level], true );
+        VectorQ1Vec< ScalarType > ones( "ones_vel4", domains[velocity_level], mask_data[velocity_level] );
+        linalg::assign( ones, 1.0 );
+        linalg::apply( M_diag, ones, inv_diag_M );
+        linalg::invert_entries( inv_diag_M );
     }
 
     // ---- DivKGrad(1/mu) MG hierarchy for inner BFBT solves ----
@@ -1040,7 +1056,21 @@ void test(
 
     // =====================================================================
     // Exact BD⁻¹Bᵀ subsystem — Neumann BCs
+    //
+    // Four D choices: diag(A), diag(M_u(mu)), diag(M_u(sqrt(mu))), diag(M_u)
     // =====================================================================
+
+    // Pairs of (inverse diagonal, label) for D sweep
+    struct DiagChoice {
+        VectorQ1Vec< ScalarType >& inv_diag;
+        std::string name;
+    };
+    std::vector< DiagChoice > diag_choices = {
+        { inv_diag_A,        "diagA" },
+        { inv_diag_MuK,      "MuK" },
+        { inv_diag_MuK_sqrt, "MuK_sqrt" },
+        { inv_diag_M,        "M_u" },
+    };
 
     // --- BFBT with PCG + diagonal inner preconditioner, omega sweep ---
     for ( double omega : { 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0 } )
@@ -1049,12 +1079,10 @@ void test(
         std::snprintf( om_buf, sizeof( om_buf ), "%.1f", omega );
         std::string om_str( om_buf );
 
-        run_bfbt_pcg( inv_diag_A, dkg_diags[pressure_level], 25, omega,
-                      "BFBT-PCG(diagA,25,w=" + om_str + ")", "BFBT_PCG_diagA_25_w" + om_str );
-        run_bfbt_pcg( inv_diag_MuK, dkg_diags[pressure_level], 25, omega,
-                      "BFBT-PCG(MuK,25,w=" + om_str + ")", "BFBT_PCG_MuK_25_w" + om_str );
-        run_bfbt_pcg( inv_diag_MuK_sqrt, dkg_diags[pressure_level], 25, omega,
-                      "BFBT-PCG(MuK_sqrt,25,w=" + om_str + ")", "BFBT_PCG_MuK_sqrt_25_w" + om_str );
+        for ( auto& dc : diag_choices )
+            run_bfbt_pcg( dc.inv_diag, dkg_diags[pressure_level], 25, omega,
+                          "BFBT-PCG(" + dc.name + ",25,w=" + om_str + ")",
+                          "BFBT_PCG_" + dc.name + "_25_w" + om_str );
     }
 
     // --- BFBT with naked MG V-cycles as inner solver ---
@@ -1064,27 +1092,28 @@ void test(
         std::snprintf( om_buf, sizeof( om_buf ), "%.1f", omega );
         std::string om_str( om_buf );
 
-        run_bfbt_naked_mg( inv_diag_A, prec_dkg_1v, omega,
-                           "BFBT-MG(diagA,w=" + om_str + ")", "BFBT_MG_diagA_w" + om_str );
-        run_bfbt_naked_mg( inv_diag_MuK, prec_dkg_1v, omega,
-                           "BFBT-MG(MuK,w=" + om_str + ")", "BFBT_MG_MuK_w" + om_str );
-        run_bfbt_naked_mg( inv_diag_MuK_sqrt, prec_dkg_1v, omega,
-                           "BFBT-MG(MuK_sqrt,w=" + om_str + ")", "BFBT_MG_MuK_sqrt_w" + om_str );
+        for ( auto& dc : diag_choices )
+            run_bfbt_naked_mg( dc.inv_diag, prec_dkg_1v, omega,
+                               "BFBT-MG(" + dc.name + ",w=" + om_str + ")",
+                               "BFBT_MG_" + dc.name + "_w" + om_str );
     }
 
     // --- BFBT with PCG + DivKGrad MG V-cycle inner preconditioner ---
-    for ( double omega : { 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0 } )
+    // Test both moderate (10) and high-accuracy (50, 100) inner iterations
+    for ( int inner_iters : { 10, 50, 100 } )
     {
-        char om_buf[8];
-        std::snprintf( om_buf, sizeof( om_buf ), "%.1f", omega );
-        std::string om_str( om_buf );
+        std::string n_str = std::to_string( inner_iters );
+        for ( double omega : { 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0 } )
+        {
+            char om_buf[8];
+            std::snprintf( om_buf, sizeof( om_buf ), "%.1f", omega );
+            std::string om_str( om_buf );
 
-        run_bfbt_mg_pcg( inv_diag_A, prec_dkg_1v, dkg_ops[pressure_level], 10, omega,
-                         "BFBT-MG-PCG(diagA,10,w=" + om_str + ")", "BFBT_MG_PCG_diagA_10_w" + om_str );
-        run_bfbt_mg_pcg( inv_diag_MuK, prec_dkg_1v, dkg_ops[pressure_level], 10, omega,
-                         "BFBT-MG-PCG(MuK,10,w=" + om_str + ")", "BFBT_MG_PCG_MuK_10_w" + om_str );
-        run_bfbt_mg_pcg( inv_diag_MuK_sqrt, prec_dkg_1v, dkg_ops[pressure_level], 10, omega,
-                         "BFBT-MG-PCG(MuK_sqrt,10,w=" + om_str + ")", "BFBT_MG_PCG_MuK_sqrt_10_w" + om_str );
+            for ( auto& dc : diag_choices )
+                run_bfbt_mg_pcg( dc.inv_diag, prec_dkg_1v, dkg_ops[pressure_level], inner_iters, omega,
+                                 "BFBT-MG-PCG(" + dc.name + "," + n_str + ",w=" + om_str + ")",
+                                 "BFBT_MG_PCG_" + dc.name + "_" + n_str + "_w" + om_str );
+        }
     }
 
     // --- BFBT with DKG as substitute subsystem + diagonal inner preconditioner ---
@@ -1094,27 +1123,132 @@ void test(
         std::snprintf( om_buf, sizeof( om_buf ), "%.1f", omega );
         std::string om_str( om_buf );
 
-        run_bfbt_dkg_pcg( inv_diag_A, 25, omega,
-                          "BFBT-DKG(diagA,25,w=" + om_str + ")", "BFBT_DKG_diagA_25_w" + om_str );
-        run_bfbt_dkg_pcg( inv_diag_MuK, 25, omega,
-                          "BFBT-DKG(MuK,25,w=" + om_str + ")", "BFBT_DKG_MuK_25_w" + om_str );
-        run_bfbt_dkg_pcg( inv_diag_MuK_sqrt, 25, omega,
-                          "BFBT-DKG(MuK_sqrt,25,w=" + om_str + ")", "BFBT_DKG_MuK_sqrt_25_w" + om_str );
+        for ( auto& dc : diag_choices )
+            run_bfbt_dkg_pcg( dc.inv_diag, 25, omega,
+                              "BFBT-DKG(" + dc.name + ",25,w=" + om_str + ")",
+                              "BFBT_DKG_" + dc.name + "_25_w" + om_str );
     }
 
     // --- BFBT with DKG as substitute subsystem + MG inner preconditioner ---
-    for ( double omega : { 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0 } )
+    for ( int inner_iters : { 10, 50, 100 } )
     {
-        char om_buf[8];
-        std::snprintf( om_buf, sizeof( om_buf ), "%.1f", omega );
-        std::string om_str( om_buf );
+        std::string n_str = std::to_string( inner_iters );
+        for ( double omega : { 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0 } )
+        {
+            char om_buf[8];
+            std::snprintf( om_buf, sizeof( om_buf ), "%.1f", omega );
+            std::string om_str( om_buf );
 
-        run_bfbt_dkg_mg_pcg( inv_diag_A, 10, omega,
-                             "BFBT-DKG-MG(diagA,10,w=" + om_str + ")", "BFBT_DKG_MG_diagA_10_w" + om_str );
-        run_bfbt_dkg_mg_pcg( inv_diag_MuK, 10, omega,
-                             "BFBT-DKG-MG(MuK,10,w=" + om_str + ")", "BFBT_DKG_MG_MuK_10_w" + om_str );
-        run_bfbt_dkg_mg_pcg( inv_diag_MuK_sqrt, 10, omega,
-                             "BFBT-DKG-MG(MuK_sqrt,10,w=" + om_str + ")", "BFBT_DKG_MG_MuK_sqrt_10_w" + om_str );
+            for ( auto& dc : diag_choices )
+                run_bfbt_dkg_mg_pcg( dc.inv_diag, inner_iters, omega,
+                                     "BFBT-DKG-MG(" + dc.name + "," + n_str + ",w=" + om_str + ")",
+                                     "BFBT_DKG_MG_" + dc.name + "_" + n_str + "_w" + om_str );
+        }
+    }
+
+    // =====================================================================
+    // Simplified BFBT: replace middle operator BD⁻¹AD⁻¹B^T with a
+    // pressure-space operator K_p.
+    //
+    //   S⁻¹ ≈ (BD⁻¹B^T)⁻¹ · K_p · (BD⁻¹B^T)⁻¹
+    //
+    // If K_p captures the viscosity structure cheaply (e.g. M_p(mu) or
+    // DKG(1/mu)), this avoids the expensive middle operator while
+    // retaining viscosity information.
+    // =====================================================================
+    {
+        // --- Simplified BFBT with M_p(mu) as middle operator ---
+        // Assemble viscosity-weighted pressure mass M_p(mu) (NOT the inverse-viscosity one used above).
+        VectorQ1Scalar< ScalarType > k_pm_mu( "k_pm_mu", domains[pressure_level], mask_data[pressure_level] );
+        interpolate_viscosity(
+            viscosity_mode, domains[pressure_level],
+            coords_shell[pressure_level], coords_radii[pressure_level],
+            boundary_mask_data[pressure_level], k_pm_mu );
+
+        PressureMass pmass_mu(
+            domains[pressure_level], coords_shell[pressure_level], coords_radii[pressure_level],
+            k_pm_mu.grid_data(), false );
+
+        for ( int inner_iters : { 10, 50 } )
+        {
+            std::string n_str = std::to_string( inner_iters );
+            for ( double omega : { 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0 } )
+            {
+                char om_buf[8];
+                std::snprintf( om_buf, sizeof( om_buf ), "%.1f", omega );
+                std::string om_str( om_buf );
+
+                for ( auto& dc : diag_choices )
+                {
+                    BDinvBT bdinvbt( K_neumann.block_12(), K_neumann.block_21(), dc.inv_diag, bfbt_tmp_vel_1 );
+
+                    MGAdapter mg_adapter( prec_dkg_1v, dkg_ops[pressure_level] );
+
+                    auto inner_pcg_table = std::make_shared< util::Table >();
+                    InnerSolverMG inner_solver(
+                        linalg::solvers::IterativeSolverParameters{ inner_iters, 1e-6, 1e-16 },
+                        inner_pcg_table, bfbt_pcg_tmps, mg_adapter );
+
+                    using SimplBFBT = linalg::solvers::BFBTPreconditioner< BDinvBT, BDinvBT, PressureMass, InnerSolverMG >;
+                    SimplBFBT bfbt_prec( bdinvbt, pmass_mu, inner_solver, bfbt_t1, bfbt_t2, omega );
+
+                    using PrecStokes = linalg::solvers::BlockTriangularPreconditioner2x2<
+                        Stokes, Viscous, BDinvBT, Gradient, PrecVisc, SimplBFBT >;
+
+                    PrecStokes prec( K_op.block_11(), bdinvbt, K_op.block_12(), tri_prec_tmp, prec_11, bfbt_prec );
+
+                    int iters = run_fgmres_solve( K_op, prec, u, f, tmp_fgmres, max_iters,
+                        "sBFBT-Mmu(" + dc.name + "," + n_str + ",w=" + om_str + ")" );
+                    results_table->add_row( {
+                        { "viscosity", viscosity_label },
+                        { "preconditioner", "sBFBT_Mmu_" + dc.name + "_" + n_str + "_w" + om_str },
+                        { "iterations", iters },
+                        { "dofs_vel", num_dofs_velocity },
+                        { "dofs_pre", num_dofs_pressure } } );
+                }
+            }
+        }
+
+        // --- Simplified BFBT with DKG(1/mu) as middle operator ---
+        for ( int inner_iters : { 10, 50 } )
+        {
+            std::string n_str = std::to_string( inner_iters );
+            for ( double omega : { 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0 } )
+            {
+                char om_buf[8];
+                std::snprintf( om_buf, sizeof( om_buf ), "%.1f", omega );
+                std::string om_str( om_buf );
+
+                for ( auto& dc : diag_choices )
+                {
+                    BDinvBT bdinvbt( K_neumann.block_12(), K_neumann.block_21(), dc.inv_diag, bfbt_tmp_vel_1 );
+
+                    MGAdapter mg_adapter( prec_dkg_1v, dkg_ops[pressure_level] );
+
+                    auto inner_pcg_table = std::make_shared< util::Table >();
+                    InnerSolverMG inner_solver(
+                        linalg::solvers::IterativeSolverParameters{ inner_iters, 1e-6, 1e-16 },
+                        inner_pcg_table, bfbt_pcg_tmps, mg_adapter );
+
+                    using SimplBFBT = linalg::solvers::BFBTPreconditioner< BDinvBT, BDinvBT, PressureDKG, InnerSolverMG >;
+                    SimplBFBT bfbt_prec( bdinvbt, dkg_ops[pressure_level], inner_solver, bfbt_t1, bfbt_t2, omega );
+
+                    using PrecStokes = linalg::solvers::BlockTriangularPreconditioner2x2<
+                        Stokes, Viscous, BDinvBT, Gradient, PrecVisc, SimplBFBT >;
+
+                    PrecStokes prec( K_op.block_11(), bdinvbt, K_op.block_12(), tri_prec_tmp, prec_11, bfbt_prec );
+
+                    int iters = run_fgmres_solve( K_op, prec, u, f, tmp_fgmres, max_iters,
+                        "sBFBT-DKG(" + dc.name + "," + n_str + ",w=" + om_str + ")" );
+                    results_table->add_row( {
+                        { "viscosity", viscosity_label },
+                        { "preconditioner", "sBFBT_DKG_" + dc.name + "_" + n_str + "_w" + om_str },
+                        { "iterations", iters },
+                        { "dofs_vel", num_dofs_velocity },
+                        { "dofs_pre", num_dofs_pressure } } );
+                }
+            }
+        }
     }
 
     // ====================================================================
