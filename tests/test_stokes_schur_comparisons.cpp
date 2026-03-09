@@ -32,11 +32,15 @@
 #include "fe/wedge/operators/shell/prolongation_constant.hpp"
 #include "fe/wedge/operators/shell/restriction_constant.hpp"
 #include "fe/wedge/operators/shell/stokes.hpp"
+#include "fe/wedge/operators/shell/vector_kmass.hpp"
 #include "fe/wedge/operators/shell/vector_mass.hpp"
 
 #include "grid/shell/bit_masks.hpp"
 
+#include "linalg/composed_pressure_operator.hpp"
+#include "linalg/solvers/bfbt_preconditioner.hpp"
 #include "linalg/solvers/block_preconditioner_2x2.hpp"
+#include "linalg/solvers/chebyshev.hpp"
 #include "linalg/solvers/fgmres.hpp"
 #include "linalg/solvers/jacobi.hpp"
 #include "linalg/solvers/multigrid.hpp"
@@ -189,13 +193,59 @@ using ViscousMass = fe::wedge::operators::shell::VectorMass< ScalarType >;
 using Prolongation = fe::wedge::operators::shell::ProlongationVecConstant< ScalarType >;
 using Restriction  = fe::wedge::operators::shell::RestrictionVecConstant< ScalarType >;
 
-using PressureMass       = fe::wedge::operators::shell::KMass< ScalarType >;
-using PressureLaplace    = fe::wedge::operators::shell::LaplaceSimple< ScalarType >;
-using PressureDivKGrad   = fe::wedge::operators::shell::DivKGrad< ScalarType >;
+using ViscousKMass = fe::wedge::operators::shell::VectorKMass< ScalarType >;
+
+using PressureMass    = fe::wedge::operators::shell::KMass< ScalarType >;
+using PressureLaplace = fe::wedge::operators::shell::LaplaceSimple< ScalarType >;
+using PressureDKG     = fe::wedge::operators::shell::DivKGrad< ScalarType >;
 
 using Smoother         = linalg::solvers::Jacobi< Viscous >;
 using CoarseGridSolver = linalg::solvers::PCG< Viscous >;
 using PrecVisc         = linalg::solvers::Multigrid< Viscous, Prolongation, Restriction, Smoother, CoarseGridSolver >;
+
+// Scalar (pressure) MG types for DivKGrad inner solves
+using ScalarProlongation    = fe::wedge::operators::shell::ProlongationConstant< ScalarType >;
+using ScalarRestriction     = fe::wedge::operators::shell::RestrictionConstant< ScalarType >;
+using DKGSmoother           = linalg::solvers::Chebyshev< PressureDKG >;
+using DKGCoarseGridSolver   = linalg::solvers::PCG< PressureDKG >;
+using PrecDKG               = linalg::solvers::Multigrid< PressureDKG, ScalarProlongation, ScalarRestriction, DKGSmoother, DKGCoarseGridSolver >;
+
+// BFBT composed operator types
+using BDinvBT      = linalg::ComposedBDinvBT< Gradient, Divergence >;
+using BDinvADinvBT = linalg::ComposedBDinvADinvBT< Gradient, Divergence, Viscous >;
+
+// ---------------------------------------------------------------------------
+// Adapter: wraps a solver for operator A as a preconditioner for operator B
+// (same vector types, different operator types — ignores passed operator)
+// ---------------------------------------------------------------------------
+
+template < linalg::OperatorLike TargetOperatorT, linalg::solvers::SolverLike InnerSolverT >
+class SolverAdapter
+{
+  public:
+    using OperatorType      = TargetOperatorT;
+    using SolutionVectorType = linalg::SrcOf< OperatorType >;
+    using RHSVectorType     = linalg::DstOf< OperatorType >;
+
+    using InnerOperatorType = typename InnerSolverT::OperatorType;
+
+    static_assert( std::is_same_v< SolutionVectorType, linalg::SrcOf< InnerOperatorType > > );
+    static_assert( std::is_same_v< RHSVectorType, linalg::DstOf< InnerOperatorType > > );
+
+    SolverAdapter( InnerSolverT& inner_solver, InnerOperatorType& inner_operator )
+    : inner_solver_( inner_solver )
+    , inner_operator_( inner_operator )
+    {}
+
+    void solve_impl( OperatorType& /* ignored */, SolutionVectorType& x, const RHSVectorType& b )
+    {
+        linalg::solvers::solve( inner_solver_, inner_operator_, x, b );
+    }
+
+  private:
+    InnerSolverT&     inner_solver_;
+    InnerOperatorType& inner_operator_;
+};
 
 // ---------------------------------------------------------------------------
 // Interpolate viscosity coefficient for a given level
@@ -561,34 +611,6 @@ void test(
         pressure_laplace.set_diagonal( false );
     }
 
-    // Viscosity-weighted pressure Laplacian: div(1/mu * grad p)
-    PressureDivKGrad pressure_divkgrad(
-        domains[pressure_level], coords_shell[pressure_level], coords_radii[pressure_level],
-        boundary_mask_data[pressure_level], k_pm.grid_data(), true, false );
-
-    VectorQ1Scalar< ScalarType > diag_pressure_divkgrad( "diag_pDKG", domains[pressure_level], mask_data[pressure_level] );
-    {
-        VectorQ1Scalar< ScalarType > tmp( "tmp_pDKG", domains[pressure_level], mask_data[pressure_level] );
-        linalg::assign( tmp, 1.0 );
-        pressure_divkgrad.set_diagonal( true );
-        linalg::apply( pressure_divkgrad, tmp, diag_pressure_divkgrad );
-        pressure_divkgrad.set_diagonal( false );
-    }
-
-    // Viscosity-weighted pressure Laplacian with Neumann BCs: div(1/mu * grad p)
-    PressureDivKGrad pressure_divkgrad_neumann(
-        domains[pressure_level], coords_shell[pressure_level], coords_radii[pressure_level],
-        boundary_mask_data[pressure_level], k_pm.grid_data(), false, false );
-
-    VectorQ1Scalar< ScalarType > diag_pressure_divkgrad_neumann( "diag_pDKG_N", domains[pressure_level], mask_data[pressure_level] );
-    {
-        VectorQ1Scalar< ScalarType > tmp( "tmp_pDKG_N", domains[pressure_level], mask_data[pressure_level] );
-        linalg::assign( tmp, 1.0 );
-        pressure_divkgrad_neumann.set_diagonal( true );
-        linalg::apply( pressure_divkgrad_neumann, tmp, diag_pressure_divkgrad_neumann );
-        pressure_divkgrad_neumann.set_diagonal( false );
-    }
-
     // Temporary block vector for triangular preconditioners
     VectorQ1IsoQ2Q1< ScalarType > tri_prec_tmp(
         "tri_prec_tmp",
@@ -599,199 +621,240 @@ void test(
     util::logroot << "  velocity dofs: " << num_dofs_velocity << "\n";
     util::logroot << "  pressure dofs: " << num_dofs_pressure << "\n\n";
 
+    // PressureMass config omitted — see previous runs for reference
+
     // ====================================================================
-    // 1. Block-triangular: MG + lumped pressure mass (1/mu weighted)
+    // BFBT preconditioner variants
+    //
+    // S_BFBT^{-1} = (B D^{-1} B^T)^{-1} (B D^{-1} A D^{-1} B^T) (B D^{-1} B^T)^{-1}
+    //
+    // Three choices for D:
+    //   (a) diag(M_u)         — lumped velocity mass
+    //   (b) diag(A)           — diagonal of the viscous operator
+    //   (c) diag(M_u(mu))     — lumped viscosity-weighted velocity mass
     // ====================================================================
+
+    // ---- Velocity-space inverse diagonals for BFBT ----
+
+    // (a) inv_diag(A) — reuse the smoother diagonal from the finest level
+    VectorQ1Vec< ScalarType > inv_diag_A( "inv_diag_A", domains[velocity_level], mask_data[velocity_level] );
+    linalg::assign( inv_diag_A, inverse_diagonals[velocity_level] );
+
+    // (b) inv_diag(M_u(mu)) — lumped diagonal
+    VectorQ1Vec< ScalarType > inv_diag_MuK( "inv_diag_MuK", domains[velocity_level], mask_data[velocity_level] );
     {
-        using PrecSchur  = DiagonalSolver< PressureMass >;
+        ViscousKMass MK_diag(
+            domains[velocity_level], coords_shell[velocity_level], coords_radii[velocity_level],
+            k.grid_data(), true );
+        VectorQ1Vec< ScalarType > ones( "ones_vel2", domains[velocity_level], mask_data[velocity_level] );
+        linalg::assign( ones, 1.0 );
+        linalg::apply( MK_diag, ones, inv_diag_MuK );
+        linalg::invert_entries( inv_diag_MuK );
+    }
+
+    // (c) inv_diag(M_u(mu)) — row sums (non-lumped)
+    VectorQ1Vec< ScalarType > inv_diag_MuK_full( "inv_diag_MuK_full", domains[velocity_level], mask_data[velocity_level] );
+    {
+        ViscousKMass MK_full(
+            domains[velocity_level], coords_shell[velocity_level], coords_radii[velocity_level],
+            k.grid_data(), false );
+        VectorQ1Vec< ScalarType > ones( "ones_vel3", domains[velocity_level], mask_data[velocity_level] );
+        linalg::assign( ones, 1.0 );
+        linalg::apply( MK_full, ones, inv_diag_MuK_full );
+        linalg::invert_entries( inv_diag_MuK_full );
+    }
+
+    // ---- DivKGrad(1/mu) MG hierarchy for inner BFBT solves ----
+
+    // Build DivKGrad operators and Chebyshev smoothers on each pressure level
+    // Pressure levels: indices 0 to pressure_level in the domains array
+    const auto num_pressure_levels = pressure_level + 1; // e.g., levels 2,3 -> indices 0,1
+
+    std::vector< PressureDKG >                    dkg_ops;
+    std::vector< PressureDKG >                    dkg_ops_diag;
+    std::vector< ScalarProlongation >             dkg_P;
+    std::vector< ScalarRestriction >              dkg_R;
+    std::vector< VectorQ1Scalar< ScalarType > >   dkg_inv_diags;
+    std::vector< VectorQ1Scalar< ScalarType > >   dkg_diags;
+    std::vector< VectorQ1Scalar< ScalarType > >   dkg_tmp;
+    std::vector< VectorQ1Scalar< ScalarType > >   dkg_tmp_r;
+    std::vector< VectorQ1Scalar< ScalarType > >   dkg_tmp_e;
+
+    for ( size_t level = 0; level <= pressure_level; level++ )
+    {
+        // Inverse viscosity on this level
+        VectorQ1Scalar< ScalarType > k_inv_lev( "k_inv_dkg", domains[level], mask_data[level] );
+        interpolate_viscosity(
+            viscosity_mode, domains[level],
+            coords_shell[level], coords_radii[level],
+            boundary_mask_data[level], k_inv_lev );
+        linalg::invert_entries( k_inv_lev );
+
+        // DivKGrad operator (Dirichlet BCs, non-diagonal)
+        dkg_ops.emplace_back(
+            domains[level], coords_shell[level], coords_radii[level],
+            boundary_mask_data[level], k_inv_lev.grid_data(), true, false );
+
+        // Diagonal version for smoother setup
+        dkg_ops_diag.emplace_back(
+            domains[level], coords_shell[level], coords_radii[level],
+            boundary_mask_data[level], k_inv_lev.grid_data(), true, true );
+
+        // Diagonal and inverse diagonal
+        dkg_diags.emplace_back( "dkg_diag_" + std::to_string( level ), domains[level], mask_data[level] );
+        dkg_inv_diags.emplace_back( "dkg_inv_diag_" + std::to_string( level ), domains[level], mask_data[level] );
+        {
+            VectorQ1Scalar< ScalarType > ones( "ones_dkg", domains[level], mask_data[level] );
+            linalg::assign( ones, 1.0 );
+            linalg::apply( dkg_ops_diag.back(), ones, dkg_diags.back() );
+            linalg::assign( dkg_inv_diags.back(), dkg_diags.back() );
+            linalg::invert_entries( dkg_inv_diags.back() );
+        }
+
+        dkg_tmp.emplace_back( "dkg_tmp_" + std::to_string( level ), domains[level], mask_data[level] );
+
+        if ( level < pressure_level )
+        {
+            // Coarse-level operators and grid transfer
+            dkg_P.emplace_back( linalg::OperatorApplyMode::Add );
+            dkg_R.emplace_back( domains[level] );
+            dkg_tmp_r.emplace_back( "dkg_tmp_r_" + std::to_string( level ), domains[level], mask_data[level] );
+            dkg_tmp_e.emplace_back( "dkg_tmp_e_" + std::to_string( level ), domains[level], mask_data[level] );
+        }
+    }
+
+    // Chebyshev smoothers for each level
+    std::vector< DKGSmoother > dkg_smoothers;
+    for ( size_t level = 0; level <= pressure_level; level++ )
+    {
+        std::vector< VectorQ1Scalar< ScalarType > > cheb_tmps;
+        cheb_tmps.emplace_back( "cheb_tmp_0_" + std::to_string( level ), domains[level], mask_data[level] );
+        cheb_tmps.emplace_back( "cheb_tmp_1_" + std::to_string( level ), domains[level], mask_data[level] );
+
+        constexpr int cheb_order      = 3;
+        constexpr int cheb_iterations = 3;
+        dkg_smoothers.emplace_back( cheb_order, dkg_inv_diags[level], cheb_tmps, cheb_iterations );
+    }
+
+    // Coarse grid solver for DivKGrad
+    std::vector< VectorQ1Scalar< ScalarType > > dkg_cg_tmps;
+    for ( int i = 0; i < 4; i++ )
+        dkg_cg_tmps.emplace_back( "dkg_cg_tmp_" + std::to_string( i ), domains[0], mask_data[0] );
+
+    auto dkg_cg_table = std::make_shared< util::Table >();
+    DKGCoarseGridSolver dkg_coarse_solver(
+        linalg::solvers::IterativeSolverParameters{ 1000, 1e-6, 1e-16 }, dkg_cg_table, dkg_cg_tmps );
+
+    // Coarse-level DivKGrad operators (all except finest pressure level)
+    std::vector< PressureDKG > dkg_A_c( dkg_ops.begin(), dkg_ops.begin() + pressure_level );
+
+    constexpr int num_dkg_mg_cycles = 1;
+    PrecDKG prec_dkg(
+        dkg_P, dkg_R, dkg_A_c, dkg_tmp_r, dkg_tmp_e, dkg_tmp,
+        dkg_smoothers, dkg_smoothers, dkg_coarse_solver, num_dkg_mg_cycles, 1e-8 );
+
+    // ---- BFBT temporaries (velocity-space) ----
+
+    VectorQ1Vec< ScalarType > bfbt_tmp_vel_1( "bfbt_tmp_vel_1", domains[velocity_level], mask_data[velocity_level] );
+    VectorQ1Vec< ScalarType > bfbt_tmp_vel_2( "bfbt_tmp_vel_2", domains[velocity_level], mask_data[velocity_level] );
+    VectorQ1Vec< ScalarType > bfbt_tmp_vel_3( "bfbt_tmp_vel_3", domains[velocity_level], mask_data[velocity_level] );
+    VectorQ1Vec< ScalarType > bfbt_tmp_vel_4( "bfbt_tmp_vel_4", domains[velocity_level], mask_data[velocity_level] );
+
+    // ---- BFBT temporaries (pressure-space) ----
+
+    VectorQ1Scalar< ScalarType > bfbt_t1( "bfbt_t1", domains[pressure_level], mask_data[pressure_level] );
+    VectorQ1Scalar< ScalarType > bfbt_t2( "bfbt_t2", domains[pressure_level], mask_data[pressure_level] );
+
+    std::vector< VectorQ1Scalar< ScalarType > > bfbt_pcg_tmps;
+    for ( int i = 0; i < 4; i++ )
+        bfbt_pcg_tmps.emplace_back( "bfbt_pcg_tmp_" + std::to_string( i ), domains[pressure_level], mask_data[pressure_level] );
+
+    // Helper lambda: BFBT with PCG + diagonal inner preconditioner
+    auto run_bfbt_pcg = [&]( VectorQ1Vec< ScalarType >&    inv_diag,
+                             VectorQ1Scalar< ScalarType >& inner_prec_diag,
+                             int                           inner_iters,
+                             const std::string& label,
+                             const std::string& table_label )
+    {
+        BDinvBT bdinvbt( K_neumann.block_12(), K_neumann.block_21(), inv_diag, bfbt_tmp_vel_1 );
+        BDinvADinvBT bdinvadinvbt( K_neumann.block_12(), K_neumann.block_21(), K_neumann.block_11(),
+                                   inv_diag, bfbt_tmp_vel_3, bfbt_tmp_vel_4 );
+
+        VectorQ1Scalar< ScalarType > diag_copy( "diag_inner_bfbt", domains[pressure_level], mask_data[pressure_level] );
+        linalg::assign( diag_copy, inner_prec_diag );
+
+        using InnerPrec   = linalg::solvers::DiagonalSolver< BDinvBT >;
+        using InnerSolver = linalg::solvers::PCG< BDinvBT, InnerPrec >;
+
+        InnerPrec inner_prec( diag_copy );
+
+        auto inner_pcg_table = std::make_shared< util::Table >();
+        InnerSolver inner_solver(
+            linalg::solvers::IterativeSolverParameters{ inner_iters, 1e-6, 1e-16 },
+            inner_pcg_table, bfbt_pcg_tmps, inner_prec );
+
+        using BFBTPrec = linalg::solvers::BFBTPreconditioner< BDinvBT, BDinvBT, BDinvADinvBT, InnerSolver >;
+        BFBTPrec bfbt_prec( bdinvbt, bdinvadinvbt, inner_solver, bfbt_t1, bfbt_t2 );
+
         using PrecStokes = linalg::solvers::BlockTriangularPreconditioner2x2<
-            Stokes, Viscous, PressureMass, Gradient, PrecVisc, PrecSchur >;
+            Stokes, Viscous, BDinvBT, Gradient, PrecVisc, BFBTPrec >;
 
-        VectorQ1Scalar< ScalarType > diag_copy( "diag_copy_pmass2", domains[pressure_level], mask_data[pressure_level] );
-        linalg::assign( diag_copy, lumped_diag_pmass );
+        PrecStokes prec( K_op.block_11(), bdinvbt, K_op.block_12(), tri_prec_tmp, prec_11, bfbt_prec );
 
-        PrecSchur  prec_22( diag_copy );
-        PrecStokes prec( K_op.block_11(), pmass, K_op.block_12(), tri_prec_tmp, prec_11, prec_22 );
-
-        int iters = run_fgmres_solve( K_op, prec, u, f, tmp_fgmres, max_iters, "BlockTri + PressureMass(1/mu)" );
+        int iters = run_fgmres_solve( K_op, prec, u, f, tmp_fgmres, max_iters, label );
         results_table->add_row( {
             { "viscosity", viscosity_label },
-            { "preconditioner", std::string( "BlockTri_PressureMass" ) },
+            { "preconditioner", table_label },
             { "iterations", iters },
             { "dofs_vel", num_dofs_velocity },
             { "dofs_pre", num_dofs_pressure } } );
-    }
+    };
 
-    // ====================================================================
-    // 2. Block-triangular: MG + pressure Laplacian diagonal
-    // ====================================================================
+    // Helper lambda: BFBT with PCG + DivKGrad MG V-cycle inner preconditioner
+    using MGAdapter     = SolverAdapter< BDinvBT, PrecDKG >;
+    using InnerSolverMG = linalg::solvers::PCG< BDinvBT, MGAdapter >;
+
+    auto run_bfbt_mg = [&]( VectorQ1Vec< ScalarType >& inv_diag,
+                            int                        inner_iters,
+                            const std::string& label,
+                            const std::string& table_label )
     {
-        using PrecSchur  = DiagonalSolver< PressureLaplace >;
+        BDinvBT bdinvbt( K_neumann.block_12(), K_neumann.block_21(), inv_diag, bfbt_tmp_vel_1 );
+        BDinvADinvBT bdinvadinvbt( K_neumann.block_12(), K_neumann.block_21(), K_neumann.block_11(),
+                                   inv_diag, bfbt_tmp_vel_3, bfbt_tmp_vel_4 );
+
+        MGAdapter mg_adapter( prec_dkg, dkg_ops[pressure_level] );
+
+        auto inner_pcg_table = std::make_shared< util::Table >();
+        InnerSolverMG inner_solver(
+            linalg::solvers::IterativeSolverParameters{ inner_iters, 1e-6, 1e-16 },
+            inner_pcg_table, bfbt_pcg_tmps, mg_adapter );
+
+        using BFBTPrec = linalg::solvers::BFBTPreconditioner< BDinvBT, BDinvBT, BDinvADinvBT, InnerSolverMG >;
+        BFBTPrec bfbt_prec( bdinvbt, bdinvadinvbt, inner_solver, bfbt_t1, bfbt_t2 );
+
         using PrecStokes = linalg::solvers::BlockTriangularPreconditioner2x2<
-            Stokes, Viscous, PressureLaplace, Gradient, PrecVisc, PrecSchur >;
+            Stokes, Viscous, BDinvBT, Gradient, PrecVisc, BFBTPrec >;
 
-        VectorQ1Scalar< ScalarType > diag_copy( "diag_copy_pL2", domains[pressure_level], mask_data[pressure_level] );
-        linalg::assign( diag_copy, diag_pressure_laplace );
+        PrecStokes prec( K_op.block_11(), bdinvbt, K_op.block_12(), tri_prec_tmp, prec_11, bfbt_prec );
 
-        PrecSchur  prec_22( diag_copy );
-        PrecStokes prec( K_op.block_11(), pressure_laplace, K_op.block_12(), tri_prec_tmp, prec_11, prec_22 );
-
-        int iters = run_fgmres_solve( K_op, prec, u, f, tmp_fgmres, max_iters, "BlockTri + PressureLapl(diag)" );
+        int iters = run_fgmres_solve( K_op, prec, u, f, tmp_fgmres, max_iters, label );
         results_table->add_row( {
             { "viscosity", viscosity_label },
-            { "preconditioner", std::string( "BlockTri_PressureLaplace" ) },
+            { "preconditioner", table_label },
             { "iterations", iters },
             { "dofs_vel", num_dofs_velocity },
             { "dofs_pre", num_dofs_pressure } } );
-    }
+    };
 
-    // ====================================================================
-    // 3. Block-triangular: MG + pressure Laplacian PCG (few iterations)
-    // ====================================================================
-    {
-        using PrecSchurInner = DiagonalSolver< PressureLaplace >;
-        using PrecSchur      = linalg::solvers::PCG< PressureLaplace, PrecSchurInner >;
-        using PrecStokes     = linalg::solvers::BlockTriangularPreconditioner2x2<
-            Stokes, Viscous, PressureLaplace, Gradient, PrecVisc, PrecSchur >;
+    // BFBT with lumped MuK diagonal
+    run_bfbt_pcg( inv_diag_MuK, dkg_diags[pressure_level],
+                  50, "BlockTri + BFBT(MuK_lump,DKG_D,50)", "BlockTri_BFBT_MuK_lump_50" );
 
-        VectorQ1Scalar< ScalarType > diag_copy( "diag_copy_pL4", domains[pressure_level], mask_data[pressure_level] );
-        linalg::assign( diag_copy, diag_pressure_laplace );
+    // BFBT with full (row-sum) MuK diagonal
+    run_bfbt_pcg( inv_diag_MuK_full, dkg_diags[pressure_level],
+                  50, "BlockTri + BFBT(MuK_full,DKG_D,50)", "BlockTri_BFBT_MuK_full_50" );
 
-        PrecSchurInner prec_inner( diag_copy );
-
-        std::vector< VectorQ1Scalar< ScalarType > > pcg_tmps;
-        for ( int i = 0; i < 4; i++ )
-            pcg_tmps.emplace_back( "pcg_tmp_" + std::to_string( i ), domains[pressure_level], mask_data[pressure_level] );
-
-        auto pcg_table = std::make_shared< util::Table >();
-        PrecSchur prec_22(
-            linalg::solvers::IterativeSolverParameters{ 10, 1e-2, 1e-16 },
-            pcg_table, pcg_tmps, prec_inner );
-
-        PrecStokes prec( K_op.block_11(), pressure_laplace, K_op.block_12(), tri_prec_tmp, prec_11, prec_22 );
-
-        int iters = run_fgmres_solve( K_op, prec, u, f, tmp_fgmres, max_iters, "BlockTri + PressureLapl(PCG-10)" );
-        results_table->add_row( {
-            { "viscosity", viscosity_label },
-            { "preconditioner", std::string( "BlockTri_PressureLaplacePCG" ) },
-            { "iterations", iters },
-            { "dofs_vel", num_dofs_velocity },
-            { "dofs_pre", num_dofs_pressure } } );
-    }
-
-    // ====================================================================
-    // 4. Block-triangular: MG + div(1/mu grad) diagonal
-    // ====================================================================
-    {
-        using PrecSchur  = DiagonalSolver< PressureDivKGrad >;
-        using PrecStokes = linalg::solvers::BlockTriangularPreconditioner2x2<
-            Stokes, Viscous, PressureDivKGrad, Gradient, PrecVisc, PrecSchur >;
-
-        VectorQ1Scalar< ScalarType > diag_copy( "diag_copy_dkg2", domains[pressure_level], mask_data[pressure_level] );
-        linalg::assign( diag_copy, diag_pressure_divkgrad );
-
-        PrecSchur  prec_22( diag_copy );
-        PrecStokes prec( K_op.block_11(), pressure_divkgrad, K_op.block_12(), tri_prec_tmp, prec_11, prec_22 );
-
-        int iters = run_fgmres_solve( K_op, prec, u, f, tmp_fgmres, max_iters, "BlockTri + DivKGrad(1/mu,diag)" );
-        results_table->add_row( {
-            { "viscosity", viscosity_label },
-            { "preconditioner", std::string( "BlockTri_DivKGrad_diag" ) },
-            { "iterations", iters },
-            { "dofs_vel", num_dofs_velocity },
-            { "dofs_pre", num_dofs_pressure } } );
-    }
-
-    // ====================================================================
-    // 5. Block-triangular: MG + div(1/mu grad) PCG (10 iterations)
-    // ====================================================================
-    {
-        using PrecSchurInner = DiagonalSolver< PressureDivKGrad >;
-        using PrecSchur      = linalg::solvers::PCG< PressureDivKGrad, PrecSchurInner >;
-        using PrecStokes     = linalg::solvers::BlockTriangularPreconditioner2x2<
-            Stokes, Viscous, PressureDivKGrad, Gradient, PrecVisc, PrecSchur >;
-
-        VectorQ1Scalar< ScalarType > diag_copy( "diag_copy_dkg_pcg", domains[pressure_level], mask_data[pressure_level] );
-        linalg::assign( diag_copy, diag_pressure_divkgrad );
-
-        PrecSchurInner prec_inner( diag_copy );
-
-        std::vector< VectorQ1Scalar< ScalarType > > pcg_tmps;
-        for ( int i = 0; i < 4; i++ )
-            pcg_tmps.emplace_back( "pcg_dkg_tmp_" + std::to_string( i ), domains[pressure_level], mask_data[pressure_level] );
-
-        auto pcg_table = std::make_shared< util::Table >();
-        PrecSchur prec_22(
-            linalg::solvers::IterativeSolverParameters{ 10, 1e-2, 1e-16 },
-            pcg_table, pcg_tmps, prec_inner );
-
-        PrecStokes prec( K_op.block_11(), pressure_divkgrad, K_op.block_12(), tri_prec_tmp, prec_11, prec_22 );
-
-        int iters = run_fgmres_solve( K_op, prec, u, f, tmp_fgmres, max_iters, "BlockTri + DivKGrad(1/mu,PCG-10)" );
-        results_table->add_row( {
-            { "viscosity", viscosity_label },
-            { "preconditioner", std::string( "BlockTri_DivKGrad_PCG" ) },
-            { "iterations", iters },
-            { "dofs_vel", num_dofs_velocity },
-            { "dofs_pre", num_dofs_pressure } } );
-    }
-
-    // ====================================================================
-    // 6. Block-triangular: MG + div(1/mu grad) Neumann, diagonal
-    // ====================================================================
-    {
-        using PrecSchur  = DiagonalSolver< PressureDivKGrad >;
-        using PrecStokes = linalg::solvers::BlockTriangularPreconditioner2x2<
-            Stokes, Viscous, PressureDivKGrad, Gradient, PrecVisc, PrecSchur >;
-
-        VectorQ1Scalar< ScalarType > diag_copy( "diag_copy_dkg_n", domains[pressure_level], mask_data[pressure_level] );
-        linalg::assign( diag_copy, diag_pressure_divkgrad_neumann );
-
-        PrecSchur  prec_22( diag_copy );
-        PrecStokes prec( K_op.block_11(), pressure_divkgrad_neumann, K_op.block_12(), tri_prec_tmp, prec_11, prec_22 );
-
-        int iters = run_fgmres_solve( K_op, prec, u, f, tmp_fgmres, max_iters, "BlockTri + DivKGrad(1/mu,N,diag)" );
-        results_table->add_row( {
-            { "viscosity", viscosity_label },
-            { "preconditioner", std::string( "BlockTri_DivKGrad_N_diag" ) },
-            { "iterations", iters },
-            { "dofs_vel", num_dofs_velocity },
-            { "dofs_pre", num_dofs_pressure } } );
-    }
-
-    // ====================================================================
-    // 7. Block-triangular: MG + div(1/mu grad) Neumann, PCG-10
-    // ====================================================================
-    {
-        using PrecSchurInner = DiagonalSolver< PressureDivKGrad >;
-        using PrecSchur      = linalg::solvers::PCG< PressureDivKGrad, PrecSchurInner >;
-        using PrecStokes     = linalg::solvers::BlockTriangularPreconditioner2x2<
-            Stokes, Viscous, PressureDivKGrad, Gradient, PrecVisc, PrecSchur >;
-
-        VectorQ1Scalar< ScalarType > diag_copy( "diag_copy_dkg_n_pcg", domains[pressure_level], mask_data[pressure_level] );
-        linalg::assign( diag_copy, diag_pressure_divkgrad_neumann );
-
-        PrecSchurInner prec_inner( diag_copy );
-
-        std::vector< VectorQ1Scalar< ScalarType > > pcg_tmps;
-        for ( int i = 0; i < 4; i++ )
-            pcg_tmps.emplace_back( "pcg_dkg_n_tmp_" + std::to_string( i ), domains[pressure_level], mask_data[pressure_level] );
-
-        auto pcg_table = std::make_shared< util::Table >();
-        PrecSchur prec_22(
-            linalg::solvers::IterativeSolverParameters{ 10, 1e-2, 1e-16 },
-            pcg_table, pcg_tmps, prec_inner );
-
-        PrecStokes prec( K_op.block_11(), pressure_divkgrad_neumann, K_op.block_12(), tri_prec_tmp, prec_11, prec_22 );
-
-        int iters = run_fgmres_solve( K_op, prec, u, f, tmp_fgmres, max_iters, "BlockTri + DivKGrad(1/mu,N,PCG-10)" );
-        results_table->add_row( {
-            { "viscosity", viscosity_label },
-            { "preconditioner", std::string( "BlockTri_DivKGrad_N_PCG" ) },
-            { "iterations", iters },
-            { "dofs_vel", num_dofs_velocity },
-            { "dofs_pre", num_dofs_pressure } } );
-    }
 }
 
 // ---------------------------------------------------------------------------
