@@ -2,17 +2,21 @@
 // Stokes Schur complement preconditioner comparison test.
 //
 // Compares iteration counts for different Schur complement approximations
-// in a block preconditioner for the Stokes system:
+// in a block-triangular preconditioner for the Stokes system:
 //
-//   1. Block-diagonal:   MG + Identity        (no pressure preconditioning)
-//   2. Block-diagonal:   MG + lumped M_p(1/mu) (inverse-viscosity-weighted pressure mass)
-//   3. Block-triangular: MG + lumped M_p(1/mu) (current default approach)
-//   4. Block-diagonal:   MG + diag(L_p)        (pressure Laplacian diagonal)
-//   5. Block-triangular: MG + diag(L_p)        (pressure Laplacian diagonal)
-//   6. Block-diagonal:   MG + L_p via PCG(10)   (pressure Laplacian PCG)
-//   7. Block-triangular: MG + L_p via PCG(10)   (pressure Laplacian PCG)
-//   8. Block-diagonal:   MG + diag(div(1/mu grad)) (viscosity-weighted pressure Laplacian)
-//   9. Block-triangular: MG + diag(div(1/mu grad)) (viscosity-weighted pressure Laplacian)
+//   1. BlockTri + lumped M_p(1/mu)  (inverse-viscosity-weighted pressure mass)
+//
+//   BFBT variants with exact BD⁻¹Bᵀ (Neumann BCs), omega sweep 0.1–1.0:
+//     Diagonal choices: diag(A), diag(M_u(mu)), diag(M_u(sqrt(mu)))
+//
+//   2. BFBT + PCG(25) + diagonal inner preconditioner
+//   3. BFBT + naked MG V-cycle inner solver
+//   4. BFBT + PCG(10) + DivKGrad MG V-cycle inner preconditioner
+//   5. BFBT + DKG substitute subsystem + diagonal PCG(25) inner solver
+//   6. BFBT + DKG substitute subsystem + MG PCG(10) inner solver
+//
+//   BFBT with R·DKG_fine·P replacing BD⁻¹Bᵀ:
+//   7. BFBT-RDkgP + PCG(5/10) + diagonal inner preconditioner
 //
 // Each configuration is tested for:
 //   - Constant viscosity (k=1)
@@ -1035,8 +1039,83 @@ void test(
     };
 
     // =====================================================================
-    // Exact BD⁻¹Bᵀ subsystem — Neumann BCs, 100 inner iterations
+    // Exact BD⁻¹Bᵀ subsystem — Neumann BCs
     // =====================================================================
+
+    // --- BFBT with PCG + diagonal inner preconditioner, omega sweep ---
+    for ( double omega : { 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0 } )
+    {
+        char om_buf[8];
+        std::snprintf( om_buf, sizeof( om_buf ), "%.1f", omega );
+        std::string om_str( om_buf );
+
+        run_bfbt_pcg( inv_diag_A, dkg_diags[pressure_level], 25, omega,
+                      "BFBT-PCG(diagA,25,w=" + om_str + ")", "BFBT_PCG_diagA_25_w" + om_str );
+        run_bfbt_pcg( inv_diag_MuK, dkg_diags[pressure_level], 25, omega,
+                      "BFBT-PCG(MuK,25,w=" + om_str + ")", "BFBT_PCG_MuK_25_w" + om_str );
+        run_bfbt_pcg( inv_diag_MuK_sqrt, dkg_diags[pressure_level], 25, omega,
+                      "BFBT-PCG(MuK_sqrt,25,w=" + om_str + ")", "BFBT_PCG_MuK_sqrt_25_w" + om_str );
+    }
+
+    // --- BFBT with naked MG V-cycles as inner solver ---
+    for ( double omega : { 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0 } )
+    {
+        char om_buf[8];
+        std::snprintf( om_buf, sizeof( om_buf ), "%.1f", omega );
+        std::string om_str( om_buf );
+
+        run_bfbt_naked_mg( inv_diag_A, prec_dkg_1v, omega,
+                           "BFBT-MG(diagA,w=" + om_str + ")", "BFBT_MG_diagA_w" + om_str );
+        run_bfbt_naked_mg( inv_diag_MuK, prec_dkg_1v, omega,
+                           "BFBT-MG(MuK,w=" + om_str + ")", "BFBT_MG_MuK_w" + om_str );
+        run_bfbt_naked_mg( inv_diag_MuK_sqrt, prec_dkg_1v, omega,
+                           "BFBT-MG(MuK_sqrt,w=" + om_str + ")", "BFBT_MG_MuK_sqrt_w" + om_str );
+    }
+
+    // --- BFBT with PCG + DivKGrad MG V-cycle inner preconditioner ---
+    for ( double omega : { 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0 } )
+    {
+        char om_buf[8];
+        std::snprintf( om_buf, sizeof( om_buf ), "%.1f", omega );
+        std::string om_str( om_buf );
+
+        run_bfbt_mg_pcg( inv_diag_A, prec_dkg_1v, dkg_ops[pressure_level], 10, omega,
+                         "BFBT-MG-PCG(diagA,10,w=" + om_str + ")", "BFBT_MG_PCG_diagA_10_w" + om_str );
+        run_bfbt_mg_pcg( inv_diag_MuK, prec_dkg_1v, dkg_ops[pressure_level], 10, omega,
+                         "BFBT-MG-PCG(MuK,10,w=" + om_str + ")", "BFBT_MG_PCG_MuK_10_w" + om_str );
+        run_bfbt_mg_pcg( inv_diag_MuK_sqrt, prec_dkg_1v, dkg_ops[pressure_level], 10, omega,
+                         "BFBT-MG-PCG(MuK_sqrt,10,w=" + om_str + ")", "BFBT_MG_PCG_MuK_sqrt_10_w" + om_str );
+    }
+
+    // --- BFBT with DKG as substitute subsystem + diagonal inner preconditioner ---
+    for ( double omega : { 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0 } )
+    {
+        char om_buf[8];
+        std::snprintf( om_buf, sizeof( om_buf ), "%.1f", omega );
+        std::string om_str( om_buf );
+
+        run_bfbt_dkg_pcg( inv_diag_A, 25, omega,
+                          "BFBT-DKG(diagA,25,w=" + om_str + ")", "BFBT_DKG_diagA_25_w" + om_str );
+        run_bfbt_dkg_pcg( inv_diag_MuK, 25, omega,
+                          "BFBT-DKG(MuK,25,w=" + om_str + ")", "BFBT_DKG_MuK_25_w" + om_str );
+        run_bfbt_dkg_pcg( inv_diag_MuK_sqrt, 25, omega,
+                          "BFBT-DKG(MuK_sqrt,25,w=" + om_str + ")", "BFBT_DKG_MuK_sqrt_25_w" + om_str );
+    }
+
+    // --- BFBT with DKG as substitute subsystem + MG inner preconditioner ---
+    for ( double omega : { 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0 } )
+    {
+        char om_buf[8];
+        std::snprintf( om_buf, sizeof( om_buf ), "%.1f", omega );
+        std::string om_str( om_buf );
+
+        run_bfbt_dkg_mg_pcg( inv_diag_A, 10, omega,
+                             "BFBT-DKG-MG(diagA,10,w=" + om_str + ")", "BFBT_DKG_MG_diagA_10_w" + om_str );
+        run_bfbt_dkg_mg_pcg( inv_diag_MuK, 10, omega,
+                             "BFBT-DKG-MG(MuK,10,w=" + om_str + ")", "BFBT_DKG_MG_MuK_10_w" + om_str );
+        run_bfbt_dkg_mg_pcg( inv_diag_MuK_sqrt, 10, omega,
+                             "BFBT-DKG-MG(MuK_sqrt,10,w=" + om_str + ")", "BFBT_DKG_MG_MuK_sqrt_10_w" + om_str );
+    }
 
     // ====================================================================
     // BFBT with R·DKG_fine·P as substitute for BD⁻¹Bᵀ
