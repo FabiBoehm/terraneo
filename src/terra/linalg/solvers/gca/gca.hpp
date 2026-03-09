@@ -145,10 +145,12 @@ class TwoGridGCA
         Kokkos::fence();
     }
 
-    /// @brief Precomputes AMG-style interpolation weights for OperatorDependent mode.
-    /// Assembles the partial stiffness row at each fine node, communicates across
-    /// subdomain boundaries, then computes w_p = -a_ip / (a_ii + a_weak) with
-    /// negative weight clamping and min-weight clamping.
+    /// @brief Precomputes operator-dependent interpolation weights.
+    ///
+    /// Uses a ratio-corrected approach: computes standard AMG weights (w_amg)
+    /// for the actual operator and reference AMG weights (w_ref) for a unit-
+    /// coefficient operator. The ratio w_amg/w_ref isolates the coefficient
+    /// effect, which is then applied as a correction to geometric linear weights.
     void precompute_amg_weights()
     {
         const auto& domain = domain_fine_;
@@ -160,12 +162,18 @@ class TwoGridGCA
         const int   ncy    = fine_num_cells_y_;
         const int   ncr    = fine_num_cells_r_;
 
-        // Allocate fields for partial stiffness entries.
+        // Allocate fields for stiffness entries and diagonal-normalized reference.
         grid::Grid4DDataScalar< ScalarT > a_ip_0( "a_ip_0", num_sd, nx, ny, nr );
         grid::Grid4DDataScalar< ScalarT > a_ip_1( "a_ip_1", num_sd, nx, ny, nr );
         grid::Grid4DDataScalar< ScalarT > a_ip_2( "a_ip_2", num_sd, nx, ny, nr );
         grid::Grid4DDataScalar< ScalarT > a_ip_3( "a_ip_3", num_sd, nx, ny, nr );
         grid::Grid4DDataScalar< ScalarT > a_denom( "a_denom", num_sd, nx, ny, nr );
+
+        grid::Grid4DDataScalar< ScalarT > a_ip_ref_0( "a_ip_ref_0", num_sd, nx, ny, nr );
+        grid::Grid4DDataScalar< ScalarT > a_ip_ref_1( "a_ip_ref_1", num_sd, nx, ny, nr );
+        grid::Grid4DDataScalar< ScalarT > a_ip_ref_2( "a_ip_ref_2", num_sd, nx, ny, nr );
+        grid::Grid4DDataScalar< ScalarT > a_ip_ref_3( "a_ip_ref_3", num_sd, nx, ny, nr );
+        grid::Grid4DDataScalar< ScalarT > a_denom_ref( "a_denom_ref", num_sd, nx, ny, nr );
 
         parent_weight_0_ = grid::Grid4DDataScalar< ScalarT >( "pw0", num_sd, nx, ny, nr );
         parent_weight_1_ = grid::Grid4DDataScalar< ScalarT >( "pw1", num_sd, nx, ny, nr );
@@ -177,9 +185,13 @@ class TwoGridGCA
         auto pw2 = parent_weight_2_;
         auto pw3 = parent_weight_3_;
 
-        auto fine_op = fine_op_;
+        auto fine_op    = fine_op_;
+        auto grid_fine  = grid_fine_;
+        auto radii_fine = radii_fine_;
 
-        // Phase 1: Assemble partial a_ip and a_denom for each fine node.
+        // Phase 1: Assemble stiffness entries. For the diagonal-proxy reference,
+        // each element's off-diagonal entries are normalized by its diagonal entry
+        // A(i,j)/A(i,i), removing element-volume scaling while preserving connectivity.
         Kokkos::parallel_for(
             "amg_weights_phase1",
             Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >( { 0, 0, 0, 0 }, { num_sd, nx, ny, nr } ),
@@ -228,9 +240,12 @@ class TwoGridGCA
                     px[3] = 2 * x1;  py[3] = 2 * y1;  pr[3] = 2 * r_top;
                 }
 
-                ScalarT aii   = 0;
-                ScalarT aip[4] = {};
-                ScalarT aweak = 0;
+                ScalarT aii       = 0;
+                ScalarT aip[4]    = {};
+                ScalarT aweak     = 0;
+                ScalarT aii_ref   = 0;
+                ScalarT aip_ref[4] = {};
+                ScalarT aweak_ref = 0;
 
                 // Iterate over ALL fine hexes containing this node.
                 for ( int dhx = -1; dhx <= 0; dhx++ )
@@ -255,6 +270,12 @@ class TwoGridGCA
 
                         auto A = fine_op.get_local_matrix( sd, hx, hy, hr, w );
 
+                        // Diagonal-proxy: normalize off-diagonals by this element's diagonal.
+                        ScalarT diag     = A( lidx, lidx );
+                        ScalarT inv_diag = ( Kokkos::abs( diag ) > ScalarT( 1e-15 ) )
+                                               ? ScalarT( 1 ) / diag
+                                               : ScalarT( 0 );
+
                         // Get vertex coords for this wedge.
                         dense::Vec< int, 4 > hex_idx = { sd, hx, hy, hr };
                         dense::Vec< int, 4 > verts[6];
@@ -277,11 +298,15 @@ class TwoGridGCA
                             verts[5] = hex_idx + dense::Vec< int, 4 >( { 0, 1, 0, 1 } );
                         }
 
-                        aii += A( lidx, lidx );
+                        aii     += A( lidx, lidx );
+                        aii_ref += ScalarT( 1 );  // diagonal-normalized diagonal = A(i,i)/A(i,i) = 1
                         for ( int col = 0; col < 6; col++ )
                         {
                             if ( col == lidx )
                                 continue;
+
+                            ScalarT a_val     = A( lidx, col );
+                            ScalarT a_val_ref = a_val * inv_diag;
 
                             bool is_parent = false;
                             for ( int p = 0; p < num_parents; p++ )
@@ -289,14 +314,16 @@ class TwoGridGCA
                                 if ( verts[col]( 1 ) == px[p] && verts[col]( 2 ) == py[p] &&
                                      verts[col]( 3 ) == pr[p] )
                                 {
-                                    aip[p] += A( lidx, col );
+                                    aip[p]     += a_val;
+                                    aip_ref[p] += a_val_ref;
                                     is_parent = true;
                                     break;
                                 }
                             }
                             if ( !is_parent )
                             {
-                                aweak += A( lidx, col );
+                                aweak     += a_val;
+                                aweak_ref += a_val_ref;
                             }
                         }
                     }
@@ -307,23 +334,34 @@ class TwoGridGCA
                 a_ip_2( sd, x, y, r ) = aip[2];
                 a_ip_3( sd, x, y, r ) = aip[3];
                 a_denom( sd, x, y, r ) = aii + aweak;
+
+                a_ip_ref_0( sd, x, y, r ) = aip_ref[0];
+                a_ip_ref_1( sd, x, y, r ) = aip_ref[1];
+                a_ip_ref_2( sd, x, y, r ) = aip_ref[2];
+                a_ip_ref_3( sd, x, y, r ) = aip_ref[3];
+                a_denom_ref( sd, x, y, r ) = aii_ref + aweak_ref;
             } );
 
         Kokkos::fence();
 
         // Phase 2: Communicate across subdomain boundaries (SUM reduction).
-        communication::shell::send_recv(
-            domain, a_ip_0, communication::CommunicationReduction::SUM );
-        communication::shell::send_recv(
-            domain, a_ip_1, communication::CommunicationReduction::SUM );
-        communication::shell::send_recv(
-            domain, a_ip_2, communication::CommunicationReduction::SUM );
-        communication::shell::send_recv(
-            domain, a_ip_3, communication::CommunicationReduction::SUM );
-        communication::shell::send_recv(
-            domain, a_denom, communication::CommunicationReduction::SUM );
+        communication::shell::send_recv( domain, a_ip_0, communication::CommunicationReduction::SUM );
+        communication::shell::send_recv( domain, a_ip_1, communication::CommunicationReduction::SUM );
+        communication::shell::send_recv( domain, a_ip_2, communication::CommunicationReduction::SUM );
+        communication::shell::send_recv( domain, a_ip_3, communication::CommunicationReduction::SUM );
+        communication::shell::send_recv( domain, a_denom, communication::CommunicationReduction::SUM );
+        communication::shell::send_recv( domain, a_ip_ref_0, communication::CommunicationReduction::SUM );
+        communication::shell::send_recv( domain, a_ip_ref_1, communication::CommunicationReduction::SUM );
+        communication::shell::send_recv( domain, a_ip_ref_2, communication::CommunicationReduction::SUM );
+        communication::shell::send_recv( domain, a_ip_ref_3, communication::CommunicationReduction::SUM );
+        communication::shell::send_recv( domain, a_denom_ref, communication::CommunicationReduction::SUM );
 
-        // Phase 3: Compute final weights with clamping.
+        // Phase 3: Compute ratio-corrected weights using diagonal proxy.
+        // w_amg = -a_ip / (a_ii + a_weak): standard AMG weights (biased by geometry).
+        // w_ref = -a_ip_ref / (a_ii_ref + a_weak_ref): diagonal-normalized AMG weights
+        //   (geometry removed per-element, approximates k=1 weights).
+        // correction = w_amg / w_ref: isolates coefficient effect.
+        // w_final = w_lin * correction: applies coefficient effect to geometric weights.
         Kokkos::parallel_for(
             "amg_weights_phase3",
             Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >( { 0, 0, 0, 0 }, { num_sd, nx, ny, nr } ),
@@ -336,57 +374,134 @@ class TwoGridGCA
 
                 const int num_parents = ( x_even && y_even ) ? 2 : 4;
 
-                ScalarT denom = a_denom( sd, x, y, r );
+                // Compute standard AMG weights.
+                ScalarT denom     = a_denom( sd, x, y, r );
+                ScalarT denom_ref = a_denom_ref( sd, x, y, r );
+
+                ScalarT w_amg[4], w_ref[4];
                 if ( denom != ScalarT( 0 ) )
                 {
-                    ScalarT w[4];
-                    w[0] = -a_ip_0( sd, x, y, r ) / denom;
-                    w[1] = -a_ip_1( sd, x, y, r ) / denom;
-                    w[2] = ( num_parents > 2 ) ? -a_ip_2( sd, x, y, r ) / denom : ScalarT( 0 );
-                    w[3] = ( num_parents > 2 ) ? -a_ip_3( sd, x, y, r ) / denom : ScalarT( 0 );
+                    w_amg[0] = -a_ip_0( sd, x, y, r ) / denom;
+                    w_amg[1] = -a_ip_1( sd, x, y, r ) / denom;
+                    w_amg[2] = ( num_parents > 2 ) ? -a_ip_2( sd, x, y, r ) / denom : ScalarT( 0 );
+                    w_amg[3] = ( num_parents > 2 ) ? -a_ip_3( sd, x, y, r ) / denom : ScalarT( 0 );
+                }
+                else
+                {
+                    for ( int p = 0; p < 4; p++ ) w_amg[p] = ScalarT( 0 );
+                }
 
-                    // Clamp negative weights to zero and rescale.
-                    ScalarT sum = 0;
-                    for ( int p = 0; p < num_parents; p++ )
+                if ( denom_ref != ScalarT( 0 ) )
+                {
+                    w_ref[0] = -a_ip_ref_0( sd, x, y, r ) / denom_ref;
+                    w_ref[1] = -a_ip_ref_1( sd, x, y, r ) / denom_ref;
+                    w_ref[2] = ( num_parents > 2 ) ? -a_ip_ref_2( sd, x, y, r ) / denom_ref : ScalarT( 0 );
+                    w_ref[3] = ( num_parents > 2 ) ? -a_ip_ref_3( sd, x, y, r ) / denom_ref : ScalarT( 0 );
+                }
+                else
+                {
+                    for ( int p = 0; p < 4; p++ ) w_ref[p] = ScalarT( 0 );
+                }
+
+                // Compute geometric linear weights.
+                int r_bot = r / 2;
+                ScalarT w_lin[4];
+
+                if ( num_parents == 2 )
+                {
+                    auto weights_lin = fe::wedge::shell::prolongation_linear_weights(
+                        dense::Vec< int, 4 >{ sd, x, y, r },
+                        dense::Vec< int, 4 >{ sd, x / 2, y / 2, r_bot },
+                        grid_fine, radii_fine );
+                    w_lin[0] = weights_lin( 0 );
+                    w_lin[1] = weights_lin( 1 );
+                    w_lin[2] = ScalarT( 0 );
+                    w_lin[3] = ScalarT( 0 );
+                }
+                else
+                {
+                    int x0, y0, x1, y1;
+                    if ( x_even )
                     {
-                        if ( w[p] < ScalarT( 0 ) )
-                            w[p] = 0;
-                        sum += w[p];
+                        x0 = x / 2;  x1 = x / 2;
+                        y0 = y / 2;  y1 = y / 2 + 1;
                     }
+                    else if ( y_even )
+                    {
+                        x0 = x / 2;  x1 = x / 2 + 1;
+                        y0 = y / 2;  y1 = y / 2;
+                    }
+                    else
+                    {
+                        x0 = x / 2 + 1;  x1 = x / 2;
+                        y0 = y / 2;      y1 = y / 2 + 1;
+                    }
+                    auto weights_lin = fe::wedge::shell::prolongation_linear_weights(
+                        dense::Vec< int, 4 >{ sd, x, y, r },
+                        dense::Vec< int, 4 >{ sd, x0, y0, r_bot },
+                        dense::Vec< int, 4 >{ sd, x1, y1, r_bot },
+                        grid_fine, radii_fine );
+                    w_lin[0] = weights_lin( 0 );  // bot_0
+                    w_lin[1] = weights_lin( 0 );  // bot_1 (same radial layer)
+                    w_lin[2] = weights_lin( 1 );  // top_0
+                    w_lin[3] = weights_lin( 1 );  // top_1
+                }
+
+                // Apply ratio correction: w_final = w_lin * (w_amg / w_ref).
+                // Per-weight fallback: if w_ref is near zero, correction = 1 (use w_lin).
+                constexpr ScalarT eps = ScalarT( 1e-12 );
+                ScalarT w[4];
+                for ( int p = 0; p < num_parents; p++ )
+                {
+                    ScalarT correction = ( Kokkos::abs( w_ref[p] ) > eps )
+                                             ? w_amg[p] / w_ref[p]
+                                             : ScalarT( 1 );
+                    w[p] = w_lin[p] * correction;
+                }
+                for ( int p = num_parents; p < 4; p++ )
+                    w[p] = ScalarT( 0 );
+
+                // Clamp negative weights to zero and rescale.
+                ScalarT sum = 0;
+                for ( int p = 0; p < num_parents; p++ )
+                {
+                    if ( w[p] < ScalarT( 0 ) )
+                        w[p] = 0;
+                    sum += w[p];
+                }
+                if ( sum > ScalarT( 0 ) )
+                {
+                    for ( int p = 0; p < num_parents; p++ )
+                        w[p] /= sum;
+                }
+
+                // Limit extreme weight ratios: clamp each weight to [w_min_clamp, 1].
+                constexpr ScalarT w_min_clamp = 0.05;
+                bool              needs_reclamp = false;
+                for ( int p = 0; p < num_parents; p++ )
+                {
+                    if ( w[p] > ScalarT( 0 ) && w[p] < w_min_clamp )
+                    {
+                        w[p]          = w_min_clamp;
+                        needs_reclamp = true;
+                    }
+                }
+                if ( needs_reclamp )
+                {
+                    sum = 0;
+                    for ( int p = 0; p < num_parents; p++ )
+                        sum += w[p];
                     if ( sum > ScalarT( 0 ) )
                     {
                         for ( int p = 0; p < num_parents; p++ )
                             w[p] /= sum;
                     }
-
-                    // Limit extreme weight ratios: clamp each weight to [w_min_clamp, 1].
-                    constexpr ScalarT w_min_clamp = 0.05;
-                    bool              needs_reclamp = false;
-                    for ( int p = 0; p < num_parents; p++ )
-                    {
-                        if ( w[p] > ScalarT( 0 ) && w[p] < w_min_clamp )
-                        {
-                            w[p]          = w_min_clamp;
-                            needs_reclamp = true;
-                        }
-                    }
-                    if ( needs_reclamp )
-                    {
-                        sum = 0;
-                        for ( int p = 0; p < num_parents; p++ )
-                            sum += w[p];
-                        if ( sum > ScalarT( 0 ) )
-                        {
-                            for ( int p = 0; p < num_parents; p++ )
-                                w[p] /= sum;
-                        }
-                    }
-
-                    pw0( sd, x, y, r ) = w[0];
-                    pw1( sd, x, y, r ) = w[1];
-                    pw2( sd, x, y, r ) = w[2];
-                    pw3( sd, x, y, r ) = w[3];
                 }
+
+                pw0( sd, x, y, r ) = w[0];
+                pw1( sd, x, y, r ) = w[1];
+                pw2( sd, x, y, r ) = w[2];
+                pw3( sd, x, y, r ) = w[3];
             } );
 
         Kokkos::fence();
