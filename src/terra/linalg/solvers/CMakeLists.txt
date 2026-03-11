@@ -1,5 +1,6 @@
 target_sources(terra
         PRIVATE
+        block_jacobi.hpp
         identity_solver.hpp
         diagonal_solver.hpp
         iterative_solver_info.hpp
