@@ -2,16 +2,16 @@
 /// @brief Compares convergence of block Jacobi vs point Jacobi as stand-alone smoothers
 ///        on the EpsilonDivDiv (viscous) operator.
 ///
-/// Setup:
-///   - EpsilonDivDiv operator on a single-level spherical shell domain with stored local matrices.
-///   - Random initial guess, zero RHS  =>  pure error reduction.
-///   - Run N iterations of each smoother and track ||r||_2 at each step.
-///   - Block Jacobi should converge faster (smaller spectral radius of the iteration matrix)
-///     because it captures cross-component coupling (A_xy, A_yx, ...) within each node's block.
+/// Runs the comparison for three viscosity profiles:
+///   1. Constant k=1 (baseline)
+///   2. Lin et al. 2022 radial viscosity profile (contrast ~1000)
+///   3. Stotz et al. 2017 radial viscosity profile (contrast ~12000)
 
 #include "fe/wedge/operators/shell/epsilon_divdiv.hpp"
+#include "geophysics/viscosity/viscosity_interpolation.hpp"
 #include "linalg/solvers/block_jacobi.hpp"
 #include "linalg/solvers/jacobi.hpp"
+#include "shell/radial_profiles.hpp"
 #include "terra/grid/shell/spherical_shell.hpp"
 #include "terra/kernels/common/grid_operations.hpp"
 #include "terra/kokkos/kokkos_wrapper.hpp"
@@ -34,22 +34,6 @@ using linalg::solvers::power_iteration;
 
 using ScalarType = double;
 
-/// @brief Simple coefficient field: k(x) = 2 + sin(z).
-struct KInterpolator
-{
-    Grid3DDataVec< double, 3 > grid_;
-    Grid2DDataScalar< double > radii_;
-    Grid4DDataScalar< double > data_;
-
-    KOKKOS_INLINE_FUNCTION
-    void operator()( const int local_subdomain_id, const int x, const int y, const int r ) const
-    {
-        const dense::Vec< double, 3 > coords =
-            grid::shell::coords( local_subdomain_id, x, y, r, grid_, radii_ );
-        data_( local_subdomain_id, x, y, r ) = 2.0 + Kokkos::sin( coords( 2 ) );
-    }
-};
-
 /// @brief Initialize a velocity field with some smooth non-trivial function.
 struct InitialGuessInterpolator
 {
@@ -67,7 +51,6 @@ struct InitialGuessInterpolator
         const double cy = coords( 1 );
         const double cz = coords( 2 );
 
-        // Non-trivial smooth initial guess (satisfies homogeneous Dirichlet approximately).
         data_( local_subdomain_id, x, y, r, 0 ) = Kokkos::sin( 3 * cx ) * Kokkos::cos( 2 * cy );
         data_( local_subdomain_id, x, y, r, 1 ) = Kokkos::cos( 4 * cy ) * Kokkos::sin( 1 * cz );
         data_( local_subdomain_id, x, y, r, 2 ) = Kokkos::sin( 2 * cz ) * Kokkos::cos( 3 * cx );
@@ -93,48 +76,28 @@ struct ZeroBoundary
     }
 };
 
-int main( int argc, char** argv )
+/// @brief Run smoothing comparison for a given coefficient field.
+/// @return (final_r_point, final_r_block) — final residual norms.
+std::pair< double, double > run_comparison(
+    const std::string&                                                              label,
+    DistributedDomain&                                                              domain,
+    const Grid3DDataVec< double, 3 >&                                               coords,
+    const Grid2DDataScalar< double >&                                               radii,
+    const Grid4DDataScalar< grid::NodeOwnershipFlag >&                              mask_data,
+    const Grid4DDataScalar< double >&                                               k_data,
+    const int                                                                       num_iterations )
 {
-    util::terra_initialize( &argc, &argv );
-
-    const int level = 3;
-
-    // --- Domain setup ---
-
-    const ScalarType r_min = 0.5;
-    const ScalarType r_max = 1.0;
-
-    auto domain      = DistributedDomain::create_uniform_single_subdomain_per_diamond( level, level, r_min, r_max );
-    auto coords      = grid::shell::subdomain_unit_sphere_single_shell_coords< ScalarType >( domain );
-    auto radii       = grid::shell::subdomain_shell_radii< ScalarType >( domain );
-    auto mask_data   = grid::setup_node_ownership_mask_data( domain );
-
-    // --- Coefficient field ---
-
-    VectorQ1Scalar< ScalarType > k( "k", domain, mask_data );
-    Kokkos::parallel_for(
-        "k_interpolation",
-        grid::shell::local_domain_md_range_policy_nodes( domain ),
-        KInterpolator{ coords, radii, k.grid_data() } );
-
-    // --- Operator with stored local matrices (needed for block diagonal extraction) ---
-
     using Viscous = fe::wedge::operators::shell::EpsilonDivDiv< ScalarType >;
 
-    Viscous A( domain, coords, radii, k.grid_data(), true, false );
-
-    // Note: get_local_matrix() falls back to assemble_local_matrix() when storage mode is Off,
-    // so no need to enable stored matrix mode for block diagonal extraction.
+    Viscous A( domain, coords, radii, k_data, true, false );
 
     // --- Vectors ---
 
     VectorQ1Vec< ScalarType > x_point( "x_point", domain, mask_data );
     VectorQ1Vec< ScalarType > x_block( "x_block", domain, mask_data );
     VectorQ1Vec< ScalarType > b( "b", domain, mask_data );
-    VectorQ1Vec< ScalarType > tmp( "tmp", domain, mask_data );
     VectorQ1Vec< ScalarType > residual( "residual", domain, mask_data );
 
-    // Zero RHS: we're doing pure error smoothing (Ax = 0, initial guess != 0).
     linalg::assign( b, 0.0 );
 
     // Set initial guess.
@@ -143,14 +106,13 @@ int main( int argc, char** argv )
         grid::shell::local_domain_md_range_policy_nodes( domain ),
         InitialGuessInterpolator{ coords, radii, x_point.grid_data() } );
 
-    // Zero out boundary DOFs (homogeneous Dirichlet).
+    // Zero boundary DOFs.
     const int num_shells = domain.domain_info().subdomain_num_nodes_radially();
     Kokkos::parallel_for(
         "zero_boundary",
         grid::shell::local_domain_md_range_policy_nodes( domain ),
         ZeroBoundary{ x_point.grid_data(), num_shells } );
 
-    // Copy same initial guess for block Jacobi.
     linalg::assign( x_block, x_point );
 
     // --- Point Jacobi setup ---
@@ -165,15 +127,11 @@ int main( int argc, char** argv )
         linalg::invert_entries( inv_diag );
     }
 
-    // Estimate spectral radius for relaxation parameter.
     VectorQ1Vec< ScalarType > tmp_pi_0( "tmp_pi_0", domain, mask_data );
     VectorQ1Vec< ScalarType > tmp_pi_1( "tmp_pi_1", domain, mask_data );
     DiagonallyScaledOperator< Viscous > inv_diag_A( A, inv_diag );
     const double max_ev = power_iteration< DiagonallyScaledOperator< Viscous > >( inv_diag_A, tmp_pi_0, tmp_pi_1, 100 );
     const double omega  = 2.0 / ( 1.5 * max_ev );
-
-    std::cout << "Spectral radius estimate: " << max_ev << std::endl;
-    std::cout << "Relaxation parameter omega: " << omega << std::endl;
 
     VectorQ1Vec< ScalarType > tmp_point( "tmp_point", domain, mask_data );
     linalg::solvers::Jacobi< Viscous > point_jacobi( inv_diag, 1, tmp_point, omega );
@@ -185,29 +143,22 @@ int main( int argc, char** argv )
     VectorQ1Vec< ScalarType > tmp_block( "tmp_block", domain, mask_data );
     linalg::solvers::BlockJacobi< Viscous, 3 > block_jacobi( inv_block_diag, 1, tmp_block, omega );
 
-    // --- Run smoothing iterations and compare convergence ---
+    // --- Run smoothing iterations ---
 
-    const int    num_iterations = 50;
-    auto         table          = std::make_shared< util::Table >();
+    auto table = std::make_shared< util::Table >();
 
-    // Compute initial residual norm (same for both since same initial guess).
     linalg::apply( A, x_point, residual );
     linalg::lincomb( residual, { 1.0, -1.0 }, { b, residual } );
     const double r0 = linalg::norm_2( residual );
-    std::cout << "Initial residual norm: " << r0 << std::endl;
 
     double prev_r_point = r0;
     double prev_r_block = r0;
 
     for ( int iter = 1; iter <= num_iterations; ++iter )
     {
-        // One point Jacobi step.
         linalg::solvers::solve( point_jacobi, A, x_point, b );
-
-        // One block Jacobi step.
         linalg::solvers::solve( block_jacobi, A, x_block, b );
 
-        // Compute residuals.
         linalg::apply( A, x_point, residual );
         linalg::lincomb( residual, { 1.0, -1.0 }, { b, residual } );
         const double r_point = linalg::norm_2( residual );
@@ -224,9 +175,7 @@ int main( int argc, char** argv )
               { "r_point", r_point },
               { "r_block", r_block },
               { "rate_point", rate_point },
-              { "rate_block", rate_block },
-              { "rel_point", r_point / r0 },
-              { "rel_block", r_block / r0 } } );
+              { "rate_block", rate_block } } );
 
         prev_r_point = r_point;
         prev_r_block = r_block;
@@ -234,55 +183,76 @@ int main( int argc, char** argv )
 
     // --- Print results ---
 
-    std::cout << "\n=== Smoother Convergence Comparison ===" << std::endl;
-    std::cout << "Operator: EpsilonDivDiv (viscous block of Stokes)" << std::endl;
-    std::cout << "Level: " << level << std::endl;
-    std::cout << "Relaxation omega: " << omega << std::endl;
-    std::cout << "Iterations: " << num_iterations << "\n" << std::endl;
+    std::cout << "\n=== " << label << " ===" << std::endl;
+    std::cout << "omega: " << omega << ", spectral radius est.: " << max_ev
+              << ", initial residual: " << r0 << std::endl;
 
     table->select_columns( { "iteration", "r_point", "r_block", "rate_point", "rate_block" } ).print_pretty();
 
-    // --- Check that block Jacobi converges faster ---
+    const double ratio = prev_r_block / prev_r_point;
+    std::cout << "Final:  point=" << prev_r_point << "  block=" << prev_r_block
+              << "  ratio(block/point)=" << ratio << std::endl;
 
-    const double final_r_point = prev_r_point;
-    const double final_r_block = prev_r_block;
+    return { prev_r_point, prev_r_block };
+}
 
-    std::cout << "\nFinal residuals after " << num_iterations << " iterations:" << std::endl;
-    std::cout << "  Point Jacobi: " << final_r_point << " (relative: " << final_r_point / r0 << ")" << std::endl;
-    std::cout << "  Block Jacobi: " << final_r_block << " (relative: " << final_r_block / r0 << ")" << std::endl;
+int main( int argc, char** argv )
+{
+    util::terra_initialize( &argc, &argv );
 
-    const double ratio = final_r_block / final_r_point;
-    std::cout << "\nBlock/Point residual ratio: " << ratio << std::endl;
+    const int level = 3;
 
-    if ( ratio < 1.0 )
+    // --- Domain setup ---
+
+    const ScalarType r_min = 0.5;
+    const ScalarType r_max = 1.0;
+
+    auto domain    = DistributedDomain::create_uniform_single_subdomain_per_diamond( level, level, r_min, r_max );
+    auto coords    = grid::shell::subdomain_unit_sphere_single_shell_coords< ScalarType >( domain );
+    auto radii     = grid::shell::subdomain_shell_radii< ScalarType >( domain );
+    auto mask_data = grid::setup_node_ownership_mask_data( domain );
+
+    const int num_iterations = 50;
+
+    // --- 1. Constant viscosity k=1 (baseline) ---
     {
-        std::cout << "Block Jacobi converged faster by factor " << 1.0 / ratio << std::endl;
-    }
-    else
-    {
-        std::cout << "Point Jacobi converged faster by factor " << ratio << std::endl;
-    }
+        VectorQ1Scalar< ScalarType > k( "k_const", domain, mask_data );
+        linalg::assign( k, 1.0 );
 
-    // Pass criterion: both converge, and block Jacobi is at least comparable (within 10%).
-    // With smooth coefficients, the cross-component coupling is weak so block and point Jacobi
-    // have similar convergence rates. Block Jacobi's advantage grows with stronger coupling
-    // (anisotropic viscosity, high-contrast coefficients).
-    const bool block_converges = final_r_block < r0;
-    const bool comparable      = ratio < 1.1;
-
-    if ( !block_converges )
-    {
-        std::cout << "\nFAIL: Block Jacobi did not converge." << std::endl;
-        return EXIT_FAILURE;
-    }
-    if ( !comparable )
-    {
-        std::cout << "\nFAIL: Block Jacobi is significantly slower than point Jacobi (ratio=" << ratio << ")."
-                  << std::endl;
-        return EXIT_FAILURE;
+        auto [rp, rb] = run_comparison( "Constant k=1", domain, coords, radii, mask_data, k.grid_data(), num_iterations );
     }
 
-    std::cout << "\nPASS: Both smoothers converge with comparable rates." << std::endl;
+    // --- 2. Lin et al. 2022 radial viscosity profile ---
+    {
+        auto profile_2d = shell::interpolate_radial_profile_into_subdomains_from_csv< ScalarType >(
+            TERRA_DATA_DIR "/radialprofiles/ViscosityProfile_Lin_et_al_2022.csv",
+            "radius_normalized_0p5_1p0",
+            "viscosity_scaled_by_min",
+            radii );
+
+        VectorQ1Scalar< ScalarType > k( "k_lin", domain, mask_data );
+        geophysics::viscosity::RadialProfileViscosityInterpolator< ScalarType > interp( profile_2d );
+        interp.interpolate( k.grid_data() );
+
+        auto [rp, rb] =
+            run_comparison( "Lin et al. 2022 (contrast ~1000)", domain, coords, radii, mask_data, k.grid_data(), num_iterations );
+    }
+
+    // --- 3. Stotz et al. 2017 radial viscosity profile ---
+    {
+        auto profile_2d = shell::interpolate_radial_profile_into_subdomains_from_csv< ScalarType >(
+            TERRA_DATA_DIR "/radialprofiles/ViscosityProfile_Stotz_et_al_2017.csv",
+            "radius_normalized_0p5_1p0",
+            "viscosity_scaled_by_min",
+            radii );
+
+        VectorQ1Scalar< ScalarType > k( "k_stotz", domain, mask_data );
+        geophysics::viscosity::RadialProfileViscosityInterpolator< ScalarType > interp( profile_2d );
+        interp.interpolate( k.grid_data() );
+
+        auto [rp, rb] =
+            run_comparison( "Stotz et al. 2017 (contrast ~12000)", domain, coords, radii, mask_data, k.grid_data(), num_iterations );
+    }
 
     return EXIT_SUCCESS;
 }

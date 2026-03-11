@@ -24,6 +24,7 @@ function(add_terra_test name)
             target_link_libraries(${name} terra)
         endif ()
         target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR}/src)
+        target_compile_definitions(${name} PRIVATE TERRA_DATA_DIR="${CMAKE_SOURCE_DIR}/data")
 
     endif ()
 
