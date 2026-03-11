@@ -5,6 +5,7 @@
 #include "terra/dense/mat.hpp"
 #include "terra/dense/vec.hpp"
 #include "terra/grid/grid_types.hpp"
+#include "terra/grid/shell/spherical_shell.hpp"
 
 namespace terra::linalg::solvers {
 
@@ -136,83 +137,116 @@ class BlockJacobi
     ScalarType               omega_;                   ///< Relaxation parameter.
 };
 
-/// @brief Compute the inverse block diagonal from an operator by probing.
+/// @brief Compute the inverse block diagonal by extracting self-coupling blocks from local element matrices.
 ///
-/// For each node and each of the BlockSize DoFs, applies the operator to a unit vector
-/// that is 1 at that DoF and 0 elsewhere. The resulting column of the diagonal block
-/// is read from the output. The assembled blocks are then inverted.
+/// Iterates over all hex cells and their two wedges. For each wedge, the local element matrix
+/// (LocalMatrixDim x LocalMatrixDim, e.g. 18x18 for 3D vector operators with 6 nodes per wedge)
+/// is retrieved. The BlockSize x BlockSize self-coupling block for each local node is extracted
+/// and atomically accumulated at the corresponding global node. Finally, all blocks are inverted.
 ///
-/// This requires the operator to support a "diagonal only" mode where off-diagonal
-/// coupling is suppressed (e.g., via the diagonal assembly flag in the operator constructor).
+/// The local matrix layout is:
+/// \f[
+///   A_{\text{local}}(i + d_i \cdot N, j + d_j \cdot N)
+/// \f]
+/// where \f$ i, j \in [0, N) \f$ are local node indices (N = num_nodes_per_wedge = 6),
+/// and \f$ d_i, d_j \in [0, \text{BlockSize}) \f$ are component indices.
+/// The self-coupling block for local node \f$ n \f$ is:
+/// \f[
+///   D_n(d_i, d_j) = A_{\text{local}}(n + d_i \cdot N, n + d_j \cdot N)
+/// \f]
 ///
-/// @tparam OperatorT Operator type.
-/// @tparam VectorT Vector type (must provide grid_data()).
-/// @tparam BlockSize Number of DoFs per node.
-/// @param A_diag Operator assembled in diagonal mode.
-/// @param tmp_src Temporary source vector.
-/// @param tmp_dst Temporary destination vector.
-/// @return Kokkos view of inverse diagonal blocks.
-template < OperatorLike OperatorT, VectorLike VectorT, int BlockSize >
-Kokkos::View< dense::Mat< typename VectorT::ScalarType, BlockSize, BlockSize >****, grid::Layout >
-compute_inverse_block_diagonal( OperatorT& A_diag, VectorT& tmp_src, VectorT& tmp_dst )
+/// @tparam OperatorT Operator type (must satisfy GCACapable, i.e., provide get_local_matrix()).
+/// @tparam BlockSize Number of DoFs per node (must match VecDim of the operator).
+/// @param A Operator with stored local matrices (via GCA or OperatorStoredMatrixMode::Full).
+/// @param domain Distributed domain for cell iteration.
+/// @param num_nodes_x Number of nodes per subdomain in x-direction.
+/// @param num_nodes_y Number of nodes per subdomain in y-direction.
+/// @param num_nodes_r Number of nodes per subdomain in r-direction.
+/// @param num_subdomains Number of local subdomains.
+/// @return Kokkos view of inverse diagonal blocks, one per grid node.
+template < typename OperatorT, int BlockSize >
+Kokkos::View< dense::Mat< typename OperatorT::ScalarType, BlockSize, BlockSize >****, grid::Layout >
+compute_inverse_block_diagonal(
+    const OperatorT&                          A,
+    const grid::shell::DistributedDomain&     domain )
 {
-    using ScalarType      = typename VectorT::ScalarType;
+    using ScalarType      = typename OperatorT::ScalarType;
     using BlockMatrixType = dense::Mat< ScalarType, BlockSize, BlockSize >;
 
-    auto src_data = tmp_src.grid_data();
-    auto dst_data = tmp_dst.grid_data();
+    constexpr int num_nodes_per_wedge   = 6;
+    constexpr int local_matrix_dim      = OperatorT::LocalMatrixDim;
 
-    // Allocate storage for the diagonal blocks.
+    static_assert(
+        local_matrix_dim == num_nodes_per_wedge * BlockSize,
+        "LocalMatrixDim must equal num_nodes_per_wedge * BlockSize." );
+
+    const auto num_subdomains = domain.subdomains().size();
+    const auto num_nodes_x    = domain.domain_info().subdomain_num_nodes_per_side_laterally();
+    const auto num_nodes_y    = domain.domain_info().subdomain_num_nodes_per_side_laterally();
+    const auto num_nodes_r    = domain.domain_info().subdomain_num_nodes_radially();
+
+    // Allocate and zero-initialize storage for the diagonal blocks (one per grid node).
     Kokkos::View< BlockMatrixType****, grid::Layout > blocks(
-        "inverse_block_diagonal",
-        src_data.extent( 0 ),
-        src_data.extent( 1 ),
-        src_data.extent( 2 ),
-        src_data.extent( 3 ) );
+        "inverse_block_diagonal", num_subdomains, num_nodes_x, num_nodes_y, num_nodes_r );
 
-    // Probe each DoF direction to extract the diagonal block columns.
-    for ( int d = 0; d < BlockSize; ++d )
-    {
-        // Set tmp_src to unit vector in direction d.
-        assign( tmp_src, static_cast< ScalarType >( 0 ) );
+    // Wedge local node to hex node offset mapping.
+    //
+    // Hex cell node numbering:
+    //   r = r_cell + 1 (outer)        r = r_cell (inner)
+    //   6--7                          2--3
+    //   |\ |                          |\ |
+    //   | \|                          | \|
+    //   4--5                          0--1
+    //
+    // Wedge 0: local nodes (0,1,2,3,4,5) -> hex nodes (0,1,2,4,5,6)
+    // Wedge 1: local nodes (0,1,2,3,4,5) -> hex nodes (3,2,1,7,6,5)
+    //
+    // Hex node -> (dx, dy, dr) offset from (x_cell, y_cell, r_cell):
+    //   0:(0,0,0)  1:(1,0,0)  2:(0,1,0)  3:(1,1,0)
+    //   4:(0,0,1)  5:(1,0,1)  6:(0,1,1)  7:(1,1,1)
 
-        // Set the d-th component to 1 everywhere.
-        auto grid_data_src = tmp_src.grid_data();
-        Kokkos::parallel_for(
-            "BlockJacobi::set_unit_vec",
-            Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >(
-                { 0, 0, 0, 0 },
-                { static_cast< int >( grid_data_src.extent( 0 ) ),
-                  static_cast< int >( grid_data_src.extent( 1 ) ),
-                  static_cast< int >( grid_data_src.extent( 2 ) ),
-                  static_cast< int >( grid_data_src.extent( 3 ) ) } ),
-            KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k ) {
-                grid_data_src( local_subdomain, i, j, k, d ) = static_cast< ScalarType >( 1 );
-            } );
-        Kokkos::fence();
+    // Wedge 0: local node n -> (dx, dy, dr)
+    constexpr int w0_dx[6] = { 0, 1, 0, 0, 1, 0 };
+    constexpr int w0_dy[6] = { 0, 0, 1, 0, 0, 1 };
+    constexpr int w0_dr[6] = { 0, 0, 0, 1, 1, 1 };
 
-        // Apply the diagonal-mode operator.
-        apply( A_diag, tmp_src, tmp_dst );
+    // Wedge 1: local node n -> (dx, dy, dr)
+    constexpr int w1_dx[6] = { 1, 0, 1, 1, 0, 1 };
+    constexpr int w1_dy[6] = { 1, 1, 0, 1, 1, 0 };
+    constexpr int w1_dr[6] = { 0, 0, 0, 1, 1, 1 };
 
-        // Read off column d of the diagonal block at each node.
-        auto grid_data_dst = tmp_dst.grid_data();
-        Kokkos::parallel_for(
-            "BlockJacobi::extract_column",
-            Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >(
-                { 0, 0, 0, 0 },
-                { static_cast< int >( grid_data_dst.extent( 0 ) ),
-                  static_cast< int >( grid_data_dst.extent( 1 ) ),
-                  static_cast< int >( grid_data_dst.extent( 2 ) ),
-                  static_cast< int >( grid_data_dst.extent( 3 ) ) } ),
-            KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k ) {
-                for ( int row = 0; row < BlockSize; ++row )
+    // Iterate over all hex cells.
+    Kokkos::parallel_for(
+        "BlockJacobi::extract_block_diagonals",
+        grid::shell::local_domain_md_range_policy_cells( domain ),
+        KOKKOS_LAMBDA( int local_subdomain, int x_cell, int y_cell, int r_cell ) {
+            // Process both wedges per hex cell.
+            for ( int wedge = 0; wedge < 2; ++wedge )
+            {
+                const auto local_mat = A.get_local_matrix( local_subdomain, x_cell, y_cell, r_cell, wedge );
+
+                for ( int n = 0; n < num_nodes_per_wedge; ++n )
                 {
-                    blocks( local_subdomain, i, j, k )( row, d ) =
-                        grid_data_dst( local_subdomain, i, j, k, row );
+                    // Map local node n to global grid coordinates.
+                    const int gx = x_cell + ( wedge == 0 ? w0_dx[n] : w1_dx[n] );
+                    const int gy = y_cell + ( wedge == 0 ? w0_dy[n] : w1_dy[n] );
+                    const int gr = r_cell + ( wedge == 0 ? w0_dr[n] : w1_dr[n] );
+
+                    // Extract the BlockSize x BlockSize self-coupling block for node n.
+                    // local_mat layout: row = n + dimi * 6, col = n + dimj * 6
+                    for ( int di = 0; di < BlockSize; ++di )
+                    {
+                        for ( int dj = 0; dj < BlockSize; ++dj )
+                        {
+                            Kokkos::atomic_add(
+                                &blocks( local_subdomain, gx, gy, gr )( di, dj ),
+                                local_mat( n + di * num_nodes_per_wedge, n + dj * num_nodes_per_wedge ) );
+                        }
+                    }
                 }
-            } );
-        Kokkos::fence();
-    }
+            }
+        } );
+    Kokkos::fence();
 
     // Invert all blocks.
     Kokkos::parallel_for(
