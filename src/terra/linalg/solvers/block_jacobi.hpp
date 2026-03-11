@@ -2,6 +2,7 @@
 
 #include "solver.hpp"
 
+#include "communication/shell/communication.hpp"
 #include "terra/dense/mat.hpp"
 #include "terra/dense/vec.hpp"
 #include "terra/grid/grid_types.hpp"
@@ -243,6 +244,57 @@ compute_inverse_block_diagonal(
             }
         } );
     Kokkos::fence();
+
+    // Additively communicate block diagonal across subdomain boundaries.
+    // Nodes shared by multiple subdomains need contributions from all adjacent elements.
+    // We communicate row-by-row: each pass handles one row of the BlockSize x BlockSize block
+    // using a Grid4DDataVec<ScalarType, BlockSize> temporary.
+    for ( int row = 0; row < BlockSize; ++row )
+    {
+        grid::Grid4DDataVec< ScalarType, BlockSize > row_data(
+            "block_diag_row", num_subdomains, num_nodes_x, num_nodes_y, num_nodes_r );
+
+        // Pack: copy row `row` of each block into the temporary.
+        Kokkos::parallel_for(
+            "BlockJacobi::pack_row",
+            Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >(
+                { 0, 0, 0, 0 },
+                { static_cast< long long >( num_subdomains ),
+                  static_cast< long long >( num_nodes_x ),
+                  static_cast< long long >( num_nodes_y ),
+                  static_cast< long long >( num_nodes_r ) } ),
+            KOKKOS_LAMBDA( int s, int i, int j, int k ) {
+                for ( int col = 0; col < BlockSize; ++col )
+                {
+                    row_data( s, i, j, k, col ) = blocks( s, i, j, k )( row, col );
+                }
+            } );
+        Kokkos::fence();
+
+        // Communicate additively.
+        communication::shell::SubdomainNeighborhoodSendRecvBuffer< ScalarType, BlockSize > send_buf( domain );
+        communication::shell::SubdomainNeighborhoodSendRecvBuffer< ScalarType, BlockSize > recv_buf( domain );
+
+        communication::shell::pack_send_and_recv_local_subdomain_boundaries( domain, row_data, send_buf, recv_buf );
+        communication::shell::unpack_and_reduce_local_subdomain_boundaries( domain, row_data, recv_buf );
+
+        // Unpack: copy back from temporary into the blocks.
+        Kokkos::parallel_for(
+            "BlockJacobi::unpack_row",
+            Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >(
+                { 0, 0, 0, 0 },
+                { static_cast< long long >( num_subdomains ),
+                  static_cast< long long >( num_nodes_x ),
+                  static_cast< long long >( num_nodes_y ),
+                  static_cast< long long >( num_nodes_r ) } ),
+            KOKKOS_LAMBDA( int s, int i, int j, int k ) {
+                for ( int col = 0; col < BlockSize; ++col )
+                {
+                    blocks( s, i, j, k )( row, col ) = row_data( s, i, j, k, col );
+                }
+            } );
+        Kokkos::fence();
+    }
 
     // Invert all blocks.
     Kokkos::parallel_for(
