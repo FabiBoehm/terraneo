@@ -155,14 +155,10 @@ class BlockJacobi
 ///   D_n(d_i, d_j) = A_{\text{local}}(n + d_i \cdot N, n + d_j \cdot N)
 /// \f]
 ///
-/// @tparam OperatorT Operator type (must satisfy GCACapable, i.e., provide get_local_matrix()).
+/// @tparam OperatorT Operator type (must provide get_local_matrix() and LocalMatrixDim).
 /// @tparam BlockSize Number of DoFs per node (must match VecDim of the operator).
-/// @param A Operator with stored local matrices (via GCA or OperatorStoredMatrixMode::Full).
+/// @param A Operator (uses stored local matrices if available, otherwise assembles on-the-fly).
 /// @param domain Distributed domain for cell iteration.
-/// @param num_nodes_x Number of nodes per subdomain in x-direction.
-/// @param num_nodes_y Number of nodes per subdomain in y-direction.
-/// @param num_nodes_r Number of nodes per subdomain in r-direction.
-/// @param num_subdomains Number of local subdomains.
 /// @return Kokkos view of inverse diagonal blocks, one per grid node.
 template < typename OperatorT, int BlockSize >
 Kokkos::View< dense::Mat< typename OperatorT::ScalarType, BlockSize, BlockSize >****, grid::Layout >
