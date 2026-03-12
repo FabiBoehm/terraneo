@@ -291,7 +291,98 @@ struct Mat
         }
         else
         {
-            static_assert( Rows == -1, "inv() only implemented for 2x2 and 3x3 matrices" );
+            static_assert( Rows == Cols, "inv() requires a square matrix." );
+
+            // General LU decomposition with partial pivoting (Doolittle).
+            // All storage is on the stack (no heap allocation).
+            Mat LU = *this;
+            int piv[Rows];
+            for ( int i = 0; i < Rows; ++i )
+                piv[i] = i;
+
+            for ( int k = 0; k < Rows; ++k )
+            {
+                // Find pivot.
+                T   max_val  = ( LU( k, k ) < T( 0 ) ) ? -LU( k, k ) : LU( k, k );
+                int pivot_row = k;
+                for ( int i = k + 1; i < Rows; ++i )
+                {
+                    const T abs_val = ( LU( i, k ) < T( 0 ) ) ? -LU( i, k ) : LU( i, k );
+                    if ( abs_val > max_val )
+                    {
+                        max_val   = abs_val;
+                        pivot_row = i;
+                    }
+                }
+
+#ifndef NDEBUG
+                if ( max_val == T( 0 ) )
+                    Kokkos::abort( "Singular matrix in LU decomposition" );
+#endif
+
+                // Swap rows k and pivot_row.
+                if ( pivot_row != k )
+                {
+                    for ( int j = 0; j < Rows; ++j )
+                    {
+                        const T tmp     = LU( k, j );
+                        LU( k, j )      = LU( pivot_row, j );
+                        LU( pivot_row, j ) = tmp;
+                    }
+                    const int tmp_piv = piv[k];
+                    piv[k]            = piv[pivot_row];
+                    piv[pivot_row]    = tmp_piv;
+                }
+
+                // Eliminate below pivot.
+                const T inv_pivot = T( 1 ) / LU( k, k );
+                for ( int i = k + 1; i < Rows; ++i )
+                {
+                    LU( i, k ) *= inv_pivot;
+                    for ( int j = k + 1; j < Rows; ++j )
+                    {
+                        LU( i, j ) -= LU( i, k ) * LU( k, j );
+                    }
+                }
+            }
+
+            // Solve for inverse column-by-column: L U x_col = P e_col.
+            Mat result;
+            for ( int col = 0; col < Rows; ++col )
+            {
+                // Set up RHS = P * e_col.
+                // piv[k] = original row that ended up in position k after pivoting.
+                // (P * e_col)[k] = 1 iff piv[k] == col, else 0.
+                T rhs[Rows];
+                for ( int i = 0; i < Rows; ++i )
+                    rhs[i] = ( piv[i] == col ) ? T( 1 ) : T( 0 );
+
+                // Forward substitution (L * y = rhs), L has unit diagonal.
+                for ( int i = 0; i < Rows; ++i )
+                {
+                    for ( int j = 0; j < i; ++j )
+                    {
+                        rhs[i] -= LU( i, j ) * rhs[j];
+                    }
+                }
+
+                // Back substitution (U * x = y).
+                for ( int i = Rows - 1; i >= 0; --i )
+                {
+                    for ( int j = i + 1; j < Rows; ++j )
+                    {
+                        rhs[i] -= LU( i, j ) * rhs[j];
+                    }
+                    rhs[i] /= LU( i, i );
+                }
+
+                for ( int i = 0; i < Rows; ++i )
+                {
+                    result( i, col ) = rhs[i];
+                }
+            }
+
+            return result;
         }
     }
 

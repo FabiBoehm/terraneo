@@ -76,6 +76,7 @@ add_terra_test(test_epsilon_cg)
 add_terra_test(test_epsilon_divdiv_cg)
 add_terra_test(test_vector_laplace_compare)
 add_terra_test(test_block_jacobi_smoother)
+add_terra_test(test_cell_vanka_smoother)
 add_terra_test(test_xdmf_writer)
 
 # Adding target for all the tests.
