@@ -166,7 +166,7 @@ std::pair< double, double > run_smoother_comparison(
     VectorQ1Vec< ScalarType >          tmp_pi_1( "tmp_pi_1", domain, mask_data );
     DiagonallyScaledOperator< Viscous > inv_diag_A( A, inv_diag );
     const double max_ev = power_iteration< DiagonallyScaledOperator< Viscous > >( inv_diag_A, tmp_pi_0, tmp_pi_1, 100 );
-    const double omega  = 2.0 / ( 1.5 * max_ev );
+    const double omega  = 2.0 / ( 1.1 * max_ev );
 
     VectorQ1Vec< ScalarType >          tmp_point( "tmp_point", domain, mask_data );
     linalg::solvers::Jacobi< Viscous > point_jacobi( inv_diag, 1, tmp_point, omega );
@@ -407,7 +407,9 @@ std::pair< double, double > run_multigrid_comparison(
         VectorQ1Vec< ScalarType >          tmp1( "tmp1", domains[level], mask_data[level] );
         DiagonallyScaledOperator< Viscous > dA( A_levels[level], inv_diags.back() );
         const double max_ev = power_iteration< DiagonallyScaledOperator< Viscous > >( dA, tmp0, tmp1, 100 );
-        const double omega  = 2.0 / ( 1.5 * max_ev );
+        const double omega  = 2.0 / ( 1.1 * max_ev );
+
+        std::cout << "  level " << level << ": spectral_radius=" << max_ev << ", omega=" << omega << std::endl;
 
         constexpr int smoother_steps = 3;
 
@@ -454,9 +456,9 @@ int main( int argc, char** argv )
 {
     util::terra_initialize( &argc, &argv );
 
-    const int level     = 3;
+    const int level     = 4;
     const int min_level = 1;
-    const int max_level = 3;
+    const int max_level = 4;
 
     // --- Domain setup for smoother tests ---
 
