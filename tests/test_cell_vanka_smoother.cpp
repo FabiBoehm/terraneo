@@ -2,9 +2,11 @@
 /// @brief Compares convergence of cell Vanka vs block Jacobi vs point Jacobi as smoothers
 ///        on the EpsilonDivDiv (viscous) operator.
 ///
-/// Runs the comparison for two viscosity profiles:
+/// Runs the comparison for four viscosity profiles:
 ///   1. Constant k=1 (baseline)
-///   2. Laterally varying viscosity: k(x,y,z) = 1 + 1000 * sin^2(3x) * cos^2(2y)
+///   2. Lin et al. 2022 radial viscosity profile (contrast ~1000)
+///   3. Stotz et al. 2017 radial viscosity profile (contrast ~12000)
+///   4. Laterally varying viscosity: k(x,y,z) = 1 + 1000 * sin^2(3x) * cos^2(2y)
 ///
 /// For each profile, runs:
 ///   - Naked smoother comparison (point Jacobi, block Jacobi, cell Vanka)
@@ -13,11 +15,13 @@
 #include "fe/wedge/operators/shell/epsilon_divdiv.hpp"
 #include "fe/wedge/operators/shell/prolongation_constant.hpp"
 #include "fe/wedge/operators/shell/restriction_constant.hpp"
+#include "geophysics/viscosity/viscosity_interpolation.hpp"
 #include "linalg/solvers/block_jacobi.hpp"
 #include "linalg/solvers/cell_vanka.hpp"
 #include "linalg/solvers/jacobi.hpp"
 #include "linalg/solvers/multigrid.hpp"
 #include "linalg/solvers/pcg.hpp"
+#include "shell/radial_profiles.hpp"
 #include "terra/grid/shell/spherical_shell.hpp"
 #include "terra/kernels/common/grid_operations.hpp"
 #include "terra/kokkos/kokkos_wrapper.hpp"
@@ -544,7 +548,39 @@ int main( int argc, char** argv )
         run_smoother_comparison( "Constant k=1", domain, coords, radii, mask_data, k.grid_data(), num_smoother_iterations );
     }
 
-    // --- 2. Laterally varying viscosity ---
+    // --- 2. Lin et al. 2022 radial viscosity profile ---
+    {
+        auto profile_2d = shell::interpolate_radial_profile_into_subdomains_from_csv< ScalarType >(
+            TERRA_DATA_DIR "/radialprofiles/ViscosityProfile_Lin_et_al_2022.csv",
+            "radius_normalized_0p5_1p0",
+            "viscosity_scaled_by_min",
+            radii );
+
+        VectorQ1Scalar< ScalarType >                                          k( "k_lin", domain, mask_data );
+        geophysics::viscosity::RadialProfileViscosityInterpolator< ScalarType > interp( profile_2d );
+        interp.interpolate( k.grid_data() );
+
+        run_smoother_comparison(
+            "Lin et al. 2022 (contrast ~1000)", domain, coords, radii, mask_data, k.grid_data(), num_smoother_iterations );
+    }
+
+    // --- 3. Stotz et al. 2017 radial viscosity profile ---
+    {
+        auto profile_2d = shell::interpolate_radial_profile_into_subdomains_from_csv< ScalarType >(
+            TERRA_DATA_DIR "/radialprofiles/ViscosityProfile_Stotz_et_al_2017.csv",
+            "radius_normalized_0p5_1p0",
+            "viscosity_scaled_by_min",
+            radii );
+
+        VectorQ1Scalar< ScalarType >                                          k( "k_stotz", domain, mask_data );
+        geophysics::viscosity::RadialProfileViscosityInterpolator< ScalarType > interp( profile_2d );
+        interp.interpolate( k.grid_data() );
+
+        run_smoother_comparison(
+            "Stotz et al. 2017 (contrast ~12000)", domain, coords, radii, mask_data, k.grid_data(), num_smoother_iterations );
+    }
+
+    // --- 4. Laterally varying viscosity ---
     {
         VectorQ1Scalar< ScalarType > k( "k_lateral", domain, mask_data );
         Kokkos::parallel_for(
@@ -576,7 +612,41 @@ int main( int argc, char** argv )
         run_multigrid_comparison( "Constant k=1", min_level, max_level, k_setup, num_mg_cycles );
     }
 
-    // --- 2. Laterally varying viscosity ---
+    // --- 2. Lin et al. 2022 ---
+    {
+        auto k_setup = []( DistributedDomain& dom,
+                           const Grid3DDataVec< double, 3 >& /*cs*/,
+                           const Grid2DDataScalar< double >& cr,
+                           Grid4DDataScalar< double >& k_data ) {
+            auto profile_2d = shell::interpolate_radial_profile_into_subdomains_from_csv< ScalarType >(
+                TERRA_DATA_DIR "/radialprofiles/ViscosityProfile_Lin_et_al_2022.csv",
+                "radius_normalized_0p5_1p0",
+                "viscosity_scaled_by_min",
+                cr );
+            geophysics::viscosity::RadialProfileViscosityInterpolator< ScalarType > interp( profile_2d );
+            interp.interpolate( k_data );
+        };
+        run_multigrid_comparison( "Lin et al. 2022 (contrast ~1000)", min_level, max_level, k_setup, num_mg_cycles );
+    }
+
+    // --- 3. Stotz et al. 2017 ---
+    {
+        auto k_setup = []( DistributedDomain& dom,
+                           const Grid3DDataVec< double, 3 >& /*cs*/,
+                           const Grid2DDataScalar< double >& cr,
+                           Grid4DDataScalar< double >& k_data ) {
+            auto profile_2d = shell::interpolate_radial_profile_into_subdomains_from_csv< ScalarType >(
+                TERRA_DATA_DIR "/radialprofiles/ViscosityProfile_Stotz_et_al_2017.csv",
+                "radius_normalized_0p5_1p0",
+                "viscosity_scaled_by_min",
+                cr );
+            geophysics::viscosity::RadialProfileViscosityInterpolator< ScalarType > interp( profile_2d );
+            interp.interpolate( k_data );
+        };
+        run_multigrid_comparison( "Stotz et al. 2017 (contrast ~12000)", min_level, max_level, k_setup, num_mg_cycles );
+    }
+
+    // --- 4. Laterally varying viscosity ---
     {
         auto k_setup = []( DistributedDomain& dom,
                            const Grid3DDataVec< double, 3 >& cs,
