@@ -350,7 +350,7 @@ void run_multigrid_vcycles(
     using MG = linalg::solvers::Multigrid< Viscous, Prolongation, Restriction, SmootherT, CoarseGridSolver >;
 
     auto mg_table = std::make_shared< util::Table >();
-    MG   mg( P, R, A_coarse, tmp_mg_r, tmp_mg_e, tmp_mg, smoothers, smoothers, coarse_solver, num_cycles, 1e-6 );
+    MG   mg( P, R, A_coarse, tmp_mg_r, tmp_mg_e, tmp_mg, smoothers, smoothers, coarse_solver, num_cycles, 1e-10 );
     mg.collect_statistics( mg_table );
     mg.set_tag( label );
 
@@ -624,7 +624,7 @@ int main( int argc, char** argv )
     // ================================================================
 
     std::cout << "\n################################################################" << std::endl;
-    std::cout << "# Part 2: Multigrid V-cycle comparison (point vs block vs vanka, tol=1e-6)" << std::endl;
+    std::cout << "# Part 2: Multigrid V-cycle comparison (point vs block vs vanka, tol=1e-10)" << std::endl;
     std::cout << "################################################################" << std::endl;
 
     // --- 1. Constant k=1 ---

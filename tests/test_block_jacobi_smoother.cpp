@@ -307,7 +307,7 @@ void run_multigrid_vcycles(
     using MG = linalg::solvers::Multigrid< Viscous, Prolongation, Restriction, SmootherT, CoarseGridSolver >;
 
     auto mg_table = std::make_shared< util::Table >();
-    MG   mg( P, R, A_coarse, tmp_mg_r, tmp_mg_e, tmp_mg, smoothers, smoothers, coarse_solver, num_cycles, 1e-6 );
+    MG   mg( P, R, A_coarse, tmp_mg_r, tmp_mg_e, tmp_mg, smoothers, smoothers, coarse_solver, num_cycles, 1e-10 );
     mg.collect_statistics( mg_table );
     mg.set_tag( label );
 
