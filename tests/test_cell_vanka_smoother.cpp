@@ -151,6 +151,8 @@ void run_smoother_comparison(
 
     // --- Point Jacobi setup ---
 
+    Kokkos::Timer timer_setup_point;
+
     VectorQ1Vec< ScalarType > inv_diag( "inv_diag", domain, mask_data );
     {
         VectorQ1Vec< ScalarType > ones( "ones", domain, mask_data );
@@ -170,20 +172,33 @@ void run_smoother_comparison(
     VectorQ1Vec< ScalarType >          tmp_point( "tmp_point", domain, mask_data );
     linalg::solvers::Jacobi< Viscous > point_jacobi( inv_diag, 1, tmp_point, omega );
 
+    Kokkos::fence();
+    const double time_setup_point = timer_setup_point.seconds();
+
     // --- Block Jacobi setup ---
+
+    Kokkos::Timer timer_setup_block;
 
     auto inv_block_diag = linalg::solvers::compute_inverse_block_diagonal< Viscous, 3 >( A, domain );
 
     VectorQ1Vec< ScalarType >                  tmp_block( "tmp_block", domain, mask_data );
     linalg::solvers::BlockJacobi< Viscous, 3 > block_jacobi( inv_block_diag, 1, tmp_block, omega );
 
+    Kokkos::fence();
+    const double time_setup_block = timer_setup_block.seconds();
+
     // --- Cell Vanka setup ---
+
+    Kokkos::Timer timer_setup_vanka;
 
     auto inv_cell_matrices = linalg::solvers::compute_cell_vanka_matrices< Viscous, 3 >( A, domain );
 
     VectorQ1Vec< ScalarType >                tmp_vanka( "tmp_vanka", domain, mask_data );
     VectorQ1Vec< ScalarType >                corr_vanka( "corr_vanka", domain, mask_data );
     linalg::solvers::CellVanka< Viscous, 3 > cell_vanka( inv_cell_matrices, 1, tmp_vanka, corr_vanka );
+
+    Kokkos::fence();
+    const double time_setup_vanka = timer_setup_vanka.seconds();
 
     // --- Run smoothing iterations ---
 
@@ -197,11 +212,26 @@ void run_smoother_comparison(
     double prev_r_block = r0;
     double prev_r_vanka = r0;
 
+    double time_apply_point = 0.0;
+    double time_apply_block = 0.0;
+    double time_apply_vanka = 0.0;
+
     for ( int iter = 1; iter <= num_iterations; ++iter )
     {
+        Kokkos::Timer t_point;
         linalg::solvers::solve( point_jacobi, A, x_point, b );
+        Kokkos::fence();
+        time_apply_point += t_point.seconds();
+
+        Kokkos::Timer t_block;
         linalg::solvers::solve( block_jacobi, A, x_block, b );
+        Kokkos::fence();
+        time_apply_block += t_block.seconds();
+
+        Kokkos::Timer t_vanka;
         linalg::solvers::solve( cell_vanka, A, x_vanka, b );
+        Kokkos::fence();
+        time_apply_vanka += t_vanka.seconds();
 
         linalg::apply( A, x_point, residual );
         linalg::lincomb( residual, { 1.0, -1.0 }, { b, residual } );
@@ -247,6 +277,14 @@ void run_smoother_comparison(
               << "  vanka=" << prev_r_vanka
               << "  ratio(block/point)=" << prev_r_block / prev_r_point
               << "  ratio(vanka/point)=" << prev_r_vanka / prev_r_point << std::endl;
+
+    std::cout << "\nTiming (setup):  point=" << time_setup_point << "s  block=" << time_setup_block
+              << "s  vanka=" << time_setup_vanka << "s" << std::endl;
+    std::cout << "Timing (apply, " << num_iterations << " iters):  point=" << time_apply_point
+              << "s  block=" << time_apply_block << "s  vanka=" << time_apply_vanka << "s" << std::endl;
+    std::cout << "Timing (per iter):  point=" << time_apply_point / num_iterations
+              << "s  block=" << time_apply_block / num_iterations
+              << "s  vanka=" << time_apply_vanka / num_iterations << "s" << std::endl;
 }
 
 // ============================================================================
@@ -312,11 +350,16 @@ void run_multigrid_vcycles(
     mg.collect_statistics( mg_table );
     mg.set_tag( label );
 
+    Kokkos::Timer timer_mg;
     linalg::solvers::solve( mg, A_levels.back(), x, b );
+    Kokkos::fence();
+    const double time_mg = timer_mg.seconds();
 
     mg_table->query_rows_equals( "tag", label )
         .select_columns( { "cycle", "absolute_residual", "relative_residual", "residual_convergence_rate" } )
         .print_pretty();
+
+    std::cout << "MG solve time: " << time_mg << "s" << std::endl;
 }
 
 void run_multigrid_comparison(
@@ -392,6 +435,9 @@ void run_multigrid_comparison(
     using InvCellType = typename VankaSmoother::InverseCellMatricesType;
     std::vector< InvCellType > inv_cell_mats;
 
+    double time_setup_block_total = 0.0;
+    double time_setup_vanka_total = 0.0;
+
     for ( size_t level = 0; level < num_levels; ++level )
     {
         // Compute point inverse diagonal for omega estimation.
@@ -414,18 +460,27 @@ void run_multigrid_comparison(
         constexpr int smoother_steps = 3;
 
         // Block Jacobi smoother.
+        Kokkos::Timer timer_block;
         inv_block_diags.push_back(
             linalg::solvers::compute_inverse_block_diagonal< Viscous, 3 >( A_levels[level], domains[level] ) );
         block_tmps.emplace_back( "bk_tmp_" + std::to_string( level ), domains[level], mask_data[level] );
         block_smoothers.emplace_back( inv_block_diags.back(), smoother_steps, block_tmps.back(), omega );
+        Kokkos::fence();
+        time_setup_block_total += timer_block.seconds();
 
         // Cell Vanka smoother.
+        Kokkos::Timer timer_vanka;
         inv_cell_mats.push_back(
             linalg::solvers::compute_cell_vanka_matrices< Viscous, 3 >( A_levels[level], domains[level] ) );
         vanka_tmps.emplace_back( "vk_tmp_" + std::to_string( level ), domains[level], mask_data[level] );
         vanka_corrs.emplace_back( "vk_corr_" + std::to_string( level ), domains[level], mask_data[level] );
         vanka_smoothers.emplace_back( inv_cell_mats.back(), smoother_steps, vanka_tmps.back(), vanka_corrs.back() );
+        Kokkos::fence();
+        time_setup_vanka_total += timer_vanka.seconds();
     }
+
+    std::cout << "\nSmoother setup time (all levels):  block=" << time_setup_block_total
+              << "s  vanka=" << time_setup_vanka_total << "s" << std::endl;
 
     std::cout << "\n=== MG Block Jacobi: " << label << " ===" << std::endl;
     run_multigrid_vcycles< BlockSmoother >(
