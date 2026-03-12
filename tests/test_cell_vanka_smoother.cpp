@@ -348,7 +348,7 @@ int run_stokes_fgmres(
                     linalg::solvers::compute_cell_vanka_matrices< Viscous, 3 >( A_c[level], domains[level] ) );
             }
             vanka_corrs.emplace_back( "vk_corr_" + std::to_string( level ), domains[level], mask_data[level] );
-            smoothers.emplace_back( inv_cell_mats.back(), smoother_steps, smoother_tmps.back(), vanka_corrs.back(), omega );
+            smoothers.emplace_back( inv_cell_mats.back(), smoother_steps, smoother_tmps.back(), vanka_corrs.back() );
         }
     }
 
@@ -545,13 +545,17 @@ void run_stokes_smoother_comparison(
         run_stokes_fgmres< BlockSmoother >( "Block Jacobi", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, time_block );
 
     const int iters_vanka =
-        run_stokes_fgmres< VankaSmoother >( "Cell Vanka", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, time_vanka );
+        run_stokes_fgmres< VankaSmoother >( "Cell Vanka (2 V-cycles)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, time_vanka );
+
+    double time_vanka_4v = 0.0;
+    const int iters_vanka_4v =
+        run_stokes_fgmres< VankaSmoother >( "Cell Vanka (4 V-cycles)", min_level, max_level, k_setup, max_fgmres_iters, 4, time_vanka_4v );
 
     std::cout << "\n--- Summary: " << label << " ---" << std::endl;
     std::cout << "FGMRES iterations:  point=" << iters_point << "  block=" << iters_block
-              << "  vanka=" << iters_vanka << std::endl;
+              << "  vanka(2V)=" << iters_vanka << "  vanka(4V)=" << iters_vanka_4v << std::endl;
     std::cout << "Solve time:  point=" << time_point << "s  block=" << time_block
-              << "s  vanka=" << time_vanka << "s" << std::endl;
+              << "s  vanka(2V)=" << time_vanka << "s  vanka(4V)=" << time_vanka_4v << "s" << std::endl;
 }
 
 // ============================================================================
