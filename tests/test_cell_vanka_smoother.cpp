@@ -348,7 +348,7 @@ int run_stokes_fgmres(
                     linalg::solvers::compute_cell_vanka_matrices< Viscous, 3 >( A_c[level], domains[level] ) );
             }
             vanka_corrs.emplace_back( "vk_corr_" + std::to_string( level ), domains[level], mask_data[level] );
-            smoothers.emplace_back( inv_cell_mats.back(), smoother_steps, smoother_tmps.back(), vanka_corrs.back() );
+            smoothers.emplace_back( inv_cell_mats.back(), smoother_steps, smoother_tmps.back(), vanka_corrs.back(), omega );
         }
     }
 
