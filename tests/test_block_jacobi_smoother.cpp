@@ -307,7 +307,7 @@ void run_multigrid_vcycles(
     using MG = linalg::solvers::Multigrid< Viscous, Prolongation, Restriction, SmootherT, CoarseGridSolver >;
 
     auto mg_table = std::make_shared< util::Table >();
-    MG   mg( P, R, A_coarse, tmp_mg_r, tmp_mg_e, tmp_mg, smoothers, smoothers, coarse_solver, num_cycles, 1e-16 );
+    MG   mg( P, R, A_coarse, tmp_mg_r, tmp_mg_e, tmp_mg, smoothers, smoothers, coarse_solver, num_cycles, 1e-6 );
     mg.collect_statistics( mg_table );
     mg.set_tag( label );
 
@@ -456,9 +456,9 @@ int main( int argc, char** argv )
 {
     util::terra_initialize( &argc, &argv );
 
-    const int level     = 4;
+    const int level     = 3;
     const int min_level = 1;
-    const int max_level = 4;
+    const int max_level = 3;
 
     // --- Domain setup for smoother tests ---
 
@@ -471,7 +471,7 @@ int main( int argc, char** argv )
     auto mask_data = grid::setup_node_ownership_mask_data( domain );
 
     const int num_smoother_iterations = 50;
-    const int num_mg_cycles           = 20;
+    const int num_mg_cycles           = 100;
 
     // ================================================================
     // Part 1: Naked smoother comparison

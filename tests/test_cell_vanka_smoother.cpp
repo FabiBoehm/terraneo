@@ -350,7 +350,7 @@ void run_multigrid_vcycles(
     using MG = linalg::solvers::Multigrid< Viscous, Prolongation, Restriction, SmootherT, CoarseGridSolver >;
 
     auto mg_table = std::make_shared< util::Table >();
-    MG   mg( P, R, A_coarse, tmp_mg_r, tmp_mg_e, tmp_mg, smoothers, smoothers, coarse_solver, num_cycles, 1e-16 );
+    MG   mg( P, R, A_coarse, tmp_mg_r, tmp_mg_e, tmp_mg, smoothers, smoothers, coarse_solver, num_cycles, 1e-6 );
     mg.collect_statistics( mg_table );
     mg.set_tag( label );
 
@@ -406,6 +406,7 @@ void run_multigrid_comparison(
     }
 
     // Build initial guess and rhs on finest level.
+    VectorQ1Vec< ScalarType > x_point( "x_mg_point", domains.back(), mask_data.back() );
     VectorQ1Vec< ScalarType > x_block( "x_mg_block", domains.back(), mask_data.back() );
     VectorQ1Vec< ScalarType > x_vanka( "x_mg_vanka", domains.back(), mask_data.back() );
     VectorQ1Vec< ScalarType > b( "b_mg", domains.back(), mask_data.back() );
@@ -414,13 +415,18 @@ void run_multigrid_comparison(
     Kokkos::parallel_for(
         "initial_guess",
         grid::shell::local_domain_md_range_policy_nodes( domains.back() ),
-        InitialGuessInterpolator{ coords_shell.back(), coords_radii.back(), x_block.grid_data() } );
+        InitialGuessInterpolator{ coords_shell.back(), coords_radii.back(), x_point.grid_data() } );
     const int num_shells = domains.back().domain_info().subdomain_num_nodes_radially();
     Kokkos::parallel_for(
         "zero_boundary",
         grid::shell::local_domain_md_range_policy_nodes( domains.back() ),
-        ZeroBoundary{ x_block.grid_data(), num_shells } );
-    linalg::assign( x_vanka, x_block );
+        ZeroBoundary{ x_point.grid_data(), num_shells } );
+    linalg::assign( x_block, x_point );
+    linalg::assign( x_vanka, x_point );
+
+    // --- Point Jacobi smoothers ---
+    using PointSmoother = linalg::solvers::Jacobi< Viscous >;
+    std::vector< PointSmoother > point_smoothers;
 
     // --- Block Jacobi smoothers ---
     using BlockSmoother = linalg::solvers::BlockJacobi< Viscous, 3 >;
@@ -430,6 +436,7 @@ void run_multigrid_comparison(
     using VankaSmoother = linalg::solvers::CellVanka< Viscous, 3 >;
     std::vector< VankaSmoother > vanka_smoothers;
 
+    std::vector< VectorQ1Vec< ScalarType > >                point_tmps;
     std::vector< VectorQ1Vec< ScalarType > >                block_tmps;
     std::vector< VectorQ1Vec< ScalarType > >                vanka_tmps;
     std::vector< VectorQ1Vec< ScalarType > >                vanka_corrs;
@@ -439,12 +446,14 @@ void run_multigrid_comparison(
     using InvCellType = typename VankaSmoother::InverseCellMatricesType;
     std::vector< InvCellType > inv_cell_mats;
 
+    double time_setup_point_total = 0.0;
     double time_setup_block_total = 0.0;
     double time_setup_vanka_total = 0.0;
 
     for ( size_t level = 0; level < num_levels; ++level )
     {
         // Compute point inverse diagonal for omega estimation.
+        Kokkos::Timer timer_point;
         inv_diags.emplace_back( "inv_diag_" + std::to_string( level ), domains[level], mask_data[level] );
         {
             VectorQ1Vec< ScalarType > ones( "ones", domains[level], mask_data[level] );
@@ -464,6 +473,12 @@ void run_multigrid_comparison(
         std::cout << "  level " << level << ": spectral_radius=" << max_ev << ", omega=" << omega << std::endl;
 
         constexpr int smoother_steps = 3;
+
+        // Point Jacobi smoother.
+        point_tmps.emplace_back( "pt_tmp_" + std::to_string( level ), domains[level], mask_data[level] );
+        point_smoothers.emplace_back( inv_diags.back(), smoother_steps, point_tmps.back(), omega );
+        Kokkos::fence();
+        time_setup_point_total += timer_point.seconds();
 
         // Block Jacobi smoother.
         Kokkos::Timer timer_block;
@@ -485,15 +500,23 @@ void run_multigrid_comparison(
         time_setup_vanka_total += timer_vanka.seconds();
     }
 
-    std::cout << "\nSmoother setup time (all levels):  block=" << time_setup_block_total
+    std::cout << "\nSmoother setup time (all levels):  point=" << time_setup_point_total
+              << "s  block=" << time_setup_block_total
               << "s  vanka=" << time_setup_vanka_total << "s" << std::endl;
+
+    std::cout << "\n=== MG Point Jacobi: " << label << " ===" << std::endl;
+    run_multigrid_vcycles< PointSmoother >(
+        "mg_point_" + label, A_levels, domains, mask_data, point_smoothers, x_point, b, num_cycles );
+
+    VectorQ1Vec< ScalarType > residual( "residual", domains.back(), mask_data.back() );
+    linalg::apply( A_levels.back(), x_point, residual );
+    linalg::lincomb( residual, { 1.0, -1.0 }, { b, residual } );
+    const double final_r_point = linalg::norm_2( residual );
 
     std::cout << "\n=== MG Block Jacobi: " << label << " ===" << std::endl;
     run_multigrid_vcycles< BlockSmoother >(
         "mg_block_" + label, A_levels, domains, mask_data, block_smoothers, x_block, b, num_cycles );
 
-    // Compute final residual for block.
-    VectorQ1Vec< ScalarType > residual( "residual", domains.back(), mask_data.back() );
     linalg::apply( A_levels.back(), x_block, residual );
     linalg::lincomb( residual, { 1.0, -1.0 }, { b, residual } );
     const double final_r_block = linalg::norm_2( residual );
@@ -506,8 +529,9 @@ void run_multigrid_comparison(
     linalg::lincomb( residual, { 1.0, -1.0 }, { b, residual } );
     const double final_r_vanka = linalg::norm_2( residual );
 
-    std::cout << "MG Final:  block=" << final_r_block << "  vanka=" << final_r_vanka
-              << "  ratio(vanka/block)=" << final_r_vanka / final_r_block << std::endl;
+    std::cout << "MG Final:  point=" << final_r_point << "  block=" << final_r_block << "  vanka=" << final_r_vanka
+              << "\n  ratio(block/point)=" << final_r_block / final_r_point
+              << "  ratio(vanka/point)=" << final_r_vanka / final_r_point << std::endl;
 }
 
 // ============================================================================
@@ -518,9 +542,9 @@ int main( int argc, char** argv )
 {
     util::terra_initialize( &argc, &argv );
 
-    const int level     = 4;
+    const int level     = 3;
     const int min_level = 1;
-    const int max_level = 4;
+    const int max_level = 3;
 
     // --- Domain setup for smoother tests ---
 
@@ -533,7 +557,7 @@ int main( int argc, char** argv )
     auto mask_data = grid::setup_node_ownership_mask_data( domain );
 
     const int num_smoother_iterations = 50;
-    const int num_mg_cycles           = 20;
+    const int num_mg_cycles           = 100;
 
     // ================================================================
     // Part 1: Naked smoother comparison
@@ -600,7 +624,7 @@ int main( int argc, char** argv )
     // ================================================================
 
     std::cout << "\n################################################################" << std::endl;
-    std::cout << "# Part 2: Multigrid V-cycle comparison (block Jacobi vs cell Vanka)" << std::endl;
+    std::cout << "# Part 2: Multigrid V-cycle comparison (point vs block vs vanka, tol=1e-6)" << std::endl;
     std::cout << "################################################################" << std::endl;
 
     // --- 1. Constant k=1 ---
