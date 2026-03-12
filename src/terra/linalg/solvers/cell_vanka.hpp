@@ -58,17 +58,22 @@ class CellVanka
     /// @param tmp Temporary vector for workspace (residual).
     /// @param correction Temporary vector for workspace (accumulated correction).
     /// @param omega Relaxation parameter (default 1/8 for additive Vanka with ~8 overlapping cells).
+    /// @param domain Optional domain pointer for inter-subdomain communication of corrections.
+    ///               When provided, corrections are additively communicated across subdomain boundaries
+    ///               after each Vanka sweep, ensuring consistency at shared nodes.
     CellVanka(
         const InverseCellMatricesType& inverse_cell_matrices,
         const int                      iterations,
         const SolutionVectorType&      tmp,
         const SolutionVectorType&      correction,
-        const ScalarType               omega = static_cast< ScalarType >( 1.0 / 8.0 ) )
+        const ScalarType               omega  = static_cast< ScalarType >( 1.0 / 8.0 ),
+        const grid::shell::DistributedDomain* domain = nullptr )
     : inverse_cell_matrices_( inverse_cell_matrices )
     , iterations_( iterations )
     , tmp_( tmp )
     , correction_( correction )
     , omega_( omega )
+    , domain_( domain )
     {}
 
     /// @brief Solve the linear system using additive cell Vanka iteration.
@@ -90,6 +95,12 @@ class CellVanka
 
             // Apply cell Vanka: for each cell, gather residual, multiply by inverse, scatter correction.
             apply_cell_vanka( tmp_ );
+
+            // Communicate corrections across subdomain boundaries (additive reduction).
+            if ( domain_ )
+            {
+                communicate_correction();
+            }
 
             // x = x + omega * correction
             lincomb( x, { 1.0, omega_ }, { x, correction_ } );
@@ -163,11 +174,22 @@ class CellVanka
         Kokkos::fence();
     }
 
-    InverseCellMatricesType inverse_cell_matrices_; ///< Inverse cell Vanka matrices.
-    int                     iterations_;             ///< Number of iterations.
-    SolutionVectorType      tmp_;                    ///< Temporary workspace (residual).
-    SolutionVectorType      correction_;             ///< Temporary workspace (correction).
-    ScalarType              omega_;                  ///< Relaxation parameter.
+    /// @brief Additively communicate correction vector across subdomain boundaries.
+    void communicate_correction()
+    {
+        auto corr_data = correction_.grid_data();
+        communication::shell::SubdomainNeighborhoodSendRecvBuffer< ScalarType, BlockSize > send_buf( *domain_ );
+        communication::shell::SubdomainNeighborhoodSendRecvBuffer< ScalarType, BlockSize > recv_buf( *domain_ );
+        communication::shell::pack_send_and_recv_local_subdomain_boundaries( *domain_, corr_data, send_buf, recv_buf );
+        communication::shell::unpack_and_reduce_local_subdomain_boundaries( *domain_, corr_data, recv_buf );
+    }
+
+    InverseCellMatricesType inverse_cell_matrices_;  ///< Inverse cell Vanka matrices.
+    int                     iterations_;              ///< Number of iterations.
+    SolutionVectorType      tmp_;                     ///< Temporary workspace (residual).
+    SolutionVectorType      correction_;              ///< Temporary workspace (correction).
+    ScalarType              omega_;                   ///< Relaxation parameter.
+    const grid::shell::DistributedDomain* domain_;   ///< Optional domain for correction communication.
 };
 
 /// @brief Compute the inverse cell Vanka matrices by assembling the full local coupling matrix
