@@ -8,6 +8,8 @@
 #include "terra/grid/grid_types.hpp"
 #include "terra/grid/shell/spherical_shell.hpp"
 
+#include <iostream>
+
 namespace terra::linalg::solvers {
 
 /// @brief Cell-based Vanka iterative solver/smoother for linear systems with coupled DoFs per node.
@@ -561,12 +563,16 @@ void accumulate_ghost_element_contributions(
 /// @tparam BlockSize Number of DoFs per node.
 /// @param A Operator.
 /// @param domain Distributed domain for cell iteration.
+/// @param enable_ghost_contributions If true, include ghost element contributions from face-adjacent
+///        neighbor subdomains. If false, only use local element contributions (boundary cells will
+///        have incomplete Vanka matrices).
 /// @return Kokkos view of inverse cell Vanka matrices, one per hex cell.
 template < typename OperatorT, int BlockSize >
 Kokkos::View< dense::Mat< typename OperatorT::ScalarType, 8 * BlockSize, 8 * BlockSize >****, grid::Layout >
 compute_cell_vanka_matrices(
     const OperatorT&                      A,
-    const grid::shell::DistributedDomain& domain )
+    const grid::shell::DistributedDomain& domain,
+    const bool                            enable_ghost_contributions = true )
 {
     using ScalarType     = typename OperatorT::ScalarType;
     using CellMatrixType = dense::Mat< ScalarType, 8 * BlockSize, 8 * BlockSize >;
@@ -729,7 +735,43 @@ compute_cell_vanka_matrices(
     // yet handled — these affect a small minority of boundary cells.
     // -----------------------------------------------------------------------
 
-    accumulate_ghost_element_contributions< OperatorT, BlockSize >( A, domain, cell_matrices );
+    if ( enable_ghost_contributions )
+    {
+        accumulate_ghost_element_contributions< OperatorT, BlockSize >( A, domain, cell_matrices );
+    }
+
+    // -----------------------------------------------------------------------
+    // Diagnostic: Check symmetry and diagonal positivity of assembled cell matrices.
+    // -----------------------------------------------------------------------
+
+    {
+        double max_sym_error = 0.0;
+        double min_diag      = 1e30;
+        Kokkos::parallel_reduce(
+            "CellVanka::check_symmetry",
+            grid::shell::local_domain_md_range_policy_cells( domain ),
+            KOKKOS_LAMBDA( int local_subdomain, int xc, int yc, int rc, double& sym_err, double& diag_min ) {
+                const auto& V = cell_matrices( local_subdomain, xc, yc, rc );
+                for ( int i = 0; i < CellDim; ++i )
+                {
+                    if ( V( i, i ) < diag_min )
+                        diag_min = V( i, i );
+                    for ( int j = i + 1; j < CellDim; ++j )
+                    {
+                        const ScalarType diff = V( i, j ) - V( j, i );
+                        const ScalarType abs_diff = diff < 0 ? -diff : diff;
+                        if ( abs_diff > sym_err )
+                            sym_err = abs_diff;
+                    }
+                }
+            },
+            Kokkos::Max< double >( max_sym_error ),
+            Kokkos::Min< double >( min_diag ) );
+
+        std::cout << "  [CellVanka] ghost=" << ( enable_ghost_contributions ? "ON" : "OFF" )
+                  << "  max_symmetry_error=" << max_sym_error
+                  << "  min_diagonal=" << min_diag << std::endl;
+    }
 
     // -----------------------------------------------------------------------
     // Phase 3: Invert all cell matrices.
