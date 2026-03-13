@@ -20,6 +20,7 @@
 #include "linalg/solvers/block_jacobi.hpp"
 #include "linalg/solvers/block_preconditioner_2x2.hpp"
 #include "linalg/solvers/cell_vanka.hpp"
+#include "linalg/solvers/cell_vanka_stokes.hpp"
 #include "linalg/solvers/fgmres.hpp"
 #include "linalg/solvers/jacobi.hpp"
 #include "linalg/solvers/multigrid.hpp"
@@ -626,6 +627,228 @@ void run_stokes_smoother_comparison(
 }
 
 // ============================================================================
+// FGMRES with Stokes Vanka preconditioner (velocity + pressure DOFs)
+// ============================================================================
+
+int run_stokes_fgmres_with_stokes_vanka(
+    const std::string&                                                          label,
+    const int                                                                   min_level,
+    const int                                                                   max_level,
+    const std::function< void( DistributedDomain&,
+                               const Grid3DDataVec< double, 3 >&,
+                               const Grid2DDataScalar< double >&,
+                               Grid4DDataScalar< double >& ) >&                k_setup,
+    const int                                                                   max_fgmres_iters,
+    const int                                                                   smoother_steps,
+    double&                                                                     solve_time,
+    double&                                                                     setup_time )
+{
+    using Stokes       = fe::wedge::operators::shell::EpsDivDivStokes< ScalarType >;
+    using Viscous      = typename Stokes::Block11Type;
+    using StokesVanka  = linalg::solvers::CellVankaStokes< Stokes >;
+
+    const auto num_levels     = static_cast< size_t >( max_level - min_level + 1 );
+    const auto velocity_level = num_levels - 1;
+    const auto pressure_level = num_levels - 2;
+
+    // Build domain hierarchy (only need finest two levels for Stokes).
+    std::vector< DistributedDomain >                                  domains;
+    std::vector< Grid3DDataVec< double, 3 > >                         coords_shell;
+    std::vector< Grid2DDataScalar< double > >                         coords_radii;
+    std::vector< Grid4DDataScalar< grid::NodeOwnershipFlag > >        mask_data;
+    std::vector< Grid4DDataScalar< grid::shell::ShellBoundaryFlag > > boundary_mask_data;
+
+    for ( int level = min_level; level <= max_level; ++level )
+    {
+        const auto idx = static_cast< size_t >( level - min_level );
+        domains.push_back( DistributedDomain::create_uniform_single_subdomain_per_diamond( level, level, 0.5, 1.0 ) );
+        coords_shell.push_back( grid::shell::subdomain_unit_sphere_single_shell_coords< ScalarType >( domains[idx] ) );
+        coords_radii.push_back( grid::shell::subdomain_shell_radii< ScalarType >( domains[idx] ) );
+        mask_data.push_back( grid::setup_node_ownership_mask_data( domains[idx] ) );
+        boundary_mask_data.push_back( grid::shell::setup_boundary_mask_data( domains[idx] ) );
+    }
+
+    // Build viscosity on finest level.
+    VectorQ1Scalar< ScalarType > k_vec( "k_finest", domains[velocity_level], mask_data[velocity_level] );
+    k_setup( domains[velocity_level], coords_shell[velocity_level], coords_radii[velocity_level], k_vec.grid_data() );
+
+    // Build Stokes operator on finest level (with Dirichlet BCs).
+    Stokes K(
+        domains[velocity_level],
+        domains[pressure_level],
+        coords_shell[velocity_level],
+        coords_radii[velocity_level],
+        boundary_mask_data[velocity_level],
+        k_vec.grid_data(),
+        true,
+        false );
+
+    Stokes K_neumann(
+        domains[velocity_level],
+        domains[pressure_level],
+        coords_shell[velocity_level],
+        coords_radii[velocity_level],
+        boundary_mask_data[velocity_level],
+        k_vec.grid_data(),
+        false,
+        false );
+
+    Stokes K_neumann_diag(
+        domains[velocity_level],
+        domains[pressure_level],
+        coords_shell[velocity_level],
+        coords_radii[velocity_level],
+        boundary_mask_data[velocity_level],
+        k_vec.grid_data(),
+        false,
+        true );
+
+    // Build Stokes Vanka matrices.
+    Kokkos::Timer timer_vanka_setup;
+    auto inv_stokes_cells = linalg::solvers::compute_stokes_cell_vanka_matrices< Viscous, ScalarType >(
+        K.block_11(),
+        domains[velocity_level],
+        domains[pressure_level],
+        coords_shell[velocity_level],
+        coords_radii[velocity_level],
+        true );
+    Kokkos::fence();
+    const double time_vanka_setup = timer_vanka_setup.seconds();
+    setup_time = time_vanka_setup;
+
+    // Temporary vectors for Stokes Vanka.
+    VectorQ1IsoQ2Q1< ScalarType > vanka_tmp(
+        "vanka_tmp",
+        domains[velocity_level],
+        domains[pressure_level],
+        mask_data[velocity_level],
+        mask_data[pressure_level] );
+
+    VectorQ1IsoQ2Q1< ScalarType > vanka_corr(
+        "vanka_corr",
+        domains[velocity_level],
+        domains[pressure_level],
+        mask_data[velocity_level],
+        mask_data[pressure_level] );
+
+    // Estimate spectral radius for omega.
+    // Use a simple fixed omega for now.
+    const double omega_stokes_vanka = 1.0 / 8.0;
+
+    StokesVanka stokes_vanka(
+        inv_stokes_cells,
+        smoother_steps,
+        vanka_tmp,
+        vanka_corr,
+        omega_stokes_vanka,
+        &domains[velocity_level],
+        &domains[pressure_level] );
+
+    // FGMRES outer solver with Stokes Vanka as preconditioner.
+    std::vector< VectorQ1IsoQ2Q1< ScalarType > > tmp_fgmres;
+    for ( int i = 0; i < 2 * max_fgmres_iters + 4; ++i )
+    {
+        tmp_fgmres.emplace_back(
+            "tmp_fgmres_" + std::to_string( i ),
+            domains[velocity_level],
+            domains[pressure_level],
+            mask_data[velocity_level],
+            mask_data[pressure_level] );
+    }
+
+    linalg::solvers::FGMRESOptions< ScalarType > fgmres_options;
+    fgmres_options.restart                      = max_fgmres_iters;
+    fgmres_options.max_iterations               = max_fgmres_iters;
+    fgmres_options.relative_residual_tolerance  = 1e-10;
+    fgmres_options.absolute_residual_tolerance  = 1e-16;
+
+    auto solver_table = std::make_shared< util::Table >();
+    linalg::solvers::FGMRES< Stokes, StokesVanka > fgmres(
+        tmp_fgmres, fgmres_options, solver_table, stokes_vanka );
+
+    // Set up Stokes vectors.
+    VectorQ1IsoQ2Q1< ScalarType > u(
+        "u",
+        domains[velocity_level],
+        domains[pressure_level],
+        mask_data[velocity_level],
+        mask_data[pressure_level] );
+
+    VectorQ1IsoQ2Q1< ScalarType > f(
+        "f",
+        domains[velocity_level],
+        domains[pressure_level],
+        mask_data[velocity_level],
+        mask_data[pressure_level] );
+
+    VectorQ1IsoQ2Q1< ScalarType > tmp_bc_0(
+        "tmp_bc_0",
+        domains[velocity_level],
+        domains[pressure_level],
+        mask_data[velocity_level],
+        mask_data[pressure_level] );
+
+    VectorQ1IsoQ2Q1< ScalarType > tmp_bc_1(
+        "tmp_bc_1",
+        domains[velocity_level],
+        domains[pressure_level],
+        mask_data[velocity_level],
+        mask_data[pressure_level] );
+
+    linalg::assign( f, 0.0 );
+
+    // Non-trivial initial guess.
+    Kokkos::parallel_for(
+        "initial_guess_vel",
+        grid::shell::local_domain_md_range_policy_nodes( domains[velocity_level] ),
+        InitialGuessVelocityInterpolator{
+            coords_shell[velocity_level], coords_radii[velocity_level], u.block_1().grid_data() } );
+
+    Kokkos::parallel_for(
+        "initial_guess_pre",
+        grid::shell::local_domain_md_range_policy_nodes( domains[pressure_level] ),
+        InitialGuessPressureInterpolator{
+            coords_shell[pressure_level], coords_radii[pressure_level], u.block_2().grid_data() } );
+
+    // Enforce Dirichlet BCs.
+    linalg::assign( tmp_bc_0, 0.0 );
+    fe::strong_algebraic_velocity_dirichlet_enforcement_stokes_like(
+        K_neumann,
+        K_neumann_diag,
+        tmp_bc_0,
+        tmp_bc_1,
+        f,
+        boundary_mask_data[velocity_level],
+        grid::shell::ShellBoundaryFlag::BOUNDARY );
+
+    const int num_shells = domains[velocity_level].domain_info().subdomain_num_nodes_radially();
+    Kokkos::parallel_for(
+        "zero_boundary_u",
+        grid::shell::local_domain_md_range_policy_nodes( domains[velocity_level] ),
+        SetOnBoundary{ tmp_bc_0.block_1().grid_data(), u.block_1().grid_data(), num_shells } );
+
+    // Solve.
+    std::cout << "\n=== FGMRES + " << label << " ===" << std::endl;
+    std::cout << "Stokes Vanka setup time: " << time_vanka_setup << "s" << std::endl;
+
+    Kokkos::Timer timer_solve;
+    linalg::solvers::solve( fgmres, K, u, f );
+    Kokkos::fence();
+    solve_time = timer_solve.seconds();
+
+    solver_table->query_rows_equals( "tag", "fgmres_solver" )
+        .select_columns( { "iteration", "absolute_residual", "relative_residual" } )
+        .print_pretty();
+
+    const int iterations =
+        static_cast< int >( solver_table->query_rows_equals( "tag", "fgmres_solver" ).rows().size() );
+
+    std::cout << "FGMRES iterations: " << iterations << ", solve time: " << solve_time << "s" << std::endl;
+
+    return iterations;
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -707,6 +930,29 @@ int main( int argc, char** argv )
         };
         run_stokes_smoother_comparison(
             "Lateral k = 1 + 1000*sin^2(3x)*cos^2(2y)", min_level, max_level, k_setup, max_fgmres_iters_lateral, num_mg_cycles );
+    }
+
+    // ================================================================
+    // Stokes Vanka: coupled velocity-pressure cell Vanka preconditioner
+    // ================================================================
+
+    std::cout << "\n################################################################" << std::endl;
+    std::cout << "# Stokes Vanka: FGMRES + coupled velocity-pressure Vanka prec" << std::endl;
+    std::cout << "################################################################" << std::endl;
+
+    {
+        auto k_setup = []( DistributedDomain& /*dom*/,
+                           const Grid3DDataVec< double, 3 >& /*cs*/,
+                           const Grid2DDataScalar< double >& /*cr*/,
+                           Grid4DDataScalar< double >& k_data ) {
+            Kokkos::deep_copy( k_data, 1.0 );
+        };
+        double solve_time = 0.0, setup_time = 0.0;
+        const int iters = run_stokes_fgmres_with_stokes_vanka(
+            "Stokes Vanka (k=1, 3 steps)", min_level, max_level, k_setup, max_fgmres_iters, 3,
+            solve_time, setup_time );
+        std::cout << "Stokes Vanka (k=1): " << iters << " iters, setup=" << setup_time
+                  << "s, solve=" << solve_time << "s" << std::endl;
     }
 
     return EXIT_SUCCESS;
