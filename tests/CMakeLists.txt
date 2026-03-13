@@ -75,6 +75,8 @@ add_terra_test(test_epsilon_cg)
 add_terra_test(test_epsilon_divdiv_cg)
 add_terra_test(test_vector_laplace_compare)
 add_terra_test(test_xdmf_writer)
+add_terra_test(test_cell_vanka_smoother)
+target_compile_definitions(test_cell_vanka_smoother PRIVATE TERRA_DATA_DIR="${CMAKE_SOURCE_DIR}/data")
 
 # Adding target for all the tests.
 get_property(ALL_TERRA_TESTS GLOBAL PROPERTY TERRA_TEST_TARGETS)

@@ -291,8 +291,74 @@ struct Mat
         }
         else
         {
-            static_assert( Rows == -1, "inv() only implemented for 2x2 and 3x3 matrices" );
+            static_assert( Rows == Cols, "inv() requires square matrix" );
+            // General LU-based inverse with partial pivoting (Gauss-Jordan elimination).
+            // Augment [A | I] and reduce to [I | A^{-1}].
+            Mat aug_left  = *this;
+            Mat aug_right = identity();
+
+            for ( int col = 0; col < Rows; ++col )
+            {
+                // Partial pivoting: find row with largest absolute value in column.
+                int    pivot_row = col;
+                T      pivot_val = aug_left.data[col][col] < T( 0 ) ? -aug_left.data[col][col] : aug_left.data[col][col];
+                for ( int row = col + 1; row < Rows; ++row )
+                {
+                    T val = aug_left.data[row][col] < T( 0 ) ? -aug_left.data[row][col] : aug_left.data[row][col];
+                    if ( val > pivot_val )
+                    {
+                        pivot_val = val;
+                        pivot_row = row;
+                    }
+                }
+
+                // Swap rows if needed.
+                if ( pivot_row != col )
+                {
+                    for ( int k = 0; k < Cols; ++k )
+                    {
+                        T tmp                       = aug_left.data[col][k];
+                        aug_left.data[col][k]       = aug_left.data[pivot_row][k];
+                        aug_left.data[pivot_row][k]  = tmp;
+                        tmp                          = aug_right.data[col][k];
+                        aug_right.data[col][k]      = aug_right.data[pivot_row][k];
+                        aug_right.data[pivot_row][k] = tmp;
+                    }
+                }
+
+                // Scale pivot row.
+                const T inv_pivot = T( 1 ) / aug_left.data[col][col];
+                for ( int k = 0; k < Cols; ++k )
+                {
+                    aug_left.data[col][k]  *= inv_pivot;
+                    aug_right.data[col][k] *= inv_pivot;
+                }
+
+                // Eliminate column in all other rows.
+                for ( int row = 0; row < Rows; ++row )
+                {
+                    if ( row == col )
+                        continue;
+                    const T factor = aug_left.data[row][col];
+                    for ( int k = 0; k < Cols; ++k )
+                    {
+                        aug_left.data[row][k]  -= factor * aug_left.data[col][k];
+                        aug_right.data[row][k] -= factor * aug_right.data[col][k];
+                    }
+                }
+            }
+            return aug_right;
         }
+    }
+
+    KOKKOS_INLINE_FUNCTION
+    constexpr static Mat identity()
+    {
+        static_assert( Rows == Cols, "identity() requires square matrix" );
+        Mat m;
+        for ( int i = 0; i < Rows; ++i )
+            m.data[i][i] = T( 1 );
+        return m;
     }
 
     KOKKOS_INLINE_FUNCTION
@@ -332,6 +398,7 @@ struct Mat
         else
         {
             static_assert( Rows == -1, "inv() only implemented for 2x2 and 3x3 matrices" );
+            return {};
         }
     }
 
@@ -370,6 +437,7 @@ struct Mat
         else
         {
             static_assert( Rows == -1, "inv() only implemented for 2x2 and 3x3 matrices" );
+            return {};
         }
     }
 
