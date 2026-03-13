@@ -118,6 +118,9 @@ class CellVanka
     /// are processed in parallel without atomic operations. The residual is computed
     /// once and reused for all colors (additive algorithm).
     ///
+    /// Each color launches only the exact number of threads needed for cells of that
+    /// color, avoiding wasted threads from filtering.
+    ///
     /// @param residual The residual vector (input, not modified).
     void apply_cell_vanka( const SolutionVectorType& residual )
     {
@@ -138,14 +141,25 @@ class CellVanka
             const int color_y = ( color / 2 ) % 2;
             const int color_r = color / 4;
 
+            // Compute the number of cells of this color in each dimension.
+            // Cells with xc % 2 == color_x are: color_x, color_x+2, color_x+4, ...
+            const int half_cells_x = ( num_cells_x - color_x + 1 ) / 2;
+            const int half_cells_y = ( num_cells_y - color_y + 1 ) / 2;
+            const int half_cells_r = ( num_cells_r - color_r + 1 ) / 2;
+
+            if ( half_cells_x <= 0 || half_cells_y <= 0 || half_cells_r <= 0 )
+                continue;
+
             Kokkos::parallel_for(
                 "CellVanka::apply_color",
                 Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >(
                     { 0, 0, 0, 0 },
-                    { num_subdomains, num_cells_x, num_cells_y, num_cells_r } ),
-                KOKKOS_LAMBDA( int local_subdomain, int xc, int yc, int rc ) {
-                    if ( ( xc % 2 ) != color_x || ( yc % 2 ) != color_y || ( rc % 2 ) != color_r )
-                        return;
+                    { num_subdomains, half_cells_x, half_cells_y, half_cells_r } ),
+                KOKKOS_LAMBDA( int local_subdomain, int hx, int hy, int hr ) {
+                    // Map half-indices back to actual cell coordinates.
+                    const int xc = 2 * hx + color_x;
+                    const int yc = 2 * hy + color_y;
+                    const int rc = 2 * hr + color_r;
 
                     // Gather residual at the 8 cell nodes into a local CellDim-vector.
                     dense::Vec< ScalarType, CellDim > local_res;
@@ -603,6 +617,9 @@ class CellVankaMultiplicative
     /// Cells are colored by (xc%2, yc%2, rc%2), giving 8 colors. Cells of the same
     /// color share no nodes, so corrections can be written without atomic operations.
     ///
+    /// Launches only the exact number of threads needed for cells of the given color,
+    /// avoiding wasted threads from filtering.
+    ///
     /// @param residual The residual vector (input, not modified).
     /// @param color The color index (0..7).
     void apply_cell_vanka_color( const SolutionVectorType& residual, int color )
@@ -620,15 +637,24 @@ class CellVankaMultiplicative
         const auto num_cells_y    = static_cast< int >( inv_cells.extent( 2 ) );
         const auto num_cells_r    = static_cast< int >( inv_cells.extent( 3 ) );
 
+        // Compute the number of cells of this color in each dimension.
+        const int half_cells_x = ( num_cells_x - color_x + 1 ) / 2;
+        const int half_cells_y = ( num_cells_y - color_y + 1 ) / 2;
+        const int half_cells_r = ( num_cells_r - color_r + 1 ) / 2;
+
+        if ( half_cells_x <= 0 || half_cells_y <= 0 || half_cells_r <= 0 )
+            return;
+
         Kokkos::parallel_for(
             "CellVankaMultiplicative::apply_color",
             Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >(
                 { 0, 0, 0, 0 },
-                { num_subdomains, num_cells_x, num_cells_y, num_cells_r } ),
-            KOKKOS_LAMBDA( int local_subdomain, int xc, int yc, int rc ) {
-                // Skip cells that don't belong to this color.
-                if ( ( xc % 2 ) != color_x || ( yc % 2 ) != color_y || ( rc % 2 ) != color_r )
-                    return;
+                { num_subdomains, half_cells_x, half_cells_y, half_cells_r } ),
+            KOKKOS_LAMBDA( int local_subdomain, int hx, int hy, int hr ) {
+                // Map half-indices back to actual cell coordinates.
+                const int xc = 2 * hx + color_x;
+                const int yc = 2 * hy + color_y;
+                const int rc = 2 * hr + color_r;
 
                 // Gather residual at the 8 cell nodes into a local CellDim-vector.
                 dense::Vec< ScalarType, CellDim > local_res;

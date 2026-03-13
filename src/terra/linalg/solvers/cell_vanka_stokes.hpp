@@ -124,6 +124,9 @@ class CellVankaStokes
     /// multiplies by inverse cell matrix, and scatters corrections.
     /// Uses 8-coloring for velocity (non-overlapping), atomic adds for pressure
     /// (same-color fine cells may share coarse pressure nodes).
+    ///
+    /// Each color launches only the exact number of threads needed for cells of that
+    /// color, avoiding wasted threads from filtering.
     void apply_cell_vanka( const SolutionVectorType& residual )
     {
         auto vel_res   = residual.block_1().grid_data();
@@ -143,14 +146,24 @@ class CellVankaStokes
             const int color_y = ( color / 2 ) % 2;
             const int color_r = color / 4;
 
+            // Compute the number of cells of this color in each dimension.
+            const int half_cells_x = ( num_cells_x - color_x + 1 ) / 2;
+            const int half_cells_y = ( num_cells_y - color_y + 1 ) / 2;
+            const int half_cells_r = ( num_cells_r - color_r + 1 ) / 2;
+
+            if ( half_cells_x <= 0 || half_cells_y <= 0 || half_cells_r <= 0 )
+                continue;
+
             Kokkos::parallel_for(
                 "CellVankaStokes::apply_color",
                 Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >(
                     { 0, 0, 0, 0 },
-                    { num_subdomains, num_cells_x, num_cells_y, num_cells_r } ),
-                KOKKOS_LAMBDA( int local_subdomain, int xc, int yc, int rc ) {
-                    if ( ( xc % 2 ) != color_x || ( yc % 2 ) != color_y || ( rc % 2 ) != color_r )
-                        return;
+                    { num_subdomains, half_cells_x, half_cells_y, half_cells_r } ),
+                KOKKOS_LAMBDA( int local_subdomain, int hx, int hy, int hr ) {
+                    // Map half-indices back to actual cell coordinates.
+                    const int xc = 2 * hx + color_x;
+                    const int yc = 2 * hy + color_y;
+                    const int rc = 2 * hr + color_r;
 
                     dense::Vec< ScalarType, CellDim > local_res;
 

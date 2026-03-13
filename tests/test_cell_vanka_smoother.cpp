@@ -1,5 +1,5 @@
 
-/// @brief Compares convergence of cell Vanka vs block Jacobi vs point Jacobi as smoothers
+/// @brief Tests convergence of velocity-only cell Vanka as a smoother
 ///        in the velocity MG preconditioner of a Stokes solver (FGMRES + block triangular preconditioner).
 ///
 /// Uses the EpsDivDivStokes operator (variable viscosity Stokes with iso-Q2/Q1 elements).
@@ -17,12 +17,10 @@
 #include "fe/wedge/operators/shell/restriction_linear.hpp"
 #include "fe/wedge/operators/shell/vector_mass.hpp"
 #include "geophysics/viscosity/viscosity_interpolation.hpp"
-#include "linalg/solvers/block_jacobi.hpp"
 #include "linalg/solvers/block_preconditioner_2x2.hpp"
 #include "linalg/solvers/cell_vanka.hpp"
 #include "linalg/solvers/cell_vanka_stokes.hpp"
 #include "linalg/solvers/fgmres.hpp"
-#include "linalg/solvers/jacobi.hpp"
 #include "linalg/solvers/multigrid.hpp"
 #include "linalg/solvers/pcg.hpp"
 #include "linalg/vector_q1isoq2_q1.hpp"
@@ -30,7 +28,6 @@
 #include "terra/grid/shell/spherical_shell.hpp"
 #include "terra/kernels/common/grid_operations.hpp"
 #include "terra/kokkos/kokkos_wrapper.hpp"
-#include "terra/linalg/diagonally_scaled_operator.hpp"
 #include "terra/linalg/solvers/diagonal_solver.hpp"
 #include "terra/linalg/solvers/power_iteration.hpp"
 #include "util/init.hpp"
@@ -43,7 +40,6 @@ using grid::Grid3DDataVec;
 using grid::Grid4DDataScalar;
 using grid::Grid4DDataVec;
 using grid::shell::DistributedDomain;
-using linalg::DiagonallyScaledOperator;
 using linalg::VectorQ1IsoQ2Q1;
 using linalg::VectorQ1Scalar;
 using linalg::VectorQ1Vec;
@@ -303,15 +299,11 @@ int run_stokes_fgmres(
 
     // Build smoothers on all levels.
     std::vector< SmootherT >                 smoothers;
-    std::vector< VectorQ1Vec< ScalarType > > inv_diags;
     std::vector< VectorQ1Vec< ScalarType > > smoother_tmps;
 
-    // Extra storage for block/vanka smoother data (kept alive).
-    using BlockSmoother     = linalg::solvers::BlockJacobi< Viscous, 3 >;
+    // Extra storage for vanka smoother data (kept alive).
     using VankaSmoother     = linalg::solvers::CellVanka< Viscous, 3 >;
-    using InvBlockDiagType = typename BlockSmoother::InverseBlockDiagonalType;
     using InvCellType      = typename VankaSmoother::InverseCellMatricesType;
-    std::vector< InvBlockDiagType >          inv_block_diags;
     std::vector< InvCellType >               inv_cell_mats;
     std::vector< VectorQ1Vec< ScalarType > > vanka_corrs;
 
@@ -319,102 +311,47 @@ int run_stokes_fgmres(
 
     for ( size_t level = 0; level < num_levels; ++level )
     {
-        // Compute inverse diagonal for omega estimation.
-        inv_diags.emplace_back( "inv_diag_" + std::to_string( level ), domains[level], mask_data[level] );
-        {
-            VectorQ1Vec< ScalarType > ones( "ones", domains[level], mask_data[level] );
-            linalg::assign( ones, 1.0 );
-
-            if ( level == velocity_level )
-            {
-                K.block_11().set_diagonal( true );
-                linalg::apply( K.block_11(), ones, inv_diags.back() );
-                K.block_11().set_diagonal( false );
-            }
-            else
-            {
-                A_c[level].set_diagonal( true );
-                linalg::apply( A_c[level], ones, inv_diags.back() );
-                A_c[level].set_diagonal( false );
-            }
-            linalg::invert_entries( inv_diags.back() );
-        }
-
-        VectorQ1Vec< ScalarType > tmp0( "tmp0", domains[level], mask_data[level] );
-        VectorQ1Vec< ScalarType > tmp1( "tmp1", domains[level], mask_data[level] );
-        double                    max_ev = 0.0;
-        if ( level == velocity_level )
-        {
-            DiagonallyScaledOperator< Viscous > dA( K.block_11(), inv_diags.back() );
-            max_ev = power_iteration< DiagonallyScaledOperator< Viscous > >( dA, tmp0, tmp1, 100 );
-        }
-        else
-        {
-            DiagonallyScaledOperator< Viscous > dA( A_c[level], inv_diags.back() );
-            max_ev = power_iteration< DiagonallyScaledOperator< Viscous > >( dA, tmp0, tmp1, 100 );
-        }
-        const double omega = 2.0 / ( 1.1 * max_ev );
-
         const int smoother_steps = smoother_steps_override;
         smoother_tmps.emplace_back( "sm_tmp_" + std::to_string( level ), domains[level], mask_data[level] );
 
-        if constexpr ( std::is_same_v< SmootherT, linalg::solvers::Jacobi< Viscous > > )
+        if ( level == velocity_level )
         {
-            smoothers.emplace_back( inv_diags.back(), smoother_steps, smoother_tmps.back(), omega );
+            inv_cell_mats.push_back(
+                linalg::solvers::compute_cell_vanka_matrices< Viscous, 3 >( K.block_11(), domains[level] ) );
         }
-        else if constexpr ( std::is_same_v< SmootherT, BlockSmoother > )
+        else
         {
-            if ( level == velocity_level )
-            {
-                inv_block_diags.push_back(
-                    linalg::solvers::compute_inverse_block_diagonal< Viscous, 3 >( K.block_11(), domains[level] ) );
-            }
-            else
-            {
-                inv_block_diags.push_back(
-                    linalg::solvers::compute_inverse_block_diagonal< Viscous, 3 >( A_c[level], domains[level] ) );
-            }
-            smoothers.emplace_back( inv_block_diags.back(), smoother_steps, smoother_tmps.back(), omega );
+            inv_cell_mats.push_back(
+                linalg::solvers::compute_cell_vanka_matrices< Viscous, 3 >( A_c[level], domains[level] ) );
         }
-        else if constexpr ( std::is_same_v< SmootherT, VankaSmoother > )
+        vanka_corrs.emplace_back( "vk_corr_" + std::to_string( level ), domains[level], mask_data[level] );
+
+        // Compute Vanka-specific spectral radius: rho(V^{-1}A).
+        VectorQ1Vec< ScalarType > tmp0( "tmp0", domains[level], mask_data[level] );
+        VectorQ1Vec< ScalarType > tmp1( "tmp1", domains[level], mask_data[level] );
+        VectorQ1Vec< ScalarType > vk_pi_tmp( "vk_pi_tmp", domains[level], mask_data[level] );
+        SmootherT vanka_unit( inv_cell_mats.back(), 1, vk_pi_tmp, vanka_corrs.back(), 1.0, &domains[level] );
+
+        VectorQ1Vec< ScalarType > vk_pi_op_tmp( "vk_pi_op_tmp", domains[level], mask_data[level] );
+        using VankaOp = VankaScaledOperator< Viscous, 3, SmootherT >;
+        double vanka_max_ev = 0.0;
+        if ( level == velocity_level )
         {
-            if ( level == velocity_level )
-            {
-                inv_cell_mats.push_back(
-                    linalg::solvers::compute_cell_vanka_matrices< Viscous, 3 >( K.block_11(), domains[level] ) );
-            }
-            else
-            {
-                inv_cell_mats.push_back(
-                    linalg::solvers::compute_cell_vanka_matrices< Viscous, 3 >( A_c[level], domains[level] ) );
-            }
-            vanka_corrs.emplace_back( "vk_corr_" + std::to_string( level ), domains[level], mask_data[level] );
-
-            // Compute Vanka-specific spectral radius: rho(V^{-1}A).
-            VectorQ1Vec< ScalarType > vk_pi_tmp( "vk_pi_tmp", domains[level], mask_data[level] );
-            SmootherT vanka_unit( inv_cell_mats.back(), 1, vk_pi_tmp, vanka_corrs.back(), 1.0, &domains[level] );
-
-            VectorQ1Vec< ScalarType > vk_pi_op_tmp( "vk_pi_op_tmp", domains[level], mask_data[level] );
-            using VankaOp = VankaScaledOperator< Viscous, 3, SmootherT >;
-            double vanka_max_ev = 0.0;
-            if ( level == velocity_level )
-            {
-                VankaOp vanka_op( K.block_11(), vanka_unit, vk_pi_op_tmp );
-                vanka_max_ev = power_iteration< VankaOp >( vanka_op, tmp0, tmp1, 100 );
-            }
-            else
-            {
-                VankaOp vanka_op( A_c[level], vanka_unit, vk_pi_op_tmp );
-                vanka_max_ev = power_iteration< VankaOp >( vanka_op, tmp0, tmp1, 100 );
-            }
-            const double omega_vanka = 2.0 / ( 1.1 * std::abs( vanka_max_ev ) );
-            std::cout << "  Vanka level " << level << ": rho(V^{-1}A) = " << vanka_max_ev
-                      << ", omega = " << omega_vanka << std::endl;
-
-            smoothers.emplace_back(
-                inv_cell_mats.back(), smoother_steps, smoother_tmps.back(), vanka_corrs.back(), omega_vanka,
-                &domains[level] );
+            VankaOp vanka_op( K.block_11(), vanka_unit, vk_pi_op_tmp );
+            vanka_max_ev = power_iteration< VankaOp >( vanka_op, tmp0, tmp1, 100 );
         }
+        else
+        {
+            VankaOp vanka_op( A_c[level], vanka_unit, vk_pi_op_tmp );
+            vanka_max_ev = power_iteration< VankaOp >( vanka_op, tmp0, tmp1, 100 );
+        }
+        const double omega_vanka = 2.0 / ( 1.1 * std::abs( vanka_max_ev ) );
+        std::cout << "  Vanka level " << level << ": rho(V^{-1}A) = " << vanka_max_ev
+                  << ", omega = " << omega_vanka << std::endl;
+
+        smoothers.emplace_back(
+            inv_cell_mats.back(), smoother_steps, smoother_tmps.back(), vanka_corrs.back(), omega_vanka,
+            &domains[level] );
     }
 
     Kokkos::fence();
@@ -594,22 +531,14 @@ void run_stokes_smoother_comparison(
     using Stokes  = fe::wedge::operators::shell::EpsDivDivStokes< ScalarType >;
     using Viscous = typename Stokes::Block11Type;
 
-    using PointSmoother    = linalg::solvers::Jacobi< Viscous >;
-    using BlockSmoother    = linalg::solvers::BlockJacobi< Viscous, 3 >;
     using VankaSmoother    = linalg::solvers::CellVanka< Viscous, 3 >;
 
     std::cout << "\n================================================================" << std::endl;
-    std::cout << "  Stokes smoother comparison: " << label << std::endl;
+    std::cout << "  Stokes smoother comparison (velocity-only Vanka): " << label << std::endl;
     std::cout << "================================================================" << std::endl;
 
-    double time_point = 0.0, time_block = 0.0, time_vanka_3 = 0.0, time_vanka_6 = 0.0;
-    double setup_point = 0.0, setup_block = 0.0, setup_vanka_3 = 0.0, setup_vanka_6 = 0.0;
-
-    const int iters_point =
-        run_stokes_fgmres< PointSmoother >( "Point Jacobi (3 steps)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 3, time_point, setup_point );
-
-    const int iters_block =
-        run_stokes_fgmres< BlockSmoother >( "Block Jacobi (3 steps)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 3, time_block, setup_block );
+    double time_vanka_3 = 0.0, time_vanka_6 = 0.0;
+    double setup_vanka_3 = 0.0, setup_vanka_6 = 0.0;
 
     const int iters_vanka_3 =
         run_stokes_fgmres< VankaSmoother >( "Cell Vanka (3 steps)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 3, time_vanka_3, setup_vanka_3 );
@@ -618,12 +547,9 @@ void run_stokes_smoother_comparison(
         run_stokes_fgmres< VankaSmoother >( "Cell Vanka (6 steps)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 6, time_vanka_6, setup_vanka_6 );
 
     std::cout << "\n--- Summary: " << label << " ---" << std::endl;
-    std::cout << "FGMRES iterations:  point=" << iters_point << "  block=" << iters_block
-              << "  vanka(3)=" << iters_vanka_3 << "  vanka(6)=" << iters_vanka_6 << std::endl;
-    std::cout << "Setup time:  point=" << setup_point << "s  block=" << setup_block
-              << "s  vanka(3)=" << setup_vanka_3 << "s  vanka(6)=" << setup_vanka_6 << "s" << std::endl;
-    std::cout << "Solve time:  point=" << time_point << "s  block=" << time_block
-              << "s  vanka(3)=" << time_vanka_3 << "s  vanka(6)=" << time_vanka_6 << "s" << std::endl;
+    std::cout << "FGMRES iterations:  vanka(3)=" << iters_vanka_3 << "  vanka(6)=" << iters_vanka_6 << std::endl;
+    std::cout << "Setup time:  vanka(3)=" << setup_vanka_3 << "s  vanka(6)=" << setup_vanka_6 << "s" << std::endl;
+    std::cout << "Solve time:  vanka(3)=" << time_vanka_3 << "s  vanka(6)=" << time_vanka_6 << "s" << std::endl;
 }
 
 // ============================================================================
@@ -863,7 +789,7 @@ int main( int argc, char** argv )
 
     std::cout << "\n################################################################" << std::endl;
     std::cout << "# Stokes smoother comparison (FGMRES + block triangular prec)" << std::endl;
-    std::cout << "# Velocity MG smoother: point Jacobi vs block Jacobi vs cell Vanka" << std::endl;
+    std::cout << "# Velocity MG smoother: velocity-only cell Vanka" << std::endl;
     std::cout << "# min_level=" << min_level << ", max_level=" << max_level
               << ", MG V-cycles=" << num_mg_cycles << ", FGMRES tol=1e-10" << std::endl;
     std::cout << "################################################################" << std::endl;
