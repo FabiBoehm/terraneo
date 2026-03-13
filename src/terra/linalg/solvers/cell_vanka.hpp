@@ -113,9 +113,10 @@ class CellVanka
   private:
     /// @brief Apply additive cell Vanka to accumulate corrections from all cells.
     ///
-    /// For each hex cell, gathers the residual at its 8 nodes, multiplies by the
-    /// pre-computed inverse cell matrix, and atomically scatters the result into
-    /// the correction vector.
+    /// Uses 8-coloring based on (xc%2, yc%2, rc%2) so that cells of the same color
+    /// share no nodes. Colors are processed sequentially, but cells within each color
+    /// are processed in parallel without atomic operations. The residual is computed
+    /// once and reused for all colors (additive algorithm).
     ///
     /// @param residual The residual vector (input, not modified).
     void apply_cell_vanka( const SolutionVectorType& residual )
@@ -124,52 +125,60 @@ class CellVanka
         auto correction_data = correction_.grid_data();
         auto inv_cells       = inverse_cell_matrices_;
 
-        // Hex node (i) -> offset from cell origin (x_cell, y_cell, r_cell).
-        // Node i = (i%2, (i/2)%2, i/4).
-
         const auto num_subdomains = static_cast< int >( inv_cells.extent( 0 ) );
         const auto num_cells_x    = static_cast< int >( inv_cells.extent( 1 ) );
         const auto num_cells_y    = static_cast< int >( inv_cells.extent( 2 ) );
         const auto num_cells_r    = static_cast< int >( inv_cells.extent( 3 ) );
 
-        Kokkos::parallel_for(
-            "CellVanka::apply",
-            Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >(
-                { 0, 0, 0, 0 },
-                { num_subdomains, num_cells_x, num_cells_y, num_cells_r } ),
-            KOKKOS_LAMBDA( int local_subdomain, int xc, int yc, int rc ) {
-                // Gather residual at the 8 cell nodes into a local CellDim-vector.
-                dense::Vec< ScalarType, CellDim > local_res;
-                for ( int node = 0; node < NumNodesPerCell; ++node )
-                {
-                    const int gx = xc + ( node % 2 );
-                    const int gy = yc + ( ( node / 2 ) % 2 );
-                    const int gr = rc + ( node / 4 );
+        // Process 8 colors sequentially. Same-color cells don't share nodes,
+        // so no atomic operations are needed within each color.
+        for ( int color = 0; color < 8; ++color )
+        {
+            const int color_x = color % 2;
+            const int color_y = ( color / 2 ) % 2;
+            const int color_r = color / 4;
 
-                    for ( int d = 0; d < BlockSize; ++d )
+            Kokkos::parallel_for(
+                "CellVanka::apply_color",
+                Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >(
+                    { 0, 0, 0, 0 },
+                    { num_subdomains, num_cells_x, num_cells_y, num_cells_r } ),
+                KOKKOS_LAMBDA( int local_subdomain, int xc, int yc, int rc ) {
+                    if ( ( xc % 2 ) != color_x || ( yc % 2 ) != color_y || ( rc % 2 ) != color_r )
+                        return;
+
+                    // Gather residual at the 8 cell nodes into a local CellDim-vector.
+                    dense::Vec< ScalarType, CellDim > local_res;
+                    for ( int node = 0; node < NumNodesPerCell; ++node )
                     {
-                        local_res( node * BlockSize + d ) = res_data( local_subdomain, gx, gy, gr, d );
+                        const int gx = xc + ( node % 2 );
+                        const int gy = yc + ( ( node / 2 ) % 2 );
+                        const int gr = rc + ( node / 4 );
+
+                        for ( int d = 0; d < BlockSize; ++d )
+                        {
+                            local_res( node * BlockSize + d ) = res_data( local_subdomain, gx, gy, gr, d );
+                        }
                     }
-                }
 
-                // Multiply by inverse cell matrix.
-                const auto local_corr = inv_cells( local_subdomain, xc, yc, rc ) * local_res;
+                    // Multiply by inverse cell matrix.
+                    const auto local_corr = inv_cells( local_subdomain, xc, yc, rc ) * local_res;
 
-                // Scatter correction back (atomic add due to overlapping cells).
-                for ( int node = 0; node < NumNodesPerCell; ++node )
-                {
-                    const int gx = xc + ( node % 2 );
-                    const int gy = yc + ( ( node / 2 ) % 2 );
-                    const int gr = rc + ( node / 4 );
-
-                    for ( int d = 0; d < BlockSize; ++d )
+                    // Scatter correction (no atomic needed: same-color cells don't share nodes).
+                    for ( int node = 0; node < NumNodesPerCell; ++node )
                     {
-                        Kokkos::atomic_add(
-                            &correction_data( local_subdomain, gx, gy, gr, d ),
-                            local_corr( node * BlockSize + d ) );
+                        const int gx = xc + ( node % 2 );
+                        const int gy = yc + ( ( node / 2 ) % 2 );
+                        const int gr = rc + ( node / 4 );
+
+                        for ( int d = 0; d < BlockSize; ++d )
+                        {
+                            correction_data( local_subdomain, gx, gy, gr, d ) +=
+                                local_corr( node * BlockSize + d );
+                        }
                     }
-                }
-            } );
+                } );
+        }
 
         Kokkos::fence();
     }

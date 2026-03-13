@@ -308,7 +308,6 @@ int run_stokes_fgmres(
     // Extra storage for block/vanka smoother data (kept alive).
     using BlockSmoother     = linalg::solvers::BlockJacobi< Viscous, 3 >;
     using VankaSmoother     = linalg::solvers::CellVanka< Viscous, 3 >;
-    using VankaMultSmoother = linalg::solvers::CellVankaMultiplicative< Viscous, 3 >;
     using InvBlockDiagType = typename BlockSmoother::InverseBlockDiagonalType;
     using InvCellType      = typename VankaSmoother::InverseCellMatricesType;
     std::vector< InvBlockDiagType >          inv_block_diags;
@@ -376,8 +375,7 @@ int run_stokes_fgmres(
             }
             smoothers.emplace_back( inv_block_diags.back(), smoother_steps, smoother_tmps.back(), omega );
         }
-        else if constexpr ( std::is_same_v< SmootherT, VankaSmoother > ||
-                            std::is_same_v< SmootherT, VankaMultSmoother > )
+        else if constexpr ( std::is_same_v< SmootherT, VankaSmoother > )
         {
             if ( level == velocity_level )
             {
@@ -598,16 +596,13 @@ void run_stokes_smoother_comparison(
     using PointSmoother    = linalg::solvers::Jacobi< Viscous >;
     using BlockSmoother    = linalg::solvers::BlockJacobi< Viscous, 3 >;
     using VankaSmoother    = linalg::solvers::CellVanka< Viscous, 3 >;
-    using VankaMultSmoother = linalg::solvers::CellVankaMultiplicative< Viscous, 3 >;
 
     std::cout << "\n================================================================" << std::endl;
     std::cout << "  Stokes smoother comparison: " << label << std::endl;
     std::cout << "================================================================" << std::endl;
 
     double time_point = 0.0, time_block = 0.0, time_vanka_3 = 0.0, time_vanka_6 = 0.0;
-    double time_vanka_mult_3 = 0.0;
     double setup_point = 0.0, setup_block = 0.0, setup_vanka_3 = 0.0, setup_vanka_6 = 0.0;
-    double setup_vanka_mult_3 = 0.0;
 
     const int iters_point =
         run_stokes_fgmres< PointSmoother >( "Point Jacobi (3 steps)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 3, time_point, setup_point );
@@ -621,19 +616,13 @@ void run_stokes_smoother_comparison(
     const int iters_vanka_6 =
         run_stokes_fgmres< VankaSmoother >( "Cell Vanka (6 steps)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 6, time_vanka_6, setup_vanka_6 );
 
-    const int iters_vanka_mult_3 =
-        run_stokes_fgmres< VankaMultSmoother >( "Cell Vanka Mult. (3 steps)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 3, time_vanka_mult_3, setup_vanka_mult_3 );
-
     std::cout << "\n--- Summary: " << label << " ---" << std::endl;
     std::cout << "FGMRES iterations:  point=" << iters_point << "  block=" << iters_block
-              << "  vanka(3)=" << iters_vanka_3 << "  vanka(6)=" << iters_vanka_6
-              << "  vanka_mult(3)=" << iters_vanka_mult_3 << std::endl;
+              << "  vanka(3)=" << iters_vanka_3 << "  vanka(6)=" << iters_vanka_6 << std::endl;
     std::cout << "Setup time:  point=" << setup_point << "s  block=" << setup_block
-              << "s  vanka(3)=" << setup_vanka_3 << "s  vanka(6)=" << setup_vanka_6
-              << "s  vanka_mult(3)=" << setup_vanka_mult_3 << "s" << std::endl;
+              << "s  vanka(3)=" << setup_vanka_3 << "s  vanka(6)=" << setup_vanka_6 << "s" << std::endl;
     std::cout << "Solve time:  point=" << time_point << "s  block=" << time_block
-              << "s  vanka(3)=" << time_vanka_3 << "s  vanka(6)=" << time_vanka_6
-              << "s  vanka_mult(3)=" << time_vanka_mult_3 << "s" << std::endl;
+              << "s  vanka(3)=" << time_vanka_3 << "s  vanka(6)=" << time_vanka_6 << "s" << std::endl;
 }
 
 // ============================================================================
@@ -651,7 +640,7 @@ int main( int argc, char** argv )
 
     std::cout << "\n################################################################" << std::endl;
     std::cout << "# Stokes smoother comparison (FGMRES + block triangular prec)" << std::endl;
-    std::cout << "# Velocity MG smoother: point Jacobi vs block Jacobi vs cell Vanka vs mult. Vanka" << std::endl;
+    std::cout << "# Velocity MG smoother: point Jacobi vs block Jacobi vs cell Vanka" << std::endl;
     std::cout << "# min_level=" << min_level << ", max_level=" << max_level
               << ", MG V-cycles=" << num_mg_cycles << ", FGMRES tol=1e-10" << std::endl;
     std::cout << "################################################################" << std::endl;
