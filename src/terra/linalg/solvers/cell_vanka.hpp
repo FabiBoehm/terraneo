@@ -90,8 +90,10 @@ class CellVanka
             // tmp = b - A * x  (residual)
             lincomb( tmp_, { 1.0, -1.0 }, { b, tmp_ } );
 
-            // Zero correction vector.
-            linalg::assign( correction_, 0.0 );
+            // Zero correction only on first iteration; subsequent iterations reuse
+            // the zeroing done by update_x_and_zero_correction.
+            if ( iteration == 0 )
+                linalg::assign( correction_, 0.0 );
 
             // Apply cell Vanka: for each cell, gather residual, multiply by inverse, scatter correction.
             apply_cell_vanka( tmp_ );
@@ -102,8 +104,8 @@ class CellVanka
                 communicate_correction();
             }
 
-            // x = x + omega * correction
-            lincomb( x, { 1.0, omega_ }, { x, correction_ } );
+            // x += omega * correction, then zero correction for next iteration.
+            update_x_and_zero_correction( x );
         }
     }
 
@@ -193,6 +195,36 @@ class CellVanka
                     }
                 } );
         }
+
+        Kokkos::fence();
+    }
+
+    /// @brief Fused kernel: x += omega * correction and zero correction for next iteration.
+    ///
+    /// Combines the update of x and the zeroing of the correction vector into a single
+    /// kernel launch, saving one kernel launch per iteration compared to separate
+    /// lincomb + assign calls.
+    void update_x_and_zero_correction( SolutionVectorType& x )
+    {
+        auto x_data    = x.grid_data();
+        auto corr_data = correction_.grid_data();
+        auto omega     = omega_;
+
+        Kokkos::parallel_for(
+            "CellVanka::update_and_zero",
+            Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >(
+                { 0, 0, 0, 0 },
+                { static_cast< int >( x_data.extent( 0 ) ),
+                  static_cast< int >( x_data.extent( 1 ) ),
+                  static_cast< int >( x_data.extent( 2 ) ),
+                  static_cast< int >( x_data.extent( 3 ) ) } ),
+            KOKKOS_LAMBDA( int s, int i, int j, int k ) {
+                for ( int d = 0; d < BlockSize; ++d )
+                {
+                    x_data( s, i, j, k, d ) += omega * corr_data( s, i, j, k, d );
+                    corr_data( s, i, j, k, d ) = ScalarType( 0 );
+                }
+            } );
 
         Kokkos::fence();
     }

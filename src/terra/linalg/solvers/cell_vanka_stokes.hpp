@@ -93,8 +93,10 @@ class CellVankaStokes
             // tmp = b - K * x (residual for both velocity and pressure)
             lincomb( tmp_, { 1.0, -1.0 }, { b, tmp_ } );
 
-            // Zero correction vector (both blocks).
-            linalg::assign( correction_, 0.0 );
+            // Zero correction only on first iteration; subsequent iterations reuse
+            // the zeroing done by update_x_and_zero_correction.
+            if ( iteration == 0 )
+                linalg::assign( correction_, 0.0 );
 
             // Apply cell Vanka with coupled velocity-pressure local systems.
             apply_cell_vanka( tmp_ );
@@ -109,8 +111,8 @@ class CellVankaStokes
                 communicate_pressure_correction();
             }
 
-            // x = x + omega * correction
-            lincomb( x, { 1.0, omega_ }, { x, correction_ } );
+            // x += omega * correction, then zero correction for next iteration.
+            update_x_and_zero_correction( x );
         }
     }
 
@@ -222,6 +224,60 @@ class CellVankaStokes
                             &pres_corr( local_subdomain, gxp, gyp, grp ),
                             local_corr( VelDim + node ) );
                     }
+                } );
+        }
+
+        Kokkos::fence();
+    }
+
+    /// @brief Fused kernel: x += omega * correction and zero correction for next iteration.
+    ///
+    /// Combines the update of x and the zeroing of the correction vector into a single
+    /// set of kernel launches, saving kernel launches per iteration compared to separate
+    /// lincomb + assign calls. Velocity and pressure blocks are updated in separate kernels
+    /// due to different data layouts (5D vs 4D views).
+    void update_x_and_zero_correction( SolutionVectorType& x )
+    {
+        auto omega = omega_;
+
+        // Update velocity block.
+        {
+            auto x_data    = x.block_1().grid_data();
+            auto corr_data = correction_.block_1().grid_data();
+
+            Kokkos::parallel_for(
+                "CellVankaStokes::update_vel_and_zero",
+                Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >(
+                    { 0, 0, 0, 0 },
+                    { static_cast< int >( x_data.extent( 0 ) ),
+                      static_cast< int >( x_data.extent( 1 ) ),
+                      static_cast< int >( x_data.extent( 2 ) ),
+                      static_cast< int >( x_data.extent( 3 ) ) } ),
+                KOKKOS_LAMBDA( int s, int i, int j, int k ) {
+                    for ( int d = 0; d < VecDim; ++d )
+                    {
+                        x_data( s, i, j, k, d ) += omega * corr_data( s, i, j, k, d );
+                        corr_data( s, i, j, k, d ) = ScalarType( 0 );
+                    }
+                } );
+        }
+
+        // Update pressure block (scalar, no component loop).
+        {
+            auto x_data    = x.block_2().grid_data();
+            auto corr_data = correction_.block_2().grid_data();
+
+            Kokkos::parallel_for(
+                "CellVankaStokes::update_pres_and_zero",
+                Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >(
+                    { 0, 0, 0, 0 },
+                    { static_cast< int >( x_data.extent( 0 ) ),
+                      static_cast< int >( x_data.extent( 1 ) ),
+                      static_cast< int >( x_data.extent( 2 ) ),
+                      static_cast< int >( x_data.extent( 3 ) ) } ),
+                KOKKOS_LAMBDA( int s, int i, int j, int k ) {
+                    x_data( s, i, j, k ) += omega * corr_data( s, i, j, k );
+                    corr_data( s, i, j, k ) = ScalarType( 0 );
                 } );
         }
 
