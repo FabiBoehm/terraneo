@@ -483,4 +483,195 @@ compute_cell_vanka_matrices(
     return cell_matrices;
 }
 
+/// @brief Cell-based multiplicative Vanka iterative solver/smoother with coloring.
+///
+/// Satisfies the SolverLike concept (see solver.hpp).
+/// Uses an 8-coloring of hex cells based on (xc%2, yc%2, rc%2) so that cells of the
+/// same color share no nodes. Colors are processed sequentially (multiplicative), while
+/// cells within each color are processed in parallel.
+///
+/// For each color, the update rule is:
+/// \f[ x^{(k+1)} = x^{(k)} + \omega \sum_{C \in \text{color}} P_C^T V_C^{-1} P_C (b - Ax^{(k)}) \f]
+/// where the sum runs only over cells of the current color (which are node-disjoint),
+/// and the residual is recomputed before each color sweep.
+///
+/// @tparam OperatorT Operator type (must satisfy OperatorLike).
+/// @tparam BlockSize Size of the per-node blocks (number of DoFs per node).
+template < OperatorLike OperatorT, int BlockSize >
+class CellVankaMultiplicative
+{
+  public:
+    /// @brief Operator type to be solved.
+    using OperatorType = OperatorT;
+    /// @brief Solution vector type.
+    using SolutionVectorType = SrcOf< OperatorType >;
+    /// @brief Right-hand side vector type.
+    using RHSVectorType = DstOf< OperatorType >;
+
+    /// @brief Scalar type for computations.
+    using ScalarType = SolutionVectorType::ScalarType;
+
+    /// @brief Number of nodes per hex cell.
+    static constexpr int NumNodesPerCell = 8;
+
+    /// @brief Number of colors for hex cells (2^3 = 8).
+    static constexpr int NumColors = 8;
+
+    /// @brief Dimension of the cell-local system (8 nodes * BlockSize DoFs/node).
+    static constexpr int CellDim = NumNodesPerCell * BlockSize;
+
+    /// @brief Dense cell matrix type (CellDim x CellDim).
+    using CellMatrixType = dense::Mat< ScalarType, CellDim, CellDim >;
+
+    /// @brief Kokkos view storing one inverse cell matrix per hex cell.
+    /// Layout: (local_subdomain, x_cell, y_cell, r_cell).
+    using InverseCellMatricesType = Kokkos::View< CellMatrixType****, grid::Layout >;
+
+    static_assert( BlockSize > 0, "BlockSize must be positive." );
+
+    /// @brief Construct a CellVankaMultiplicative solver.
+    /// @param inverse_cell_matrices Pre-computed inverse cell Vanka matrices.
+    /// @param iterations Number of Vanka smoothing iterations to perform.
+    /// @param tmp Temporary vector for workspace (residual).
+    /// @param correction Temporary vector for workspace (correction per color).
+    /// @param omega Relaxation parameter (default 1.0 for multiplicative Vanka with coloring).
+    /// @param domain Optional domain pointer for inter-subdomain communication.
+    CellVankaMultiplicative(
+        const InverseCellMatricesType& inverse_cell_matrices,
+        const int                      iterations,
+        const SolutionVectorType&      tmp,
+        const SolutionVectorType&      correction,
+        const ScalarType               omega  = static_cast< ScalarType >( 1.0 ),
+        const grid::shell::DistributedDomain* domain = nullptr )
+    : inverse_cell_matrices_( inverse_cell_matrices )
+    , iterations_( iterations )
+    , tmp_( tmp )
+    , correction_( correction )
+    , omega_( omega )
+    , domain_( domain )
+    {}
+
+    /// @brief Solve the linear system using multiplicative cell Vanka iteration with coloring.
+    /// @param A Operator (matrix).
+    /// @param x Solution vector (output).
+    /// @param b Right-hand side vector (input).
+    void solve_impl( OperatorType& A, SolutionVectorType& x, const RHSVectorType& b )
+    {
+        for ( int iteration = 0; iteration < iterations_; ++iteration )
+        {
+            // Process 8 colors sequentially (multiplicative between colors).
+            for ( int color = 0; color < NumColors; ++color )
+            {
+                // Recompute residual: tmp = b - A*x
+                apply( A, x, tmp_ );
+                lincomb( tmp_, { 1.0, -1.0 }, { b, tmp_ } );
+
+                // Zero correction vector.
+                linalg::assign( correction_, 0.0 );
+
+                // Apply Vanka for cells of this color only.
+                // Same-color cells don't share nodes, so no atomics needed.
+                apply_cell_vanka_color( tmp_, color );
+
+                // Communicate corrections across subdomain boundaries.
+                if ( domain_ )
+                {
+                    communicate_correction();
+                }
+
+                // x = x + omega * correction
+                lincomb( x, { 1.0, omega_ }, { x, correction_ } );
+            }
+        }
+    }
+
+    /// @brief Access the inverse cell matrices data.
+    InverseCellMatricesType& get_inverse_cell_matrices() { return inverse_cell_matrices_; }
+
+  private:
+    /// @brief Apply cell Vanka for cells of a specific color only.
+    ///
+    /// Cells are colored by (xc%2, yc%2, rc%2), giving 8 colors. Cells of the same
+    /// color share no nodes, so corrections can be written without atomic operations.
+    ///
+    /// @param residual The residual vector (input, not modified).
+    /// @param color The color index (0..7).
+    void apply_cell_vanka_color( const SolutionVectorType& residual, int color )
+    {
+        auto res_data        = residual.grid_data();
+        auto correction_data = correction_.grid_data();
+        auto inv_cells       = inverse_cell_matrices_;
+
+        const int color_x = color % 2;
+        const int color_y = ( color / 2 ) % 2;
+        const int color_r = color / 4;
+
+        const auto num_subdomains = static_cast< int >( inv_cells.extent( 0 ) );
+        const auto num_cells_x    = static_cast< int >( inv_cells.extent( 1 ) );
+        const auto num_cells_y    = static_cast< int >( inv_cells.extent( 2 ) );
+        const auto num_cells_r    = static_cast< int >( inv_cells.extent( 3 ) );
+
+        Kokkos::parallel_for(
+            "CellVankaMultiplicative::apply_color",
+            Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >(
+                { 0, 0, 0, 0 },
+                { num_subdomains, num_cells_x, num_cells_y, num_cells_r } ),
+            KOKKOS_LAMBDA( int local_subdomain, int xc, int yc, int rc ) {
+                // Skip cells that don't belong to this color.
+                if ( ( xc % 2 ) != color_x || ( yc % 2 ) != color_y || ( rc % 2 ) != color_r )
+                    return;
+
+                // Gather residual at the 8 cell nodes into a local CellDim-vector.
+                dense::Vec< ScalarType, CellDim > local_res;
+                for ( int node = 0; node < NumNodesPerCell; ++node )
+                {
+                    const int gx = xc + ( node % 2 );
+                    const int gy = yc + ( ( node / 2 ) % 2 );
+                    const int gr = rc + ( node / 4 );
+
+                    for ( int d = 0; d < BlockSize; ++d )
+                    {
+                        local_res( node * BlockSize + d ) = res_data( local_subdomain, gx, gy, gr, d );
+                    }
+                }
+
+                // Multiply by inverse cell matrix.
+                const auto local_corr = inv_cells( local_subdomain, xc, yc, rc ) * local_res;
+
+                // Scatter correction (no atomic needed: same-color cells don't share nodes).
+                for ( int node = 0; node < NumNodesPerCell; ++node )
+                {
+                    const int gx = xc + ( node % 2 );
+                    const int gy = yc + ( ( node / 2 ) % 2 );
+                    const int gr = rc + ( node / 4 );
+
+                    for ( int d = 0; d < BlockSize; ++d )
+                    {
+                        correction_data( local_subdomain, gx, gy, gr, d ) =
+                            local_corr( node * BlockSize + d );
+                    }
+                }
+            } );
+
+        Kokkos::fence();
+    }
+
+    /// @brief Additively communicate correction vector across subdomain boundaries.
+    void communicate_correction()
+    {
+        auto corr_data = correction_.grid_data();
+        communication::shell::SubdomainNeighborhoodSendRecvBuffer< ScalarType, BlockSize > send_buf( *domain_ );
+        communication::shell::SubdomainNeighborhoodSendRecvBuffer< ScalarType, BlockSize > recv_buf( *domain_ );
+        communication::shell::pack_send_and_recv_local_subdomain_boundaries( *domain_, corr_data, send_buf, recv_buf );
+        communication::shell::unpack_and_reduce_local_subdomain_boundaries( *domain_, corr_data, recv_buf );
+    }
+
+    InverseCellMatricesType inverse_cell_matrices_;  ///< Inverse cell Vanka matrices.
+    int                     iterations_;              ///< Number of iterations.
+    SolutionVectorType      tmp_;                     ///< Temporary workspace (residual).
+    SolutionVectorType      correction_;              ///< Temporary workspace (correction).
+    ScalarType              omega_;                   ///< Relaxation parameter.
+    const grid::shell::DistributedDomain* domain_;   ///< Optional domain for correction communication.
+};
+
 } // namespace terra::linalg::solvers
