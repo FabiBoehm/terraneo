@@ -196,8 +196,7 @@ int run_stokes_fgmres(
     const int                                                                   max_fgmres_iters,
     const int                                                                   num_mg_cycles,
     const int                                                                   smoother_steps_override,
-    double&                                                                     solve_time,
-    const bool                                                                  enable_ghost_contributions = true )
+    double&                                                                     solve_time )
 {
     using Stokes      = fe::wedge::operators::shell::EpsDivDivStokes< ScalarType >;
     using Viscous     = typename Stokes::Block11Type;
@@ -383,13 +382,13 @@ int run_stokes_fgmres(
             {
                 inv_cell_mats.push_back(
                     linalg::solvers::compute_cell_vanka_matrices< Viscous, 3 >(
-                        K.block_11(), domains[level], enable_ghost_contributions ) );
+                        K.block_11(), domains[level] ) );
             }
             else
             {
                 inv_cell_mats.push_back(
                     linalg::solvers::compute_cell_vanka_matrices< Viscous, 3 >(
-                        A_c[level], domains[level], enable_ghost_contributions ) );
+                        A_c[level], domains[level] ) );
             }
             vanka_corrs.emplace_back( "vk_corr_" + std::to_string( level ), domains[level], mask_data[level] );
 
@@ -605,7 +604,6 @@ void run_stokes_smoother_comparison(
     std::cout << "================================================================" << std::endl;
 
     double time_point = 0.0, time_block = 0.0, time_vanka_3 = 0.0, time_vanka_6 = 0.0;
-    double time_vanka_3_no_ghost = 0.0;
 
     const int iters_point =
         run_stokes_fgmres< PointSmoother >( "Point Jacobi (3 steps)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 3, time_point );
@@ -613,22 +611,17 @@ void run_stokes_smoother_comparison(
     const int iters_block =
         run_stokes_fgmres< BlockSmoother >( "Block Jacobi (3 steps)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 3, time_block );
 
-    const int iters_vanka_3_no_ghost =
-        run_stokes_fgmres< VankaSmoother >( "Cell Vanka (3 steps, no ghost)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 3, time_vanka_3_no_ghost, false );
-
     const int iters_vanka_3 =
-        run_stokes_fgmres< VankaSmoother >( "Cell Vanka (3 steps, with ghost)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 3, time_vanka_3, true );
+        run_stokes_fgmres< VankaSmoother >( "Cell Vanka (3 steps)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 3, time_vanka_3 );
 
     const int iters_vanka_6 =
-        run_stokes_fgmres< VankaSmoother >( "Cell Vanka (6 steps, with ghost)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 6, time_vanka_6, true );
+        run_stokes_fgmres< VankaSmoother >( "Cell Vanka (6 steps)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 6, time_vanka_6 );
 
     std::cout << "\n--- Summary: " << label << " ---" << std::endl;
     std::cout << "FGMRES iterations:  point=" << iters_point << "  block=" << iters_block
-              << "  vanka(3,no_ghost)=" << iters_vanka_3_no_ghost
-              << "  vanka(3,ghost)=" << iters_vanka_3 << "  vanka(6,ghost)=" << iters_vanka_6 << std::endl;
+              << "  vanka(3)=" << iters_vanka_3 << "  vanka(6)=" << iters_vanka_6 << std::endl;
     std::cout << "Solve time:  point=" << time_point << "s  block=" << time_block
-              << "s  vanka(3,no_ghost)=" << time_vanka_3_no_ghost
-              << "s  vanka(3,ghost)=" << time_vanka_3 << "s  vanka(6,ghost)=" << time_vanka_6 << "s" << std::endl;
+              << "s  vanka(3)=" << time_vanka_3 << "s  vanka(6)=" << time_vanka_6 << "s" << std::endl;
 }
 
 // ============================================================================

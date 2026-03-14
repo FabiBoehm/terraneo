@@ -8,8 +8,6 @@
 #include "terra/grid/grid_types.hpp"
 #include "terra/grid/shell/spherical_shell.hpp"
 
-#include <iostream>
-
 namespace terra::linalg::solvers {
 
 /// @brief Cell-based Vanka iterative solver/smoother for linear systems with coupled DoFs per node.
@@ -563,16 +561,12 @@ void accumulate_ghost_element_contributions(
 /// @tparam BlockSize Number of DoFs per node.
 /// @param A Operator.
 /// @param domain Distributed domain for cell iteration.
-/// @param enable_ghost_contributions If true, include ghost element contributions from face-adjacent
-///        neighbor subdomains. If false, only use local element contributions (boundary cells will
-///        have incomplete Vanka matrices).
 /// @return Kokkos view of inverse cell Vanka matrices, one per hex cell.
 template < typename OperatorT, int BlockSize >
 Kokkos::View< dense::Mat< typename OperatorT::ScalarType, 8 * BlockSize, 8 * BlockSize >****, grid::Layout >
 compute_cell_vanka_matrices(
     const OperatorT&                      A,
-    const grid::shell::DistributedDomain& domain,
-    const bool                            enable_ghost_contributions = true )
+    const grid::shell::DistributedDomain& domain )
 {
     using ScalarType     = typename OperatorT::ScalarType;
     using CellMatrixType = dense::Mat< ScalarType, 8 * BlockSize, 8 * BlockSize >;
@@ -735,42 +729,123 @@ compute_cell_vanka_matrices(
     // yet handled — these affect a small minority of boundary cells.
     // -----------------------------------------------------------------------
 
-    if ( enable_ghost_contributions )
-    {
-        accumulate_ghost_element_contributions< OperatorT, BlockSize >( A, domain, cell_matrices );
-    }
+    accumulate_ghost_element_contributions< OperatorT, BlockSize >( A, domain, cell_matrices );
 
     // -----------------------------------------------------------------------
-    // Diagnostic: Check symmetry and diagonal positivity of assembled cell matrices.
+    // Phase 2b: Fix diagonal blocks via additive cross-subdomain communication.
+    //
+    // Ghost element contributions (Phase 2) only handle face boundaries.
+    // Edge/vertex boundary cells still have incomplete diagonal blocks.
+    // Compute the complete block diagonal using the same additive communication
+    // pattern as BlockJacobi, then replace the diagonal blocks in each cell matrix.
+    // This ensures the dominant self-coupling entries are correct everywhere.
     // -----------------------------------------------------------------------
 
     {
-        double max_sym_error = 0.0;
-        double min_diag      = 1e30;
-        Kokkos::parallel_reduce(
-            "CellVanka::check_symmetry",
+        using BlockMatrixType = dense::Mat< ScalarType, BlockSize, BlockSize >;
+
+        const auto num_nodes_x = domain.domain_info().subdomain_num_nodes_per_side_laterally();
+        const auto num_nodes_y = domain.domain_info().subdomain_num_nodes_per_side_laterally();
+        const auto num_nodes_r = domain.domain_info().subdomain_num_nodes_radially();
+
+        // 1. Assemble block diagonal from local elements.
+        Kokkos::View< BlockMatrixType****, grid::Layout > diag_blocks(
+            "vanka_diag_blocks", num_subdomains, num_nodes_x, num_nodes_y, num_nodes_r );
+
+        Kokkos::parallel_for(
+            "CellVanka::extract_diag",
             grid::shell::local_domain_md_range_policy_cells( domain ),
-            KOKKOS_LAMBDA( int local_subdomain, int xc, int yc, int rc, double& sym_err, double& diag_min ) {
-                const auto& V = cell_matrices( local_subdomain, xc, yc, rc );
-                for ( int i = 0; i < CellDim; ++i )
+            KOKKOS_LAMBDA( int local_subdomain, int x_cell, int y_cell, int r_cell ) {
+                for ( int wedge = 0; wedge < 2; ++wedge )
                 {
-                    if ( V( i, i ) < diag_min )
-                        diag_min = V( i, i );
-                    for ( int j = i + 1; j < CellDim; ++j )
+                    const auto local_mat = A.get_local_matrix( local_subdomain, x_cell, y_cell, r_cell, wedge );
+
+                    for ( int n = 0; n < num_nodes_per_wedge; ++n )
                     {
-                        const ScalarType diff = V( i, j ) - V( j, i );
-                        const ScalarType abs_diff = diff < 0 ? -diff : diff;
-                        if ( abs_diff > sym_err )
-                            sym_err = abs_diff;
+                        const int gx = x_cell + ( wedge == 0 ? w0_dx[n] : w1_dx[n] );
+                        const int gy = y_cell + ( wedge == 0 ? w0_dy[n] : w1_dy[n] );
+                        const int gr = r_cell + ( wedge == 0 ? w0_dr[n] : w1_dr[n] );
+
+                        for ( int di = 0; di < BlockSize; ++di )
+                        {
+                            for ( int dj = 0; dj < BlockSize; ++dj )
+                            {
+                                Kokkos::atomic_add(
+                                    &diag_blocks( local_subdomain, gx, gy, gr )( di, dj ),
+                                    local_mat( n + di * num_nodes_per_wedge, n + dj * num_nodes_per_wedge ) );
+                            }
+                        }
                     }
                 }
-            },
-            Kokkos::Max< double >( max_sym_error ),
-            Kokkos::Min< double >( min_diag ) );
+            } );
+        Kokkos::fence();
 
-        std::cout << "  [CellVanka] ghost=" << ( enable_ghost_contributions ? "ON" : "OFF" )
-                  << "  max_symmetry_error=" << max_sym_error
-                  << "  min_diagonal=" << min_diag << std::endl;
+        // 2. Communicate block diagonal additively across all subdomain boundaries.
+        for ( int row = 0; row < BlockSize; ++row )
+        {
+            grid::Grid4DDataVec< ScalarType, BlockSize > row_data(
+                "vanka_diag_row", num_subdomains, num_nodes_x, num_nodes_y, num_nodes_r );
+
+            Kokkos::parallel_for(
+                "CellVanka::pack_diag_row",
+                Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >(
+                    { 0, 0, 0, 0 },
+                    { static_cast< long long >( num_subdomains ),
+                      static_cast< long long >( num_nodes_x ),
+                      static_cast< long long >( num_nodes_y ),
+                      static_cast< long long >( num_nodes_r ) } ),
+                KOKKOS_LAMBDA( int s, int i, int j, int k ) {
+                    for ( int col = 0; col < BlockSize; ++col )
+                    {
+                        row_data( s, i, j, k, col ) = diag_blocks( s, i, j, k )( row, col );
+                    }
+                } );
+            Kokkos::fence();
+
+            communication::shell::SubdomainNeighborhoodSendRecvBuffer< ScalarType, BlockSize > send_buf( domain );
+            communication::shell::SubdomainNeighborhoodSendRecvBuffer< ScalarType, BlockSize > recv_buf( domain );
+            communication::shell::pack_send_and_recv_local_subdomain_boundaries( domain, row_data, send_buf, recv_buf );
+            communication::shell::unpack_and_reduce_local_subdomain_boundaries( domain, row_data, recv_buf );
+
+            Kokkos::parallel_for(
+                "CellVanka::unpack_diag_row",
+                Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >(
+                    { 0, 0, 0, 0 },
+                    { static_cast< long long >( num_subdomains ),
+                      static_cast< long long >( num_nodes_x ),
+                      static_cast< long long >( num_nodes_y ),
+                      static_cast< long long >( num_nodes_r ) } ),
+                KOKKOS_LAMBDA( int s, int i, int j, int k ) {
+                    for ( int col = 0; col < BlockSize; ++col )
+                    {
+                        diag_blocks( s, i, j, k )( row, col ) = row_data( s, i, j, k, col );
+                    }
+                } );
+            Kokkos::fence();
+        }
+
+        // 3. Replace diagonal blocks in cell matrices with the fully communicated values.
+        Kokkos::parallel_for(
+            "CellVanka::fix_diag",
+            grid::shell::local_domain_md_range_policy_cells( domain ),
+            KOKKOS_LAMBDA( int local_subdomain, int xc, int yc, int rc ) {
+                for ( int node = 0; node < 8; ++node )
+                {
+                    const int gx = xc + ( node % 2 );
+                    const int gy = yc + ( ( node / 2 ) % 2 );
+                    const int gr = rc + ( node / 4 );
+
+                    for ( int di = 0; di < BlockSize; ++di )
+                    {
+                        for ( int dj = 0; dj < BlockSize; ++dj )
+                        {
+                            cell_matrices( local_subdomain, xc, yc, rc )( node * BlockSize + di, node * BlockSize + dj ) =
+                                diag_blocks( local_subdomain, gx, gy, gr )( di, dj );
+                        }
+                    }
+                }
+            } );
+        Kokkos::fence();
     }
 
     // -----------------------------------------------------------------------
