@@ -145,11 +145,34 @@ class CellVanka
         Kokkos::fence();
     }
 
+    /// @brief Whether the default execution space is a GPU.
+    static constexpr bool is_gpu =
+#if defined( KOKKOS_ENABLE_CUDA ) || defined( KOKKOS_ENABLE_HIP ) || defined( KOKKOS_ENABLE_SYCL )
+        true;
+#else
+        false;
+#endif
+
+    /// @brief Team-based Vanka kernel types for GPU shared memory tiling.
+    using TeamPolicy = Kokkos::TeamPolicy<>;
+    using TeamMember = typename TeamPolicy::member_type;
+    using ScratchSpace = typename Kokkos::DefaultExecutionSpace::scratch_memory_space;
+    using ScratchStorageView =
+        Kokkos::View< StorageScalarType*, ScratchSpace, Kokkos::MemoryTraits< Kokkos::Unmanaged > >;
+    using ScratchComputeView =
+        Kokkos::View< ScalarType*, ScratchSpace, Kokkos::MemoryTraits< Kokkos::Unmanaged > >;
+
+    /// @brief Packed matrix size (entries in the lower triangle).
+    static constexpr int PackedSize = PackedCellMatrixType::size;
+
     /// @brief Fused residual + Vanka apply with direct x update (no-communication path).
     ///
-    /// Single kernel over all cells. Computes residual (b - Ax) inline during gather,
-    /// eliminating a separate full-grid residual kernel. Uses atomic scatter to x,
-    /// replacing the 8-color approach (8 kernel launches) with a single launch.
+    /// Two implementations selected at compile time:
+    /// - GPU: Team policy with shared memory tiling. Each team handles one cell.
+    ///   Team members cooperatively load the packed matrix into shared memory,
+    ///   parallelize the symmetric matvec, and scatter corrections with atomic_add.
+    /// - CPU: MDRangePolicy with one thread per cell. The PackedSymMat single-pass
+    ///   algorithm is used directly (no scratch overhead).
     void apply_cell_vanka_fused_direct( SolutionVectorType& x, const RHSVectorType& b )
     {
         auto ax_data   = tmp_.grid_data();
@@ -163,54 +186,122 @@ class CellVanka
         const auto num_cells_y   = static_cast< int >( inv_cells.extent( 2 ) );
         const auto num_cells_r   = static_cast< int >( inv_cells.extent( 3 ) );
 
-        Kokkos::parallel_for(
-            "CellVanka::apply_fused_direct",
-            Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >(
-                { 0, 0, 0, 0 },
-                { num_subdomains, num_cells_x, num_cells_y, num_cells_r } ),
-            KOKKOS_LAMBDA( int local_subdomain, int xc, int yc, int rc ) {
-                // Gather residual (b - Ax) at the 8 cell nodes — fused, no separate residual pass.
-                dense::Vec< ScalarType, CellDim > local_res;
-                for ( int node = 0; node < NumNodesPerCell; ++node )
-                {
-                    const int gx = xc + ( node % 2 );
-                    const int gy = yc + ( ( node / 2 ) % 2 );
-                    const int gr = rc + ( node / 4 );
+        if constexpr ( is_gpu )
+        {
+            // GPU path: team policy with shared memory tiling.
+            const int total_cells = num_subdomains * num_cells_x * num_cells_y * num_cells_r;
+            if ( total_cells == 0 )
+                return;
 
-                    for ( int d = 0; d < BlockSize; ++d )
+            const size_t scratch_bytes =
+                ScratchStorageView::shmem_size( PackedSize ) +
+                ScratchComputeView::shmem_size( CellDim );
+
+            TeamPolicy policy( total_cells, Kokkos::AUTO );
+            policy = policy.set_scratch_size( 0, Kokkos::PerTeam( scratch_bytes ) );
+
+            Kokkos::parallel_for(
+                "CellVanka::apply_fused_direct",
+                policy,
+                KOKKOS_LAMBDA( const TeamMember& team ) {
+                    int tmp_idx = team.league_rank();
+                    const int rc = tmp_idx % num_cells_r;
+                    tmp_idx /= num_cells_r;
+                    const int yc = tmp_idx % num_cells_y;
+                    tmp_idx /= num_cells_y;
+                    const int xc = tmp_idx % num_cells_x;
+                    const int local_subdomain = tmp_idx / num_cells_x;
+
+                    ScratchStorageView mat_scratch( team.team_shmem(), PackedSize );
+                    ScratchComputeView res_scratch( team.team_shmem(), CellDim );
+
+                    // Cooperatively load packed inverse matrix into shared memory.
+                    const auto& packed_mat = inv_cells( local_subdomain, xc, yc, rc );
+                    Kokkos::parallel_for(
+                        Kokkos::TeamThreadRange( team, PackedSize ),
+                        [&]( int k ) { mat_scratch( k ) = packed_mat.data[k]; } );
+
+                    // Cooperatively gather residual (b - Ax) into shared memory.
+                    Kokkos::parallel_for(
+                        Kokkos::TeamThreadRange( team, CellDim ),
+                        [&]( int k ) {
+                            const int node = k / BlockSize;
+                            const int d    = k % BlockSize;
+                            const int gx   = xc + ( node % 2 );
+                            const int gy   = yc + ( ( node / 2 ) % 2 );
+                            const int gr   = rc + ( node / 4 );
+                            res_scratch( k ) =
+                                b_data( local_subdomain, gx, gy, gr, d ) -
+                                ax_data( local_subdomain, gx, gy, gr, d );
+                        } );
+
+                    team.team_barrier();
+
+                    // Parallel symmetric matvec + scatter.
+                    // Row i: result[i] = sum_j M(i,j) * res[j], exploiting symmetry.
+                    Kokkos::parallel_for(
+                        Kokkos::TeamThreadRange( team, CellDim ),
+                        [&]( int i ) {
+                            ScalarType sum = ScalarType( 0 );
+                            const int  base_i = i * ( i + 1 ) / 2;
+                            for ( int j = 0; j <= i; ++j )
+                                sum += static_cast< ScalarType >( mat_scratch( base_i + j ) ) * res_scratch( j );
+                            for ( int j = i + 1; j < CellDim; ++j )
+                                sum += static_cast< ScalarType >( mat_scratch( j * ( j + 1 ) / 2 + i ) ) *
+                                       res_scratch( j );
+
+                            const int node = i / BlockSize;
+                            const int d    = i % BlockSize;
+                            const int gx   = xc + ( node % 2 );
+                            const int gy   = yc + ( ( node / 2 ) % 2 );
+                            const int gr   = rc + ( node / 4 );
+                            Kokkos::atomic_add( &x_data( local_subdomain, gx, gy, gr, d ), omega * sum );
+                        } );
+                } );
+        }
+        else
+        {
+            // CPU path: flat MDRangePolicy, one thread per cell.
+            Kokkos::parallel_for(
+                "CellVanka::apply_fused_direct",
+                Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >(
+                    { 0, 0, 0, 0 },
+                    { num_subdomains, num_cells_x, num_cells_y, num_cells_r } ),
+                KOKKOS_LAMBDA( int local_subdomain, int xc, int yc, int rc ) {
+                    dense::Vec< ScalarType, CellDim > local_res;
+                    for ( int node = 0; node < NumNodesPerCell; ++node )
                     {
-                        local_res( node * BlockSize + d ) =
-                            b_data( local_subdomain, gx, gy, gr, d ) -
-                            ax_data( local_subdomain, gx, gy, gr, d );
+                        const int gx = xc + ( node % 2 );
+                        const int gy = yc + ( ( node / 2 ) % 2 );
+                        const int gr = rc + ( node / 4 );
+                        for ( int d = 0; d < BlockSize; ++d )
+                            local_res( node * BlockSize + d ) =
+                                b_data( local_subdomain, gx, gy, gr, d ) -
+                                ax_data( local_subdomain, gx, gy, gr, d );
                     }
-                }
 
-                // Multiply by inverse cell matrix.
-                const auto local_corr = inv_cells( local_subdomain, xc, yc, rc ) * local_res;
+                    const auto local_corr = inv_cells( local_subdomain, xc, yc, rc ) * local_res;
 
-                // Scatter with atomic add (replaces 8-color approach).
-                for ( int node = 0; node < NumNodesPerCell; ++node )
-                {
-                    const int gx = xc + ( node % 2 );
-                    const int gy = yc + ( ( node / 2 ) % 2 );
-                    const int gr = rc + ( node / 4 );
-
-                    for ( int d = 0; d < BlockSize; ++d )
+                    for ( int node = 0; node < NumNodesPerCell; ++node )
                     {
-                        Kokkos::atomic_add(
-                            &x_data( local_subdomain, gx, gy, gr, d ),
-                            omega * local_corr( node * BlockSize + d ) );
+                        const int gx = xc + ( node % 2 );
+                        const int gy = yc + ( ( node / 2 ) % 2 );
+                        const int gr = rc + ( node / 4 );
+                        for ( int d = 0; d < BlockSize; ++d )
+                            Kokkos::atomic_add(
+                                &x_data( local_subdomain, gx, gy, gr, d ),
+                                omega * local_corr( node * BlockSize + d ) );
                     }
-                }
-            } );
+                } );
+        }
 
         Kokkos::fence();
     }
 
     /// @brief Fused residual + Vanka apply into correction vector (communication path).
     ///
-    /// Single kernel over all cells. Computes residual (b - Ax) inline during gather.
-    /// Uses atomic scatter to correction vector. Correction must be zeroed before calling.
+    /// Same GPU/CPU dispatch as the direct path, but scatters omega-scaled corrections
+    /// into the correction vector instead of x. Correction must be zeroed before calling.
     void apply_cell_vanka_fused_scaled( const RHSVectorType& b )
     {
         auto ax_data         = tmp_.grid_data();
@@ -224,46 +315,109 @@ class CellVanka
         const auto num_cells_y   = static_cast< int >( inv_cells.extent( 2 ) );
         const auto num_cells_r   = static_cast< int >( inv_cells.extent( 3 ) );
 
-        Kokkos::parallel_for(
-            "CellVanka::apply_fused_scaled",
-            Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >(
-                { 0, 0, 0, 0 },
-                { num_subdomains, num_cells_x, num_cells_y, num_cells_r } ),
-            KOKKOS_LAMBDA( int local_subdomain, int xc, int yc, int rc ) {
-                // Gather residual (b - Ax) at the 8 cell nodes — fused, no separate residual pass.
-                dense::Vec< ScalarType, CellDim > local_res;
-                for ( int node = 0; node < NumNodesPerCell; ++node )
-                {
-                    const int gx = xc + ( node % 2 );
-                    const int gy = yc + ( ( node / 2 ) % 2 );
-                    const int gr = rc + ( node / 4 );
+        if constexpr ( is_gpu )
+        {
+            const int total_cells = num_subdomains * num_cells_x * num_cells_y * num_cells_r;
+            if ( total_cells == 0 )
+                return;
 
-                    for ( int d = 0; d < BlockSize; ++d )
+            const size_t scratch_bytes =
+                ScratchStorageView::shmem_size( PackedSize ) +
+                ScratchComputeView::shmem_size( CellDim );
+
+            TeamPolicy policy( total_cells, Kokkos::AUTO );
+            policy = policy.set_scratch_size( 0, Kokkos::PerTeam( scratch_bytes ) );
+
+            Kokkos::parallel_for(
+                "CellVanka::apply_fused_scaled",
+                policy,
+                KOKKOS_LAMBDA( const TeamMember& team ) {
+                    int tmp_idx = team.league_rank();
+                    const int rc = tmp_idx % num_cells_r;
+                    tmp_idx /= num_cells_r;
+                    const int yc = tmp_idx % num_cells_y;
+                    tmp_idx /= num_cells_y;
+                    const int xc = tmp_idx % num_cells_x;
+                    const int local_subdomain = tmp_idx / num_cells_x;
+
+                    ScratchStorageView mat_scratch( team.team_shmem(), PackedSize );
+                    ScratchComputeView res_scratch( team.team_shmem(), CellDim );
+
+                    const auto& packed_mat = inv_cells( local_subdomain, xc, yc, rc );
+                    Kokkos::parallel_for(
+                        Kokkos::TeamThreadRange( team, PackedSize ),
+                        [&]( int k ) { mat_scratch( k ) = packed_mat.data[k]; } );
+
+                    Kokkos::parallel_for(
+                        Kokkos::TeamThreadRange( team, CellDim ),
+                        [&]( int k ) {
+                            const int node = k / BlockSize;
+                            const int d    = k % BlockSize;
+                            const int gx   = xc + ( node % 2 );
+                            const int gy   = yc + ( ( node / 2 ) % 2 );
+                            const int gr   = rc + ( node / 4 );
+                            res_scratch( k ) =
+                                b_data( local_subdomain, gx, gy, gr, d ) -
+                                ax_data( local_subdomain, gx, gy, gr, d );
+                        } );
+
+                    team.team_barrier();
+
+                    Kokkos::parallel_for(
+                        Kokkos::TeamThreadRange( team, CellDim ),
+                        [&]( int i ) {
+                            ScalarType sum = ScalarType( 0 );
+                            const int  base_i = i * ( i + 1 ) / 2;
+                            for ( int j = 0; j <= i; ++j )
+                                sum += static_cast< ScalarType >( mat_scratch( base_i + j ) ) * res_scratch( j );
+                            for ( int j = i + 1; j < CellDim; ++j )
+                                sum += static_cast< ScalarType >( mat_scratch( j * ( j + 1 ) / 2 + i ) ) *
+                                       res_scratch( j );
+
+                            const int node = i / BlockSize;
+                            const int d    = i % BlockSize;
+                            const int gx   = xc + ( node % 2 );
+                            const int gy   = yc + ( ( node / 2 ) % 2 );
+                            const int gr   = rc + ( node / 4 );
+                            Kokkos::atomic_add(
+                                &correction_data( local_subdomain, gx, gy, gr, d ), omega * sum );
+                        } );
+                } );
+        }
+        else
+        {
+            Kokkos::parallel_for(
+                "CellVanka::apply_fused_scaled",
+                Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >(
+                    { 0, 0, 0, 0 },
+                    { num_subdomains, num_cells_x, num_cells_y, num_cells_r } ),
+                KOKKOS_LAMBDA( int local_subdomain, int xc, int yc, int rc ) {
+                    dense::Vec< ScalarType, CellDim > local_res;
+                    for ( int node = 0; node < NumNodesPerCell; ++node )
                     {
-                        local_res( node * BlockSize + d ) =
-                            b_data( local_subdomain, gx, gy, gr, d ) -
-                            ax_data( local_subdomain, gx, gy, gr, d );
+                        const int gx = xc + ( node % 2 );
+                        const int gy = yc + ( ( node / 2 ) % 2 );
+                        const int gr = rc + ( node / 4 );
+                        for ( int d = 0; d < BlockSize; ++d )
+                            local_res( node * BlockSize + d ) =
+                                b_data( local_subdomain, gx, gy, gr, d ) -
+                                ax_data( local_subdomain, gx, gy, gr, d );
                     }
-                }
 
-                // Multiply by inverse cell matrix.
-                const auto local_corr = inv_cells( local_subdomain, xc, yc, rc ) * local_res;
+                    const auto local_corr = inv_cells( local_subdomain, xc, yc, rc ) * local_res;
 
-                // Scatter with atomic add (replaces 8-color approach).
-                for ( int node = 0; node < NumNodesPerCell; ++node )
-                {
-                    const int gx = xc + ( node % 2 );
-                    const int gy = yc + ( ( node / 2 ) % 2 );
-                    const int gr = rc + ( node / 4 );
-
-                    for ( int d = 0; d < BlockSize; ++d )
+                    for ( int node = 0; node < NumNodesPerCell; ++node )
                     {
-                        Kokkos::atomic_add(
-                            &correction_data( local_subdomain, gx, gy, gr, d ),
-                            omega * local_corr( node * BlockSize + d ) );
+                        const int gx = xc + ( node % 2 );
+                        const int gy = yc + ( ( node / 2 ) % 2 );
+                        const int gr = rc + ( node / 4 );
+                        for ( int d = 0; d < BlockSize; ++d )
+                            Kokkos::atomic_add(
+                                &correction_data( local_subdomain, gx, gy, gr, d ),
+                                omega * local_corr( node * BlockSize + d ) );
                     }
-                }
-            } );
+                } );
+        }
 
         Kokkos::fence();
     }
