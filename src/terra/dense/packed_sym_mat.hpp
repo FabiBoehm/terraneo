@@ -34,38 +34,36 @@ struct PackedSymMat
 
     /// @brief Symmetric matrix-vector product: result = M * v.
     ///
-    /// Uses the lower triangle to compute both M[i][j]*v[j] and M[j][i]*v[i] contributions.
-    /// Pass 1 computes the lower-triangular part (sequential packed access).
-    /// Pass 2 adds the strictly-upper-triangular part (transpose of lower triangle).
+    /// Single-pass algorithm: reads each packed entry exactly once.
+    /// For each row i and column j <= i:
+    ///   - result[i] += M(i,j) * v(j)      (lower triangle)
+    ///   - result[j] += M(i,j) * v(i)      (upper triangle, j < i only)
+    /// This halves reads of the packed data compared to a two-pass approach
+    /// (300 vs 576 reads for N=24).
     KOKKOS_INLINE_FUNCTION
     Vec< T, N > operator*( const Vec< T, N >& v ) const
     {
         Vec< T, N > result;
+        for ( int i = 0; i < N; ++i )
+            result( i ) = T( 0 );
 
-        // Pass 1: Lower triangle contribution (row-wise, sequential packed access).
-        // result[i] = sum_{j=0..i} M(i,j) * v(j)
         for ( int i = 0; i < N; ++i )
         {
-            T sum = T( 0 );
             const int base = i * ( i + 1 ) / 2;
-            for ( int j = 0; j <= i; ++j )
-            {
-                sum += data[base + j] * v( j );
-            }
-            result( i ) = sum;
-        }
+            const T   vi   = v( i );
+            T         sum  = T( 0 );
 
-        // Pass 2: Strictly-upper-triangle contribution (column-wise).
-        // result[i] += sum_{j=i+1..N-1} M(j,i) * v(j)
-        // Process column by column: for column i, accumulate M(j,i)*v(j) for j > i.
-        for ( int j = 1; j < N; ++j )
-        {
-            const T      vj   = v( j );
-            const int    base = j * ( j + 1 ) / 2;
-            for ( int i = 0; i < j; ++i )
+            // Off-diagonal entries: contribute to both result[i] and result[j].
+            for ( int j = 0; j < i; ++j )
             {
-                result( i ) += data[base + i] * vj;
+                const T mij = data[base + j];
+                sum += mij * v( j );
+                result( j ) += mij * vi;
             }
+
+            // Diagonal entry: contributes only to result[i].
+            sum += data[base + i] * vi;
+            result( i ) += sum;
         }
 
         return result;
