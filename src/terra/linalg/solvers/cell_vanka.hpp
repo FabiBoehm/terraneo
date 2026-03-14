@@ -2,6 +2,7 @@
 
 #include "solver.hpp"
 
+#include <memory>
 #include "communication/shell/communication.hpp"
 #include "terra/dense/mat.hpp"
 #include "terra/dense/packed_sym_mat.hpp"
@@ -47,12 +48,10 @@ class CellVanka
     /// @brief Dense cell matrix type (CellDim x CellDim).
     using CellMatrixType = dense::Mat< ScalarType, CellDim, CellDim >;
 
-    /// @brief Packed symmetric matrix type storing the Cholesky factor of the inverse.
-    using PackedCellMatrixType = dense::PackedSymMat< ScalarType, CellDim >;
-
-    /// @brief Kokkos view storing one packed inverse cell matrix per hex cell.
+    /// @brief Kokkos view storing one dense inverse cell matrix per hex cell.
     /// Layout: (local_subdomain, x_cell, y_cell, r_cell).
-    using InverseCellMatricesType = Kokkos::View< PackedCellMatrixType****, grid::Layout >;
+    /// Dense (not packed) storage enables fully vectorizable mat-vec with fixed inner loop length.
+    using InverseCellMatricesType = Kokkos::View< CellMatrixType****, grid::Layout >;
 
     static_assert( BlockSize > 0, "BlockSize must be positive." );
 
@@ -65,6 +64,9 @@ class CellVanka
     /// @param domain Optional domain pointer for inter-subdomain communication of corrections.
     ///               When provided, corrections are additively communicated across subdomain boundaries
     ///               after each Vanka sweep, ensuring consistency at shared nodes.
+    /// @brief Communication buffer type for subdomain boundary exchange.
+    using CommBufferType = communication::shell::SubdomainNeighborhoodSendRecvBuffer< ScalarType, BlockSize >;
+
     CellVanka(
         const InverseCellMatricesType& inverse_cell_matrices,
         const int                      iterations,
@@ -78,7 +80,14 @@ class CellVanka
     , correction_( correction )
     , omega_( omega )
     , domain_( domain )
-    {}
+    {
+        // Pre-allocate communication buffers to avoid per-iteration allocation.
+        if ( domain_ )
+        {
+            send_buf_ = std::make_shared< CommBufferType >( *domain_ );
+            recv_buf_ = std::make_shared< CommBufferType >( *domain_ );
+        }
+    }
 
     /// @brief Solve the linear system using colored cell Vanka iteration.
     ///
@@ -204,13 +213,17 @@ class CellVanka
                     const int yc = cy_offset + 2 * iy;
                     const int rc = cr_offset + 2 * ir;
 
+                    constexpr int ndx[8] = { 0, 1, 0, 1, 0, 1, 0, 1 };
+                    constexpr int ndy[8] = { 0, 0, 1, 1, 0, 0, 1, 1 };
+                    constexpr int ndr[8] = { 0, 0, 0, 0, 1, 1, 1, 1 };
+
                     // Gather residual at the 8 cell nodes.
                     dense::Vec< ScalarType, CellDim > local_res;
                     for ( int node = 0; node < NumNodesPerCell; ++node )
                     {
-                        const int gx = xc + ( node % 2 );
-                        const int gy = yc + ( ( node / 2 ) % 2 );
-                        const int gr = rc + ( node / 4 );
+                        const int gx = xc + ndx[node];
+                        const int gy = yc + ndy[node];
+                        const int gr = rc + ndr[node];
 
                         for ( int d = 0; d < BlockSize; ++d )
                         {
@@ -223,9 +236,9 @@ class CellVanka
 
                     for ( int node = 0; node < NumNodesPerCell; ++node )
                     {
-                        const int gx = xc + ( node % 2 );
-                        const int gy = yc + ( ( node / 2 ) % 2 );
-                        const int gr = rc + ( node / 4 );
+                        const int gx = xc + ndx[node];
+                        const int gy = yc + ndy[node];
+                        const int gr = rc + ndr[node];
 
                         for ( int d = 0; d < BlockSize; ++d )
                         {
@@ -277,12 +290,16 @@ class CellVanka
                     const int yc = cy_offset + 2 * iy;
                     const int rc = cr_offset + 2 * ir;
 
+                    constexpr int ndx[8] = { 0, 1, 0, 1, 0, 1, 0, 1 };
+                    constexpr int ndy[8] = { 0, 0, 1, 1, 0, 0, 1, 1 };
+                    constexpr int ndr[8] = { 0, 0, 0, 0, 1, 1, 1, 1 };
+
                     dense::Vec< ScalarType, CellDim > local_res;
                     for ( int node = 0; node < NumNodesPerCell; ++node )
                     {
-                        const int gx = xc + ( node % 2 );
-                        const int gy = yc + ( ( node / 2 ) % 2 );
-                        const int gr = rc + ( node / 4 );
+                        const int gx = xc + ndx[node];
+                        const int gy = yc + ndy[node];
+                        const int gr = rc + ndr[node];
 
                         for ( int d = 0; d < BlockSize; ++d )
                         {
@@ -294,9 +311,9 @@ class CellVanka
 
                     for ( int node = 0; node < NumNodesPerCell; ++node )
                     {
-                        const int gx = xc + ( node % 2 );
-                        const int gy = yc + ( ( node / 2 ) % 2 );
-                        const int gr = rc + ( node / 4 );
+                        const int gx = xc + ndx[node];
+                        const int gy = yc + ndy[node];
+                        const int gr = rc + ndr[node];
 
                         for ( int d = 0; d < BlockSize; ++d )
                         {
@@ -332,21 +349,28 @@ class CellVanka
     }
 
     /// @brief Additively communicate correction vector across subdomain boundaries.
+    /// Reuses pre-allocated buffers to avoid per-iteration memory allocation.
     void communicate_correction()
     {
         auto corr_data = correction_.grid_data();
-        communication::shell::SubdomainNeighborhoodSendRecvBuffer< ScalarType, BlockSize > send_buf( *domain_ );
-        communication::shell::SubdomainNeighborhoodSendRecvBuffer< ScalarType, BlockSize > recv_buf( *domain_ );
-        communication::shell::pack_send_and_recv_local_subdomain_boundaries( *domain_, corr_data, send_buf, recv_buf );
-        communication::shell::unpack_and_reduce_local_subdomain_boundaries( *domain_, corr_data, recv_buf );
+        communication::shell::pack_send_and_recv_local_subdomain_boundaries( *domain_, corr_data, *send_buf_, *recv_buf_ );
+        communication::shell::unpack_and_reduce_local_subdomain_boundaries( *domain_, corr_data, *recv_buf_ );
     }
 
-    InverseCellMatricesType inverse_cell_matrices_;  ///< Inverse cell Vanka matrices.
+    /// @brief Hex node offset lookup: node -> (dx, dy, dr).
+    /// Node i has offset (node_dx[i], node_dy[i], node_dr[i]) from cell origin.
+    static constexpr int node_dx[8] = { 0, 1, 0, 1, 0, 1, 0, 1 };
+    static constexpr int node_dy[8] = { 0, 0, 1, 1, 0, 0, 1, 1 };
+    static constexpr int node_dr[8] = { 0, 0, 0, 0, 1, 1, 1, 1 };
+
+    InverseCellMatricesType inverse_cell_matrices_;  ///< Inverse cell Vanka matrices (dense).
     int                     iterations_;              ///< Number of iterations.
     SolutionVectorType      tmp_;                     ///< Temporary workspace (residual).
     SolutionVectorType      correction_;              ///< Temporary workspace (correction).
     ScalarType              omega_;                   ///< Relaxation parameter.
     const grid::shell::DistributedDomain* domain_;   ///< Optional domain for correction communication.
+    std::shared_ptr< CommBufferType > send_buf_;      ///< Pre-allocated send buffer.
+    std::shared_ptr< CommBufferType > recv_buf_;      ///< Pre-allocated receive buffer.
 };
 
 // ---------------------------------------------------------------------------
@@ -720,14 +744,13 @@ void accumulate_ghost_element_contributions(
 /// @param domain Distributed domain for cell iteration.
 /// @return Kokkos view of inverse cell Vanka matrices, one per hex cell.
 template < typename OperatorT, int BlockSize >
-Kokkos::View< dense::PackedSymMat< typename OperatorT::ScalarType, 8 * BlockSize >****, grid::Layout >
+Kokkos::View< dense::Mat< typename OperatorT::ScalarType, 8 * BlockSize, 8 * BlockSize >****, grid::Layout >
 compute_cell_vanka_matrices(
     const OperatorT&                      A,
     const grid::shell::DistributedDomain& domain )
 {
     using ScalarType     = typename OperatorT::ScalarType;
     using CellMatrixType = dense::Mat< ScalarType, 8 * BlockSize, 8 * BlockSize >;
-    using PackedType     = dense::PackedSymMat< ScalarType, 8 * BlockSize >;
 
     constexpr int num_nodes_per_wedge = 6;
     constexpr int local_matrix_dim    = OperatorT::LocalMatrixDim;
@@ -1007,27 +1030,22 @@ compute_cell_vanka_matrices(
     }
 
     // -----------------------------------------------------------------------
-    // Phase 3: Invert cell matrices and pack into symmetric storage.
+    // Phase 3: Invert cell matrices in-place.
     //
-    // V^{-1} is symmetric (since V is SPD from the FEM assembly).
-    // Store only the lower triangle in packed format: N*(N+1)/2 entries
-    // instead of N*N (300 vs 576 doubles for 24×24), halving memory
-    // bandwidth in the smoother apply kernel.
+    // Dense storage (not packed) enables fully vectorizable mat-vec with
+    // fixed inner loop length in the smoother apply kernel.
     // -----------------------------------------------------------------------
 
-    Kokkos::View< PackedType****, grid::Layout > packed_matrices(
-        "cell_vanka_packed", num_subdomains, num_cells_x, num_cells_y, num_cells_r );
-
     Kokkos::parallel_for(
-        "CellVanka::invert_and_pack",
+        "CellVanka::invert",
         grid::shell::local_domain_md_range_policy_cells( domain ),
         KOKKOS_LAMBDA( int local_subdomain, int xc, int yc, int rc ) {
-            const auto inv = cell_matrices( local_subdomain, xc, yc, rc ).inv();
-            packed_matrices( local_subdomain, xc, yc, rc ) = PackedType::from_symmetric( inv );
+            cell_matrices( local_subdomain, xc, yc, rc ) =
+                cell_matrices( local_subdomain, xc, yc, rc ).inv();
         } );
     Kokkos::fence();
 
-    return packed_matrices;
+    return cell_matrices;
 }
 
 } // namespace terra::linalg::solvers
