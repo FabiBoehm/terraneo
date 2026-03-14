@@ -4,6 +4,7 @@
 
 #include "communication/shell/communication.hpp"
 #include "terra/dense/mat.hpp"
+#include "terra/dense/packed_sym_mat.hpp"
 #include "terra/dense/vec.hpp"
 #include "terra/grid/grid_types.hpp"
 #include "terra/grid/shell/spherical_shell.hpp"
@@ -46,9 +47,12 @@ class CellVanka
     /// @brief Dense cell matrix type (CellDim x CellDim).
     using CellMatrixType = dense::Mat< ScalarType, CellDim, CellDim >;
 
-    /// @brief Kokkos view storing one inverse cell matrix per hex cell.
+    /// @brief Packed symmetric matrix type storing the Cholesky factor of the inverse.
+    using PackedCellMatrixType = dense::PackedSymMat< ScalarType, CellDim >;
+
+    /// @brief Kokkos view storing one packed inverse cell matrix per hex cell.
     /// Layout: (local_subdomain, x_cell, y_cell, r_cell).
-    using InverseCellMatricesType = Kokkos::View< CellMatrixType****, grid::Layout >;
+    using InverseCellMatricesType = Kokkos::View< PackedCellMatrixType****, grid::Layout >;
 
     static_assert( BlockSize > 0, "BlockSize must be positive." );
 
@@ -88,14 +92,11 @@ class CellVanka
     {
         for ( int iteration = 0; iteration < iterations_; ++iteration )
         {
-            // tmp = A * x
+            // tmp = A * x  (SpMV)
             apply( A, x, tmp_ );
 
-            // tmp = b - A * x  (residual)
-            lincomb( tmp_, { 1.0, -1.0 }, { b, tmp_ } );
-
-            // Zero correction vector.
-            linalg::assign( correction_, 0.0 );
+            // Fused: tmp = b - tmp (residual); correction = 0
+            compute_residual_and_zero_correction( b );
 
             // Apply colored Vanka: scatter corrections using 8-coloring (no atomics).
             apply_cell_vanka_colored();
@@ -107,7 +108,7 @@ class CellVanka
             }
 
             // x = x + omega * correction
-            lincomb( x, { 1.0, omega_ }, { x, correction_ } );
+            update_x( x );
         }
     }
 
@@ -194,6 +195,51 @@ class CellVanka
                 } );
         }
 
+        Kokkos::fence();
+    }
+
+    /// @brief Fused: compute residual (tmp = b - tmp) and zero correction in one pass.
+    void compute_residual_and_zero_correction( const RHSVectorType& b )
+    {
+        auto tmp_data  = tmp_.grid_data();
+        auto b_data    = b.grid_data();
+        auto corr_data = correction_.grid_data();
+
+        Kokkos::parallel_for(
+            "CellVanka::residual_and_zero",
+            Kokkos::MDRangePolicy< Kokkos::Rank< 5 > >(
+                { 0, 0, 0, 0, 0 },
+                { static_cast< long long >( tmp_data.extent( 0 ) ),
+                  static_cast< long long >( tmp_data.extent( 1 ) ),
+                  static_cast< long long >( tmp_data.extent( 2 ) ),
+                  static_cast< long long >( tmp_data.extent( 3 ) ),
+                  static_cast< long long >( tmp_data.extent( 4 ) ) } ),
+            KOKKOS_LAMBDA( int s, int i, int j, int k, int d ) {
+                tmp_data( s, i, j, k, d ) = b_data( s, i, j, k, d ) - tmp_data( s, i, j, k, d );
+                corr_data( s, i, j, k, d ) = 0;
+            } );
+        Kokkos::fence();
+    }
+
+    /// @brief Update x += omega * correction.
+    void update_x( SolutionVectorType& x )
+    {
+        auto x_data    = x.grid_data();
+        auto corr_data = correction_.grid_data();
+        auto omega     = omega_;
+
+        Kokkos::parallel_for(
+            "CellVanka::update_x",
+            Kokkos::MDRangePolicy< Kokkos::Rank< 5 > >(
+                { 0, 0, 0, 0, 0 },
+                { static_cast< long long >( x_data.extent( 0 ) ),
+                  static_cast< long long >( x_data.extent( 1 ) ),
+                  static_cast< long long >( x_data.extent( 2 ) ),
+                  static_cast< long long >( x_data.extent( 3 ) ),
+                  static_cast< long long >( x_data.extent( 4 ) ) } ),
+            KOKKOS_LAMBDA( int s, int i, int j, int k, int d ) {
+                x_data( s, i, j, k, d ) += omega * corr_data( s, i, j, k, d );
+            } );
         Kokkos::fence();
     }
 
@@ -586,13 +632,14 @@ void accumulate_ghost_element_contributions(
 /// @param domain Distributed domain for cell iteration.
 /// @return Kokkos view of inverse cell Vanka matrices, one per hex cell.
 template < typename OperatorT, int BlockSize >
-Kokkos::View< dense::Mat< typename OperatorT::ScalarType, 8 * BlockSize, 8 * BlockSize >****, grid::Layout >
+Kokkos::View< dense::PackedSymMat< typename OperatorT::ScalarType, 8 * BlockSize >****, grid::Layout >
 compute_cell_vanka_matrices(
     const OperatorT&                      A,
     const grid::shell::DistributedDomain& domain )
 {
     using ScalarType     = typename OperatorT::ScalarType;
     using CellMatrixType = dense::Mat< ScalarType, 8 * BlockSize, 8 * BlockSize >;
+    using PackedType     = dense::PackedSymMat< ScalarType, 8 * BlockSize >;
 
     constexpr int num_nodes_per_wedge = 6;
     constexpr int local_matrix_dim    = OperatorT::LocalMatrixDim;
@@ -872,19 +919,27 @@ compute_cell_vanka_matrices(
     }
 
     // -----------------------------------------------------------------------
-    // Phase 3: Invert all cell matrices.
+    // Phase 3: Invert cell matrices and pack into symmetric storage.
+    //
+    // V^{-1} is symmetric (since V is SPD from the FEM assembly).
+    // Store only the lower triangle in packed format: N*(N+1)/2 entries
+    // instead of N*N (300 vs 576 doubles for 24×24), halving memory
+    // bandwidth in the smoother apply kernel.
     // -----------------------------------------------------------------------
 
+    Kokkos::View< PackedType****, grid::Layout > packed_matrices(
+        "cell_vanka_packed", num_subdomains, num_cells_x, num_cells_y, num_cells_r );
+
     Kokkos::parallel_for(
-        "CellVanka::invert",
+        "CellVanka::invert_and_pack",
         grid::shell::local_domain_md_range_policy_cells( domain ),
         KOKKOS_LAMBDA( int local_subdomain, int xc, int yc, int rc ) {
-            cell_matrices( local_subdomain, xc, yc, rc ) =
-                cell_matrices( local_subdomain, xc, yc, rc ).inv();
+            const auto inv = cell_matrices( local_subdomain, xc, yc, rc ).inv();
+            packed_matrices( local_subdomain, xc, yc, rc ) = PackedType::from_symmetric( inv );
         } );
     Kokkos::fence();
 
-    return cell_matrices;
+    return packed_matrices;
 }
 
 } // namespace terra::linalg::solvers
