@@ -80,10 +80,12 @@ class CellVanka
     , domain_( domain )
     {}
 
-    /// @brief Solve the linear system using colored cell Vanka iteration.
+    /// @brief Solve the linear system using cell Vanka iteration.
     ///
-    /// Uses a 2x2x2 = 8-coloring of hex cells. Cells of the same color share no nodes,
-    /// allowing conflict-free parallel updates without atomic operations.
+    /// Uses a single kernel over all cells with fused residual computation and atomic
+    /// scatter, replacing the previous 8-color approach (8 separate kernel launches).
+    /// The residual b - Ax is computed inline during the gather, eliminating a separate
+    /// full-grid residual kernel.
     ///
     /// @param A Operator (matrix).
     /// @param x Solution vector (output).
@@ -96,21 +98,19 @@ class CellVanka
             for ( int iteration = 0; iteration < iterations_; ++iteration )
             {
                 apply( A, x, tmp_ );
-                compute_residual_and_zero_correction( b );
-                apply_cell_vanka_colored_scaled();
+                zero_correction();
+                apply_cell_vanka_fused_scaled( b );
                 communicate_correction();
                 update_x_no_scale( x );
             }
         }
         else
         {
-            // No-communication path: update x directly in the colored kernel,
-            // avoiding the correction vector entirely (saves ~3 full vector passes).
+            // No-communication path: update x directly with atomic scatter.
             for ( int iteration = 0; iteration < iterations_; ++iteration )
             {
                 apply( A, x, tmp_ );
-                compute_residual( b );
-                apply_cell_vanka_colored_direct( x );
+                apply_cell_vanka_fused_direct( x, b );
             }
         }
     }
@@ -119,59 +119,35 @@ class CellVanka
     InverseCellMatricesType& get_inverse_cell_matrices() { return inverse_cell_matrices_; }
 
   private:
-    /// @brief Compute residual only: tmp = b - tmp.
-    /// Used in the no-communication path where correction vector is not needed.
-    void compute_residual( const RHSVectorType& b )
+    /// @brief Zero the correction vector.
+    void zero_correction()
     {
-        auto tmp_data = tmp_.grid_data();
-        auto b_data   = b.grid_data();
-
-        Kokkos::parallel_for(
-            "CellVanka::residual",
-            Kokkos::MDRangePolicy< Kokkos::Rank< 5 > >(
-                { 0, 0, 0, 0, 0 },
-                { static_cast< long long >( tmp_data.extent( 0 ) ),
-                  static_cast< long long >( tmp_data.extent( 1 ) ),
-                  static_cast< long long >( tmp_data.extent( 2 ) ),
-                  static_cast< long long >( tmp_data.extent( 3 ) ),
-                  static_cast< long long >( tmp_data.extent( 4 ) ) } ),
-            KOKKOS_LAMBDA( int s, int i, int j, int k, int d ) {
-                tmp_data( s, i, j, k, d ) = b_data( s, i, j, k, d ) - tmp_data( s, i, j, k, d );
-            } );
-        Kokkos::fence();
-    }
-
-    /// @brief Fused: compute residual (tmp = b - tmp) and zero correction in one pass.
-    /// Used in the communication path where correction vector is needed.
-    void compute_residual_and_zero_correction( const RHSVectorType& b )
-    {
-        auto tmp_data  = tmp_.grid_data();
-        auto b_data    = b.grid_data();
         auto corr_data = correction_.grid_data();
 
         Kokkos::parallel_for(
-            "CellVanka::residual_and_zero",
+            "CellVanka::zero_correction",
             Kokkos::MDRangePolicy< Kokkos::Rank< 5 > >(
                 { 0, 0, 0, 0, 0 },
-                { static_cast< long long >( tmp_data.extent( 0 ) ),
-                  static_cast< long long >( tmp_data.extent( 1 ) ),
-                  static_cast< long long >( tmp_data.extent( 2 ) ),
-                  static_cast< long long >( tmp_data.extent( 3 ) ),
-                  static_cast< long long >( tmp_data.extent( 4 ) ) } ),
+                { static_cast< long long >( corr_data.extent( 0 ) ),
+                  static_cast< long long >( corr_data.extent( 1 ) ),
+                  static_cast< long long >( corr_data.extent( 2 ) ),
+                  static_cast< long long >( corr_data.extent( 3 ) ),
+                  static_cast< long long >( corr_data.extent( 4 ) ) } ),
             KOKKOS_LAMBDA( int s, int i, int j, int k, int d ) {
-                tmp_data( s, i, j, k, d ) = b_data( s, i, j, k, d ) - tmp_data( s, i, j, k, d );
                 corr_data( s, i, j, k, d ) = 0;
             } );
         Kokkos::fence();
     }
 
-    /// @brief Direct x update colored Vanka (no-communication path).
+    /// @brief Fused residual + Vanka apply with direct x update (no-communication path).
     ///
-    /// Updates x directly: x += omega * V^{-1} * residual, bypassing the correction vector.
-    /// Saves ~3 full vector passes per iteration (zero correction, write correction, update_x).
-    void apply_cell_vanka_colored_direct( SolutionVectorType& x )
+    /// Single kernel over all cells. Computes residual (b - Ax) inline during gather,
+    /// eliminating a separate full-grid residual kernel. Uses atomic scatter to x,
+    /// replacing the 8-color approach (8 kernel launches) with a single launch.
+    void apply_cell_vanka_fused_direct( SolutionVectorType& x, const RHSVectorType& b )
     {
-        auto res_data  = tmp_.grid_data();
+        auto ax_data   = tmp_.grid_data();
+        auto b_data    = b.grid_data();
         auto x_data    = x.grid_data();
         auto inv_cells = inverse_cell_matrices_;
         auto omega     = omega_;
@@ -181,70 +157,58 @@ class CellVanka
         const auto num_cells_y   = static_cast< int >( inv_cells.extent( 2 ) );
         const auto num_cells_r   = static_cast< int >( inv_cells.extent( 3 ) );
 
-        for ( int color = 0; color < 8; ++color )
-        {
-            const int cx_offset = color % 2;
-            const int cy_offset = ( color / 2 ) % 2;
-            const int cr_offset = color / 4;
+        Kokkos::parallel_for(
+            "CellVanka::apply_fused_direct",
+            Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >(
+                { 0, 0, 0, 0 },
+                { num_subdomains, num_cells_x, num_cells_y, num_cells_r } ),
+            KOKKOS_LAMBDA( int local_subdomain, int xc, int yc, int rc ) {
+                // Gather residual (b - Ax) at the 8 cell nodes — fused, no separate residual pass.
+                dense::Vec< ScalarType, CellDim > local_res;
+                for ( int node = 0; node < NumNodesPerCell; ++node )
+                {
+                    const int gx = xc + ( node % 2 );
+                    const int gy = yc + ( ( node / 2 ) % 2 );
+                    const int gr = rc + ( node / 4 );
 
-            const int nx = ( num_cells_x - cx_offset + 1 ) / 2;
-            const int ny = ( num_cells_y - cy_offset + 1 ) / 2;
-            const int nr = ( num_cells_r - cr_offset + 1 ) / 2;
-
-            if ( nx <= 0 || ny <= 0 || nr <= 0 )
-                continue;
-
-            Kokkos::parallel_for(
-                "CellVanka::apply_color_direct",
-                Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >(
-                    { 0, 0, 0, 0 },
-                    { num_subdomains, nx, ny, nr } ),
-                KOKKOS_LAMBDA( int local_subdomain, int ix, int iy, int ir ) {
-                    const int xc = cx_offset + 2 * ix;
-                    const int yc = cy_offset + 2 * iy;
-                    const int rc = cr_offset + 2 * ir;
-
-                    // Gather residual at the 8 cell nodes.
-                    dense::Vec< ScalarType, CellDim > local_res;
-                    for ( int node = 0; node < NumNodesPerCell; ++node )
+                    for ( int d = 0; d < BlockSize; ++d )
                     {
-                        const int gx = xc + ( node % 2 );
-                        const int gy = yc + ( ( node / 2 ) % 2 );
-                        const int gr = rc + ( node / 4 );
-
-                        for ( int d = 0; d < BlockSize; ++d )
-                        {
-                            local_res( node * BlockSize + d ) = res_data( local_subdomain, gx, gy, gr, d );
-                        }
+                        local_res( node * BlockSize + d ) =
+                            b_data( local_subdomain, gx, gy, gr, d ) -
+                            ax_data( local_subdomain, gx, gy, gr, d );
                     }
+                }
 
-                    // Multiply by inverse cell matrix and directly update x with omega scaling.
-                    const auto local_corr = inv_cells( local_subdomain, xc, yc, rc ) * local_res;
+                // Multiply by inverse cell matrix.
+                const auto local_corr = inv_cells( local_subdomain, xc, yc, rc ) * local_res;
 
-                    for ( int node = 0; node < NumNodesPerCell; ++node )
+                // Scatter with atomic add (replaces 8-color approach).
+                for ( int node = 0; node < NumNodesPerCell; ++node )
+                {
+                    const int gx = xc + ( node % 2 );
+                    const int gy = yc + ( ( node / 2 ) % 2 );
+                    const int gr = rc + ( node / 4 );
+
+                    for ( int d = 0; d < BlockSize; ++d )
                     {
-                        const int gx = xc + ( node % 2 );
-                        const int gy = yc + ( ( node / 2 ) % 2 );
-                        const int gr = rc + ( node / 4 );
-
-                        for ( int d = 0; d < BlockSize; ++d )
-                        {
-                            x_data( local_subdomain, gx, gy, gr, d ) +=
-                                omega * local_corr( node * BlockSize + d );
-                        }
+                        Kokkos::atomic_add(
+                            &x_data( local_subdomain, gx, gy, gr, d ),
+                            omega * local_corr( node * BlockSize + d ) );
                     }
-                } );
-        }
+                }
+            } );
 
         Kokkos::fence();
     }
 
-    /// @brief Colored Vanka with omega pre-scaled into corrections (communication path).
+    /// @brief Fused residual + Vanka apply into correction vector (communication path).
     ///
-    /// Accumulates omega-scaled corrections so update_x_no_scale can avoid the multiply.
-    void apply_cell_vanka_colored_scaled()
+    /// Single kernel over all cells. Computes residual (b - Ax) inline during gather.
+    /// Uses atomic scatter to correction vector. Correction must be zeroed before calling.
+    void apply_cell_vanka_fused_scaled( const RHSVectorType& b )
     {
-        auto res_data        = tmp_.grid_data();
+        auto ax_data         = tmp_.grid_data();
+        auto b_data          = b.grid_data();
         auto correction_data = correction_.grid_data();
         auto inv_cells       = inverse_cell_matrices_;
         auto omega           = omega_;
@@ -254,58 +218,46 @@ class CellVanka
         const auto num_cells_y   = static_cast< int >( inv_cells.extent( 2 ) );
         const auto num_cells_r   = static_cast< int >( inv_cells.extent( 3 ) );
 
-        for ( int color = 0; color < 8; ++color )
-        {
-            const int cx_offset = color % 2;
-            const int cy_offset = ( color / 2 ) % 2;
-            const int cr_offset = color / 4;
+        Kokkos::parallel_for(
+            "CellVanka::apply_fused_scaled",
+            Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >(
+                { 0, 0, 0, 0 },
+                { num_subdomains, num_cells_x, num_cells_y, num_cells_r } ),
+            KOKKOS_LAMBDA( int local_subdomain, int xc, int yc, int rc ) {
+                // Gather residual (b - Ax) at the 8 cell nodes — fused, no separate residual pass.
+                dense::Vec< ScalarType, CellDim > local_res;
+                for ( int node = 0; node < NumNodesPerCell; ++node )
+                {
+                    const int gx = xc + ( node % 2 );
+                    const int gy = yc + ( ( node / 2 ) % 2 );
+                    const int gr = rc + ( node / 4 );
 
-            const int nx = ( num_cells_x - cx_offset + 1 ) / 2;
-            const int ny = ( num_cells_y - cy_offset + 1 ) / 2;
-            const int nr = ( num_cells_r - cr_offset + 1 ) / 2;
-
-            if ( nx <= 0 || ny <= 0 || nr <= 0 )
-                continue;
-
-            Kokkos::parallel_for(
-                "CellVanka::apply_color_scaled",
-                Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >(
-                    { 0, 0, 0, 0 },
-                    { num_subdomains, nx, ny, nr } ),
-                KOKKOS_LAMBDA( int local_subdomain, int ix, int iy, int ir ) {
-                    const int xc = cx_offset + 2 * ix;
-                    const int yc = cy_offset + 2 * iy;
-                    const int rc = cr_offset + 2 * ir;
-
-                    dense::Vec< ScalarType, CellDim > local_res;
-                    for ( int node = 0; node < NumNodesPerCell; ++node )
+                    for ( int d = 0; d < BlockSize; ++d )
                     {
-                        const int gx = xc + ( node % 2 );
-                        const int gy = yc + ( ( node / 2 ) % 2 );
-                        const int gr = rc + ( node / 4 );
-
-                        for ( int d = 0; d < BlockSize; ++d )
-                        {
-                            local_res( node * BlockSize + d ) = res_data( local_subdomain, gx, gy, gr, d );
-                        }
+                        local_res( node * BlockSize + d ) =
+                            b_data( local_subdomain, gx, gy, gr, d ) -
+                            ax_data( local_subdomain, gx, gy, gr, d );
                     }
+                }
 
-                    const auto local_corr = inv_cells( local_subdomain, xc, yc, rc ) * local_res;
+                // Multiply by inverse cell matrix.
+                const auto local_corr = inv_cells( local_subdomain, xc, yc, rc ) * local_res;
 
-                    for ( int node = 0; node < NumNodesPerCell; ++node )
+                // Scatter with atomic add (replaces 8-color approach).
+                for ( int node = 0; node < NumNodesPerCell; ++node )
+                {
+                    const int gx = xc + ( node % 2 );
+                    const int gy = yc + ( ( node / 2 ) % 2 );
+                    const int gr = rc + ( node / 4 );
+
+                    for ( int d = 0; d < BlockSize; ++d )
                     {
-                        const int gx = xc + ( node % 2 );
-                        const int gy = yc + ( ( node / 2 ) % 2 );
-                        const int gr = rc + ( node / 4 );
-
-                        for ( int d = 0; d < BlockSize; ++d )
-                        {
-                            correction_data( local_subdomain, gx, gy, gr, d ) +=
-                                omega * local_corr( node * BlockSize + d );
-                        }
+                        Kokkos::atomic_add(
+                            &correction_data( local_subdomain, gx, gy, gr, d ),
+                            omega * local_corr( node * BlockSize + d ) );
                     }
-                } );
-        }
+                }
+            } );
 
         Kokkos::fence();
     }
