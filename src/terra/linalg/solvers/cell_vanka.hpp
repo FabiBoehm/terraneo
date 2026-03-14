@@ -47,8 +47,14 @@ class CellVanka
     /// @brief Dense cell matrix type (CellDim x CellDim).
     using CellMatrixType = dense::Mat< ScalarType, CellDim, CellDim >;
 
-    /// @brief Packed symmetric matrix type storing the Cholesky factor of the inverse.
-    using PackedCellMatrixType = dense::PackedSymMat< ScalarType, CellDim >;
+    /// @brief Storage scalar type for packed inverse matrices.
+    /// Using float halves memory bandwidth for the dominant matrix load
+    /// (1200 vs 2400 bytes per cell for N=24). The matvec is computed in
+    /// double via PackedSymMat's mixed-precision operator*.
+    using StorageScalarType = float;
+
+    /// @brief Packed symmetric matrix type for the inverse cell matrices.
+    using PackedCellMatrixType = dense::PackedSymMat< StorageScalarType, CellDim >;
 
     /// @brief Kokkos view storing one packed inverse cell matrix per hex cell.
     /// Layout: (local_subdomain, x_cell, y_cell, r_cell).
@@ -672,14 +678,14 @@ void accumulate_ghost_element_contributions(
 /// @param domain Distributed domain for cell iteration.
 /// @return Kokkos view of inverse cell Vanka matrices, one per hex cell.
 template < typename OperatorT, int BlockSize >
-Kokkos::View< dense::PackedSymMat< typename OperatorT::ScalarType, 8 * BlockSize >****, grid::Layout >
+Kokkos::View< dense::PackedSymMat< float, 8 * BlockSize >****, grid::Layout >
 compute_cell_vanka_matrices(
     const OperatorT&                      A,
     const grid::shell::DistributedDomain& domain )
 {
     using ScalarType     = typename OperatorT::ScalarType;
     using CellMatrixType = dense::Mat< ScalarType, 8 * BlockSize, 8 * BlockSize >;
-    using PackedType     = dense::PackedSymMat< ScalarType, 8 * BlockSize >;
+    using PackedType     = dense::PackedSymMat< float, 8 * BlockSize >;
 
     constexpr int num_nodes_per_wedge = 6;
     constexpr int local_matrix_dim    = OperatorT::LocalMatrixDim;
@@ -959,12 +965,14 @@ compute_cell_vanka_matrices(
     }
 
     // -----------------------------------------------------------------------
-    // Phase 3: Invert cell matrices and pack into symmetric storage.
+    // Phase 3: Invert cell matrices and pack into mixed-precision symmetric storage.
     //
     // V^{-1} is symmetric (since V is SPD from the FEM assembly).
-    // Store only the lower triangle in packed format: N*(N+1)/2 entries
-    // instead of N*N (300 vs 576 doubles for 24×24), halving memory
-    // bandwidth in the smoother apply kernel.
+    // Store only the lower triangle in packed format using float:
+    //   - Packed: N*(N+1)/2 = 300 entries (vs 576 for full N*N)
+    //   - Float:  300 * 4B = 1200 bytes (vs 300 * 8B = 2400 bytes with double)
+    // This quarters memory bandwidth vs full double storage in the smoother.
+    // The matvec is computed in double via PackedSymMat's cross-type operator*.
     // -----------------------------------------------------------------------
 
     Kokkos::View< PackedType****, grid::Layout > packed_matrices(
