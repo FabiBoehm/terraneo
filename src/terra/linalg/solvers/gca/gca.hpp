@@ -30,6 +30,7 @@ enum class InterpolationMode
     OperatorDependent,
     UnknownBasedAMG,
     UnknownBasedAMGLateral,
+    UnknownBasedAMGTwoPass,
 };
 
 /// @brief: Galerkin coarse approximation (GCA).
@@ -135,6 +136,10 @@ class TwoGridGCA
         else if ( interpolation_mode == InterpolationMode::UnknownBasedAMGLateral )
         {
             precompute_unknown_based_weights( true );
+        }
+        else if ( interpolation_mode == InterpolationMode::UnknownBasedAMGTwoPass )
+        {
+            precompute_two_pass_weights();
         }
 
         // Looping over the coarse grid.
@@ -507,6 +512,494 @@ class TwoGridGCA
         Kokkos::fence();
     }
 
+    /// @brief Two-pass AMG interpolation following classical Ruge-Stüben / Black Box MG.
+    ///
+    /// Pass 1: 2-parent nodes (x_even, y_even, r_odd). Lump all F connections into diagonal.
+    /// Pass 2: 4-parent nodes (x or y odd). Collapse 2-parent fine neighbors using Pass 1 weights
+    /// via the indirect formula: w_j = -(a_ij + Σ_m a_im·a_mj / Σ_k a_mk) / ã_ii.
+    void precompute_two_pass_weights()
+    {
+        const auto& domain = domain_fine_;
+        const int   num_sd = static_cast< int >( domain.subdomains().size() );
+        const int   nx     = domain.domain_info().subdomain_num_nodes_per_side_laterally();
+        const int   ny     = nx;
+        const int   nr     = domain.domain_info().subdomain_num_nodes_radially();
+
+        constexpr int num_comp = ( Operator::LocalMatrixDim == 18 ) ? 3 : 1;
+
+        ub_weights_ = Kokkos::View< ScalarT*****, Kokkos::LayoutRight >(
+            "ub_weights", num_comp * 4, num_sd, nx, ny, nr );
+
+        parent_weight_0_ = grid::Grid4DDataScalar< ScalarT >( "pw0", num_sd, nx, ny, nr );
+        parent_weight_1_ = grid::Grid4DDataScalar< ScalarT >( "pw1", num_sd, nx, ny, nr );
+        parent_weight_2_ = grid::Grid4DDataScalar< ScalarT >( "pw2", num_sd, nx, ny, nr );
+        parent_weight_3_ = grid::Grid4DDataScalar< ScalarT >( "pw3", num_sd, nx, ny, nr );
+
+        // Pass 1 weights for 2-parent nodes: shape (num_comp * 2, num_sd, nx, ny, nr).
+        Kokkos::View< ScalarT*****, Kokkos::LayoutRight > pass1_w(
+            "pass1_weights", num_comp * 2, num_sd, nx, ny, nr );
+
+        auto ub_w = ub_weights_;
+        auto pw0  = parent_weight_0_;
+        auto pw1  = parent_weight_1_;
+        auto pw2  = parent_weight_2_;
+        auto pw3  = parent_weight_3_;
+
+        auto fine_op = fine_op_;
+        const int ncx = fine_num_cells_x_;
+        const int ncy = fine_num_cells_y_;
+        const int ncr = fine_num_cells_r_;
+
+        // Device-callable local_index_in_wedge.
+        auto local_idx = KOKKOS_LAMBDA( int dx, int dy, int dr, int w ) -> int
+        {
+            if ( w == 0 )
+            {
+                if ( dx + dy > 1 )
+                    return -1;
+                int base = dr * 3;
+                if ( dx == 0 && dy == 0 )
+                    return base;
+                if ( dx == 1 && dy == 0 )
+                    return base + 1;
+                if ( dx == 0 && dy == 1 )
+                    return base + 2;
+                return -1;
+            }
+            else
+            {
+                if ( dx + dy < 1 )
+                    return -1;
+                int base = dr * 3;
+                if ( dx == 1 && dy == 1 )
+                    return base;
+                if ( dx == 0 && dy == 1 )
+                    return base + 1;
+                if ( dx == 1 && dy == 0 )
+                    return base + 2;
+                return -1;
+            }
+        };
+
+        // Device-callable: get signed coupling between two nodes from shared wedges.
+        // Returns the sum of A(node_a_local, node_b_local) over all wedges containing both.
+        auto coupling_from_shared_wedges = KOKKOS_LAMBDA(
+            int sd, int ax, int ay, int ar, int bx, int by, int br, int comp ) -> ScalarT
+        {
+            ScalarT total = 0;
+            // Iterate over hexes that could contain both a and b.
+            // A hex at (hx,hy,hr) contains node (nx,ny,nr) if hx<=nx<=hx+1, etc.
+            // Both a and b must be in the hex.
+            int hx_lo = ( ax < bx ? ax : bx ) - 0;
+            int hx_hi = ( ax > bx ? ax : bx );
+            int hy_lo = ( ay < by ? ay : by ) - 0;
+            int hy_hi = ( ay > by ? ay : by );
+            int hr_lo = ( ar < br ? ar : br ) - 0;
+            int hr_hi = ( ar > br ? ar : br );
+            // Hex must satisfy: hx <= min(ax,bx) and hx+1 >= max(ax,bx), i.e. hx >= max-1 and hx <= min.
+            // So hx ranges from max(ax,bx)-1 to min(ax,bx).
+            int hx_start = hx_hi - 1;
+            int hx_end   = hx_lo;
+            int hy_start = hy_hi - 1;
+            int hy_end   = hy_lo;
+            int hr_start = hr_hi - 1;
+            int hr_end   = hr_lo;
+
+            for ( int hx = hx_start; hx <= hx_end; hx++ )
+            {
+                if ( hx < 0 || hx >= ncx ) continue;
+                for ( int hy = hy_start; hy <= hy_end; hy++ )
+                {
+                    if ( hy < 0 || hy >= ncy ) continue;
+                    for ( int hr = hr_start; hr <= hr_end; hr++ )
+                    {
+                        if ( hr < 0 || hr >= ncr ) continue;
+                        int dxa = ax - hx, dya = ay - hy, dra = ar - hr;
+                        int dxb = bx - hx, dyb = by - hy, drb = br - hr;
+                        for ( int w = 0; w < 2; w++ )
+                        {
+                            int la = local_idx( dxa, dya, dra, w );
+                            if ( la < 0 ) continue;
+                            int lb = local_idx( dxb, dyb, drb, w );
+                            if ( lb < 0 ) continue;
+                            auto A = fine_op.get_local_matrix( sd, hx, hy, hr, w );
+                            if constexpr ( Operator::LocalMatrixDim == 18 )
+                                total += A( la + comp * 6, lb + comp * 6 );
+                            else
+                                total += A( la, lb );
+                        }
+                    }
+                }
+            }
+            return total;
+        };
+
+        // ===================== PASS 1: 2-parent nodes =====================
+        Kokkos::parallel_for(
+            "two_pass_amg_pass1",
+            Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >( { 0, 0, 0, 0 }, { num_sd, nx, ny, nr } ),
+            KOKKOS_LAMBDA( const int sd, const int x, const int y, const int r ) {
+                const bool x_even = ( x % 2 == 0 );
+                const bool y_even = ( y % 2 == 0 );
+                const bool r_even = ( r % 2 == 0 );
+                // Pass 1: only 2-parent nodes (x_even, y_even, r_odd).
+                if ( !x_even || !y_even || r_even )
+                    return;
+
+                // Parents: radially above and below.
+                int r_bot = r / 2;
+                int r_top = r_bot + 1;
+                int ppx[2] = { x, x };
+                int ppy[2] = { y, y };
+                int ppr[2] = { 2 * r_bot, 2 * r_top };
+
+                for ( int d = 0; d < num_comp; d++ )
+                {
+                    // Assemble full row: diagonal, parent couplings, weak sum.
+                    ScalarT a_ii    = 0;
+                    ScalarT a_ij[2] = {};
+                    ScalarT a_weak  = 0;
+
+                    for ( int dhx = 0; dhx <= 1; dhx++ )
+                    for ( int dhy = 0; dhy <= 1; dhy++ )
+                    for ( int dhr = 0; dhr <= 1; dhr++ )
+                    {
+                        int hx = x - dhx, hy = y - dhy, hr = r - dhr;
+                        if ( hx < 0 || hx >= ncx || hy < 0 || hy >= ncy || hr < 0 || hr >= ncr )
+                            continue;
+                        for ( int w = 0; w < 2; w++ )
+                        {
+                            int li = local_idx( dhx, dhy, dhr, w );
+                            if ( li < 0 ) continue;
+                            auto A = fine_op.get_local_matrix( sd, hx, hy, hr, w );
+                            int row = ( Operator::LocalMatrixDim == 18 ) ? li + d * 6 : li;
+
+                            // Diagonal.
+                            a_ii += A( row, row );
+
+                            // Off-diagonal: classify as parent or weak.
+                            for ( int col_base = 0; col_base < 6; col_base++ )
+                            {
+                                if ( col_base == li ) continue;
+                                int col = ( Operator::LocalMatrixDim == 18 ) ? col_base + d * 6 : col_base;
+                                ScalarT val = A( row, col );
+
+                                // Determine global coords of this column node.
+                                int cx, cy, cr;
+                                // Wedge vertex offsets from hex origin:
+                                if ( w == 0 )
+                                {
+                                    int bot_tri[3][2] = { {0,0}, {1,0}, {0,1} };
+                                    cx = hx + bot_tri[col_base % 3][0];
+                                    cy = hy + bot_tri[col_base % 3][1];
+                                }
+                                else
+                                {
+                                    int top_tri[3][2] = { {1,1}, {0,1}, {1,0} };
+                                    cx = hx + top_tri[col_base % 3][0];
+                                    cy = hy + top_tri[col_base % 3][1];
+                                }
+                                cr = hr + col_base / 3;
+
+                                bool is_parent = false;
+                                for ( int p = 0; p < 2; p++ )
+                                {
+                                    if ( cx == ppx[p] && cy == ppy[p] && cr == ppr[p] )
+                                    {
+                                        a_ij[p] += val;
+                                        is_parent = true;
+                                        break;
+                                    }
+                                }
+                                if ( !is_parent )
+                                    a_weak += val;
+                            }
+                        }
+                    }
+
+                    // w_j = -a_ij / (a_ii + a_weak).
+                    ScalarT denom = a_ii + a_weak;
+                    ScalarT w0, w1;
+                    if ( denom != ScalarT( 0 ) )
+                    {
+                        w0 = -a_ij[0] / denom;
+                        w1 = -a_ij[1] / denom;
+                    }
+                    else
+                    {
+                        w0 = ScalarT( 0.5 );
+                        w1 = ScalarT( 0.5 );
+                    }
+
+                    pass1_w( d * 2 + 0, sd, x, y, r ) = w0;
+                    pass1_w( d * 2 + 1, sd, x, y, r ) = w1;
+
+                    if ( d == 0 )
+                    {
+                        pw0( sd, x, y, r ) = w0;
+                        pw1( sd, x, y, r ) = w1;
+                        pw2( sd, x, y, r ) = ScalarT( 0 );
+                        pw3( sd, x, y, r ) = ScalarT( 0 );
+
+                        ub_w( 0, sd, x, y, r ) = w0;
+                        ub_w( 1, sd, x, y, r ) = w1;
+                        ub_w( 2, sd, x, y, r ) = ScalarT( 0 );
+                        ub_w( 3, sd, x, y, r ) = ScalarT( 0 );
+                    }
+                    else
+                    {
+                        ub_w( d * 4 + 0, sd, x, y, r ) = w0;
+                        ub_w( d * 4 + 1, sd, x, y, r ) = w1;
+                    }
+                }
+            } );
+        Kokkos::fence();
+
+        // ===================== PASS 2: 4-parent nodes =====================
+        Kokkos::parallel_for(
+            "two_pass_amg_pass2",
+            Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >( { 0, 0, 0, 0 }, { num_sd, nx, ny, nr } ),
+            KOKKOS_LAMBDA( const int sd, const int x, const int y, const int r ) {
+                const bool x_even = ( x % 2 == 0 );
+                const bool y_even = ( y % 2 == 0 );
+                const bool r_even = ( r % 2 == 0 );
+                if ( x_even && y_even && r_even )
+                    return; // coarse node
+                if ( x_even && y_even )
+                    return; // 2-parent node, handled in Pass 1
+
+                // Determine parents (same logic as precompute_unknown_based_weights).
+                int r_bot = r / 2;
+                int r_top = r_bot + 1;
+                const int num_parents = ( x_even && y_even ) ? 2 : 4;
+                int ppx[4] = {}, ppy[4] = {}, ppr[4] = {};
+                ScalarT w_c[4] = {};
+
+                if ( num_parents == 2 )
+                {
+                    ppx[0] = x;  ppy[0] = y;  ppr[0] = 2 * r_bot;
+                    ppx[1] = x;  ppy[1] = y;  ppr[1] = 2 * r_top;
+                    w_c[0] = ScalarT( 0.5 );
+                    w_c[1] = ScalarT( 0.5 );
+                }
+                else
+                {
+                    int x0, y0, x1, y1;
+                    if ( x_even )
+                    {
+                        x0 = x / 2;  x1 = x / 2;
+                        y0 = y / 2;  y1 = y / 2 + 1;
+                    }
+                    else if ( y_even )
+                    {
+                        x0 = x / 2;  x1 = x / 2 + 1;
+                        y0 = y / 2;  y1 = y / 2;
+                    }
+                    else
+                    {
+                        x0 = x / 2 + 1;  x1 = x / 2;
+                        y0 = y / 2;      y1 = y / 2 + 1;
+                    }
+                    ppx[0] = 2 * x0;  ppy[0] = 2 * y0;  ppr[0] = 2 * r_bot;
+                    ppx[1] = 2 * x1;  ppy[1] = 2 * y1;  ppr[1] = 2 * r_bot;
+                    ppx[2] = 2 * x0;  ppy[2] = 2 * y0;  ppr[2] = 2 * r_top;
+                    ppx[3] = 2 * x1;  ppy[3] = 2 * y1;  ppr[3] = 2 * r_top;
+
+                    if ( r_even )
+                    {
+                        w_c[0] = ScalarT( 0.5 );
+                        w_c[1] = ScalarT( 0.5 );
+                    }
+                    else
+                    {
+                        w_c[0] = ScalarT( 0.25 );
+                        w_c[1] = ScalarT( 0.25 );
+                        w_c[2] = ScalarT( 0.25 );
+                        w_c[3] = ScalarT( 0.25 );
+                    }
+                }
+
+                // Count effective parents (those that can have nonzero coupling).
+                int eff_parents = 0;
+                for ( int p = 0; p < num_parents; p++ )
+                    if ( w_c[p] > ScalarT( 0 ) )
+                        eff_parents++;
+
+                for ( int d = 0; d < num_comp; d++ )
+                {
+                    // Assemble full row at node (x, y, r).
+                    ScalarT a_ii      = 0;
+                    ScalarT a_ij[4]   = {}; // coupling to parents
+                    ScalarT a_weak    = 0;  // weak F connections (lumped)
+
+                    // Collect strong F neighbors (2-parent nodes) and their coupling.
+                    // Max ~12 strong F neighbors in the stencil.
+                    constexpr int MAX_STRONG_F = 20;
+                    int     sf_x[MAX_STRONG_F]   = {};
+                    int     sf_y[MAX_STRONG_F]   = {};
+                    int     sf_r[MAX_STRONG_F]   = {};
+                    ScalarT sf_aim[MAX_STRONG_F] = {};
+                    int     num_sf = 0;
+
+                    for ( int dhx = 0; dhx <= 1; dhx++ )
+                    for ( int dhy = 0; dhy <= 1; dhy++ )
+                    for ( int dhr = 0; dhr <= 1; dhr++ )
+                    {
+                        int hx = x - dhx, hy = y - dhy, hr = r - dhr;
+                        if ( hx < 0 || hx >= ncx || hy < 0 || hy >= ncy || hr < 0 || hr >= ncr )
+                            continue;
+                        for ( int w = 0; w < 2; w++ )
+                        {
+                            int li = local_idx( dhx, dhy, dhr, w );
+                            if ( li < 0 ) continue;
+                            auto A = fine_op.get_local_matrix( sd, hx, hy, hr, w );
+                            int row = ( Operator::LocalMatrixDim == 18 ) ? li + d * 6 : li;
+
+                            a_ii += A( row, row );
+
+                            for ( int col_base = 0; col_base < 6; col_base++ )
+                            {
+                                if ( col_base == li ) continue;
+                                int col = ( Operator::LocalMatrixDim == 18 ) ? col_base + d * 6 : col_base;
+                                ScalarT val = A( row, col );
+
+                                // Global coords of column node.
+                                int cx, cy, cr;
+                                if ( w == 0 )
+                                {
+                                    int bt[3][2] = { {0,0}, {1,0}, {0,1} };
+                                    cx = hx + bt[col_base % 3][0];
+                                    cy = hy + bt[col_base % 3][1];
+                                }
+                                else
+                                {
+                                    int tt[3][2] = { {1,1}, {0,1}, {1,0} };
+                                    cx = hx + tt[col_base % 3][0];
+                                    cy = hy + tt[col_base % 3][1];
+                                }
+                                cr = hr + col_base / 3;
+
+                                // Is it a parent?
+                                bool is_parent = false;
+                                for ( int p = 0; p < num_parents; p++ )
+                                {
+                                    if ( cx == ppx[p] && cy == ppy[p] && cr == ppr[p] )
+                                    {
+                                        a_ij[p] += val;
+                                        is_parent = true;
+                                        break;
+                                    }
+                                }
+                                if ( is_parent ) continue;
+
+                                // Is it a coarse node? (all even)
+                                bool c_even = ( cx % 2 == 0 && cy % 2 == 0 && cr % 2 == 0 );
+                                if ( c_even )
+                                {
+                                    // Coarse but not our parent — lump as weak.
+                                    a_weak += val;
+                                    continue;
+                                }
+
+                                // Is it a 2-parent (strong F) node? (cx_even, cy_even, cr_odd)
+                                bool is_2parent = ( cx % 2 == 0 && cy % 2 == 0 && cr % 2 != 0 );
+                                if ( is_2parent )
+                                {
+                                    // Check if already in strong F list.
+                                    bool found = false;
+                                    for ( int s = 0; s < num_sf; s++ )
+                                    {
+                                        if ( sf_x[s] == cx && sf_y[s] == cy && sf_r[s] == cr )
+                                        {
+                                            sf_aim[s] += val;
+                                            found = true;
+                                            break;
+                                        }
+                                    }
+                                    if ( !found && num_sf < MAX_STRONG_F )
+                                    {
+                                        sf_x[num_sf]   = cx;
+                                        sf_y[num_sf]   = cy;
+                                        sf_r[num_sf]   = cr;
+                                        sf_aim[num_sf] = val;
+                                        num_sf++;
+                                    }
+                                }
+                                else
+                                {
+                                    // Other fine node — weak, lump into diagonal.
+                                    a_weak += val;
+                                }
+                            }
+                        }
+                    }
+
+                    // Compute indirect contributions from strong F neighbors.
+                    ScalarT indirect[4] = {};
+
+                    for ( int s = 0; s < num_sf; s++ )
+                    {
+                        int mx = sf_x[s], my = sf_y[s], mr = sf_r[s];
+                        ScalarT aim = sf_aim[s];
+
+                        // Compute a_mj for each parent j of i, and sum_k a_mk.
+                        ScalarT a_mj[4]  = {};
+                        ScalarT sum_a_mk = 0;
+                        for ( int p = 0; p < num_parents; p++ )
+                        {
+                            if ( w_c[p] <= ScalarT( 0 ) ) continue;
+                            a_mj[p] = coupling_from_shared_wedges(
+                                sd, mx, my, mr, ppx[p], ppy[p], ppr[p], d );
+                            sum_a_mk += a_mj[p];
+                        }
+
+                        if ( sum_a_mk < ScalarT( 0 ) )
+                        {
+                            // sum_a_mk should be negative (off-diagonal sum for M-matrix).
+                            for ( int p = 0; p < num_parents; p++ )
+                            {
+                                if ( w_c[p] <= ScalarT( 0 ) ) continue;
+                                indirect[p] += aim * a_mj[p] / sum_a_mk;
+                            }
+                        }
+                        else
+                        {
+                            // Fallback: lump this strong F connection as weak.
+                            a_weak += aim;
+                        }
+                    }
+
+                    // Compute weights: w_j = -(a_ij + indirect_j) / (a_ii + a_weak).
+                    ScalarT denom = a_ii + a_weak;
+                    ScalarT weights[4] = {};
+
+                    if ( denom != ScalarT( 0 ) )
+                    {
+                        for ( int p = 0; p < num_parents; p++ )
+                            weights[p] = -( a_ij[p] + indirect[p] ) / denom;
+                    }
+                    else
+                    {
+                        for ( int p = 0; p < num_parents; p++ )
+                            weights[p] = w_c[p];
+                    }
+
+                    // Store weights.
+                    for ( int p = 0; p < 4; p++ )
+                        ub_w( d * 4 + p, sd, x, y, r ) = weights[p];
+
+                    if ( d == 0 )
+                    {
+                        pw0( sd, x, y, r ) = weights[0];
+                        pw1( sd, x, y, r ) = weights[1];
+                        pw2( sd, x, y, r ) = weights[2];
+                        pw3( sd, x, y, r ) = weights[3];
+                    }
+                }
+            } );
+        Kokkos::fence();
+    }
+
     /// @brief Computes indices of vertices associated to a wedge in a hex cell.
     /// @param coarse_hex_idx  [in] global index of the hex cell
     /// @param wedge  [in] wedge index (local index 0 or 1)
@@ -744,7 +1237,8 @@ class TwoGridGCA
                             }
                             else if ( interpolation_mode_ == InterpolationMode::OperatorDependent ||
                                       interpolation_mode_ == InterpolationMode::UnknownBasedAMG ||
-                                      interpolation_mode_ == InterpolationMode::UnknownBasedAMGLateral )
+                                      interpolation_mode_ == InterpolationMode::UnknownBasedAMGLateral ||
+                                      interpolation_mode_ == InterpolationMode::UnknownBasedAMGTwoPass )
                             {
                                 // For UnknownBasedAMG, pw0/pw1 hold dim-0 weights; dims 1,2 handled in P_vec.
                                 weights( 0 ) = parent_weight_0_( local_subdomain_id, fine_dof_idx( 1 ),
@@ -883,7 +1377,8 @@ class TwoGridGCA
                         }
                         else if ( interpolation_mode_ == InterpolationMode::OperatorDependent ||
                                   interpolation_mode_ == InterpolationMode::UnknownBasedAMG ||
-                                  interpolation_mode_ == InterpolationMode::UnknownBasedAMGLateral )
+                                  interpolation_mode_ == InterpolationMode::UnknownBasedAMGLateral ||
+                                  interpolation_mode_ == InterpolationMode::UnknownBasedAMGTwoPass )
                         {
                             // For UnknownBasedAMG*, pw0-pw3 hold dim-0 weights; dims 1,2 handled in P_vec.
                             P( fine_dof_lidx, coarse_dof_lindices[0] ) = parent_weight_0_(
@@ -916,7 +1411,8 @@ class TwoGridGCA
                                 P_vec( i, j ) = P( i, j );
 
                         if ( interpolation_mode_ == InterpolationMode::UnknownBasedAMG ||
-                             interpolation_mode_ == InterpolationMode::UnknownBasedAMGLateral )
+                             interpolation_mode_ == InterpolationMode::UnknownBasedAMGLateral ||
+                             interpolation_mode_ == InterpolationMode::UnknownBasedAMGTwoPass )
                         {
                             // Dims 1, 2: per-component weights from ub_weights_.
                             for ( int dim = 1; dim < 3; ++dim )

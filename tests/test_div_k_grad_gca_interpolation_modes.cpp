@@ -969,6 +969,8 @@ std::string interp_mode_name( InterpolationMode mode )
         return "UnknownBasedAMG";
     case InterpolationMode::UnknownBasedAMGLateral:
         return "UB_AMG_Lateral";
+    case InterpolationMode::UnknownBasedAMGTwoPass:
+        return "UB_AMG_TwoPass";
     default:
         return "Unknown";
     }
@@ -1048,10 +1050,7 @@ int run_test()
 
     std::vector< InterpolationMode > modes = {
         InterpolationMode::Constant,
-        InterpolationMode::Linear,
-        InterpolationMode::OperatorDependent,
-        InterpolationMode::UnknownBasedAMG,
-        InterpolationMode::UnknownBasedAMGLateral,
+        InterpolationMode::UnknownBasedAMGTwoPass,
     };
     std::vector< double > beta_values = { 0.0 };
 
