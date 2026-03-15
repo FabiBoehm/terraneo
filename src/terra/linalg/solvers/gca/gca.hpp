@@ -581,59 +581,6 @@ class TwoGridGCA
             }
         };
 
-        // Device-callable: get signed coupling between two nodes from shared wedges.
-        // Returns the sum of A(node_a_local, node_b_local) over all wedges containing both.
-        auto coupling_from_shared_wedges = KOKKOS_LAMBDA(
-            int sd, int ax, int ay, int ar, int bx, int by, int br, int comp ) -> ScalarT
-        {
-            ScalarT total = 0;
-            // Iterate over hexes that could contain both a and b.
-            // A hex at (hx,hy,hr) contains node (nx,ny,nr) if hx<=nx<=hx+1, etc.
-            // Both a and b must be in the hex.
-            int hx_lo = ( ax < bx ? ax : bx ) - 0;
-            int hx_hi = ( ax > bx ? ax : bx );
-            int hy_lo = ( ay < by ? ay : by ) - 0;
-            int hy_hi = ( ay > by ? ay : by );
-            int hr_lo = ( ar < br ? ar : br ) - 0;
-            int hr_hi = ( ar > br ? ar : br );
-            // Hex must satisfy: hx <= min(ax,bx) and hx+1 >= max(ax,bx), i.e. hx >= max-1 and hx <= min.
-            // So hx ranges from max(ax,bx)-1 to min(ax,bx).
-            int hx_start = hx_hi - 1;
-            int hx_end   = hx_lo;
-            int hy_start = hy_hi - 1;
-            int hy_end   = hy_lo;
-            int hr_start = hr_hi - 1;
-            int hr_end   = hr_lo;
-
-            for ( int hx = hx_start; hx <= hx_end; hx++ )
-            {
-                if ( hx < 0 || hx >= ncx ) continue;
-                for ( int hy = hy_start; hy <= hy_end; hy++ )
-                {
-                    if ( hy < 0 || hy >= ncy ) continue;
-                    for ( int hr = hr_start; hr <= hr_end; hr++ )
-                    {
-                        if ( hr < 0 || hr >= ncr ) continue;
-                        int dxa = ax - hx, dya = ay - hy, dra = ar - hr;
-                        int dxb = bx - hx, dyb = by - hy, drb = br - hr;
-                        for ( int w = 0; w < 2; w++ )
-                        {
-                            int la = local_idx( dxa, dya, dra, w );
-                            if ( la < 0 ) continue;
-                            int lb = local_idx( dxb, dyb, drb, w );
-                            if ( lb < 0 ) continue;
-                            auto A = fine_op.get_local_matrix( sd, hx, hy, hr, w );
-                            if constexpr ( Operator::LocalMatrixDim == 18 )
-                                total += A( la + comp * 6, lb + comp * 6 );
-                            else
-                                total += A( la, lb );
-                        }
-                    }
-                }
-            }
-            return total;
-        };
-
         // ===================== PASS 1: 2-parent nodes =====================
         Kokkos::parallel_for(
             "two_pass_amg_pass1",
@@ -768,21 +715,13 @@ class TwoGridGCA
                 if ( x_even && y_even )
                     return; // 2-parent node, handled in Pass 1
 
-                // Determine parents (same logic as precompute_unknown_based_weights).
+                // Determine parents. All nodes here have x or y odd → 4 parents.
                 int r_bot = r / 2;
                 int r_top = r_bot + 1;
-                const int num_parents = ( x_even && y_even ) ? 2 : 4;
+                constexpr int num_parents = 4;
                 int ppx[4] = {}, ppy[4] = {}, ppr[4] = {};
                 ScalarT w_c[4] = {};
 
-                if ( num_parents == 2 )
-                {
-                    ppx[0] = x;  ppy[0] = y;  ppr[0] = 2 * r_bot;
-                    ppx[1] = x;  ppy[1] = y;  ppr[1] = 2 * r_top;
-                    w_c[0] = ScalarT( 0.5 );
-                    w_c[1] = ScalarT( 0.5 );
-                }
-                else
                 {
                     int x0, y0, x1, y1;
                     if ( x_even )
@@ -818,12 +757,6 @@ class TwoGridGCA
                         w_c[3] = ScalarT( 0.25 );
                     }
                 }
-
-                // Count effective parents (those that can have nonzero coupling).
-                int eff_parents = 0;
-                for ( int p = 0; p < num_parents; p++ )
-                    if ( w_c[p] > ScalarT( 0 ) )
-                        eff_parents++;
 
                 for ( int d = 0; d < num_comp; d++ )
                 {
@@ -934,7 +867,9 @@ class TwoGridGCA
                         }
                     }
 
-                    // Compute indirect contributions from strong F neighbors.
+                    // Compute indirect contributions from strong F neighbors using Pass 1 weights.
+                    // For each 2-parent neighbor m, redistribute a_im to m's own parents
+                    // using the interpolation weights computed in Pass 1.
                     ScalarT indirect[4] = {};
 
                     for ( int s = 0; s < num_sf; s++ )
@@ -942,30 +877,33 @@ class TwoGridGCA
                         int mx = sf_x[s], my = sf_y[s], mr = sf_r[s];
                         ScalarT aim = sf_aim[s];
 
-                        // Compute a_mj for each parent j of i, and sum_k a_mk.
-                        ScalarT a_mj[4]  = {};
-                        ScalarT sum_a_mk = 0;
-                        for ( int p = 0; p < num_parents; p++ )
-                        {
-                            if ( w_c[p] <= ScalarT( 0 ) ) continue;
-                            a_mj[p] = coupling_from_shared_wedges(
-                                sd, mx, my, mr, ppx[p], ppy[p], ppr[p], d );
-                            sum_a_mk += a_mj[p];
-                        }
+                        // m is a 2-parent node (mx_even, my_even, mr_odd).
+                        // m's own parents: (mx, my, mr-1) and (mx, my, mr+1).
+                        int m_parent_r[2] = { mr - 1, mr + 1 };
+                        ScalarT w_m[2] = {
+                            pass1_w( d * 2 + 0, sd, mx, my, mr ),
+                            pass1_w( d * 2 + 1, sd, mx, my, mr )
+                        };
 
-                        if ( sum_a_mk < ScalarT( 0 ) )
+                        for ( int k = 0; k < 2; k++ )
                         {
-                            // sum_a_mk should be negative (off-diagonal sum for M-matrix).
+                            // Check if m's parent k is among i's active parents.
+                            bool mapped = false;
                             for ( int p = 0; p < num_parents; p++ )
                             {
                                 if ( w_c[p] <= ScalarT( 0 ) ) continue;
-                                indirect[p] += aim * a_mj[p] / sum_a_mk;
+                                if ( mx == ppx[p] && my == ppy[p] && m_parent_r[k] == ppr[p] )
+                                {
+                                    indirect[p] += aim * w_m[k];
+                                    mapped = true;
+                                    break;
+                                }
                             }
-                        }
-                        else
-                        {
-                            // Fallback: lump this strong F connection as weak.
-                            a_weak += aim;
+                            if ( !mapped )
+                            {
+                                // m's parent is not one of i's parents — lump.
+                                a_weak += aim * w_m[k];
+                            }
                         }
                     }
 
