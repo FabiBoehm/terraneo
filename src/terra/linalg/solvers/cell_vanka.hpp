@@ -128,21 +128,7 @@ class CellVanka
     /// @brief Zero the correction vector.
     void zero_correction()
     {
-        auto corr_data = correction_.grid_data();
-
-        Kokkos::parallel_for(
-            "CellVanka::zero_correction",
-            Kokkos::MDRangePolicy< Kokkos::Rank< 5 > >(
-                { 0, 0, 0, 0, 0 },
-                { static_cast< long long >( corr_data.extent( 0 ) ),
-                  static_cast< long long >( corr_data.extent( 1 ) ),
-                  static_cast< long long >( corr_data.extent( 2 ) ),
-                  static_cast< long long >( corr_data.extent( 3 ) ),
-                  static_cast< long long >( corr_data.extent( 4 ) ) } ),
-            KOKKOS_LAMBDA( int s, int i, int j, int k, int d ) {
-                corr_data( s, i, j, k, d ) = 0;
-            } );
-        Kokkos::fence();
+        Kokkos::deep_copy( correction_.grid_data(), ScalarType( 0 ) );
     }
 
     /// @brief Whether the default execution space is a GPU.
@@ -157,22 +143,22 @@ class CellVanka
     using TeamPolicy = Kokkos::TeamPolicy<>;
     using TeamMember = typename TeamPolicy::member_type;
     using ScratchSpace = typename Kokkos::DefaultExecutionSpace::scratch_memory_space;
-    using ScratchStorageView =
+    using ScratchFloatView =
         Kokkos::View< StorageScalarType*, ScratchSpace, Kokkos::MemoryTraits< Kokkos::Unmanaged > >;
-    using ScratchComputeView =
-        Kokkos::View< ScalarType*, ScratchSpace, Kokkos::MemoryTraits< Kokkos::Unmanaged > >;
 
     /// @brief Packed matrix size (entries in the lower triangle).
     static constexpr int PackedSize = PackedCellMatrixType::size;
 
     /// @brief Fused residual + Vanka apply with direct x update (no-communication path).
     ///
+    /// Float-precision Vanka kernel: residual gather, matvec, and correction are all
+    /// computed in float (StorageScalarType). Only the final atomic scatter to x
+    /// promotes back to double. This gives 2x FP32 throughput on GPU and halves
+    /// shared memory usage for the residual scratch.
+    ///
     /// Two implementations selected at compile time:
-    /// - GPU: Team policy with shared memory tiling. Each team handles one cell.
-    ///   Team members cooperatively load the packed matrix into shared memory,
-    ///   parallelize the symmetric matvec, and scatter corrections with atomic_add.
-    /// - CPU: MDRangePolicy with one thread per cell. The PackedSymMat single-pass
-    ///   algorithm is used directly (no scratch overhead).
+    /// - GPU: Team policy with shared memory tiling, all-float scratch.
+    /// - CPU: MDRangePolicy with one thread per cell, float Vec for matvec.
     void apply_cell_vanka_fused_direct( SolutionVectorType& x, const RHSVectorType& b )
     {
         auto ax_data   = tmp_.grid_data();
@@ -188,14 +174,14 @@ class CellVanka
 
         if constexpr ( is_gpu )
         {
-            // GPU path: team policy with shared memory tiling.
             const int total_cells = num_subdomains * num_cells_x * num_cells_y * num_cells_r;
             if ( total_cells == 0 )
                 return;
 
+            // All-float scratch: matrix (PackedSize floats) + residual (CellDim floats).
             const size_t scratch_bytes =
-                ScratchStorageView::shmem_size( PackedSize ) +
-                ScratchComputeView::shmem_size( CellDim );
+                ScratchFloatView::shmem_size( PackedSize ) +
+                ScratchFloatView::shmem_size( CellDim );
 
             TeamPolicy policy( total_cells, Kokkos::AUTO );
             policy = policy.set_scratch_size( 0, Kokkos::PerTeam( scratch_bytes ) );
@@ -212,16 +198,15 @@ class CellVanka
                     const int xc = tmp_idx % num_cells_x;
                     const int local_subdomain = tmp_idx / num_cells_x;
 
-                    ScratchStorageView mat_scratch( team.team_shmem(), PackedSize );
-                    ScratchComputeView res_scratch( team.team_shmem(), CellDim );
+                    ScratchFloatView mat_scratch( team.team_shmem(), PackedSize );
+                    ScratchFloatView res_scratch( team.team_shmem(), CellDim );
 
-                    // Cooperatively load packed inverse matrix into shared memory.
                     const auto& packed_mat = inv_cells( local_subdomain, xc, yc, rc );
                     Kokkos::parallel_for(
                         Kokkos::TeamThreadRange( team, PackedSize ),
                         [&]( int k ) { mat_scratch( k ) = packed_mat.data[k]; } );
 
-                    // Cooperatively gather residual (b - Ax) into shared memory.
+                    // Gather residual as float (cast from double grid data).
                     Kokkos::parallel_for(
                         Kokkos::TeamThreadRange( team, CellDim ),
                         [&]( int k ) {
@@ -230,56 +215,57 @@ class CellVanka
                             const int gx   = xc + ( node % 2 );
                             const int gy   = yc + ( ( node / 2 ) % 2 );
                             const int gr   = rc + ( node / 4 );
-                            res_scratch( k ) =
+                            res_scratch( k ) = static_cast< StorageScalarType >(
                                 b_data( local_subdomain, gx, gy, gr, d ) -
-                                ax_data( local_subdomain, gx, gy, gr, d );
+                                ax_data( local_subdomain, gx, gy, gr, d ) );
                         } );
 
                     team.team_barrier();
 
-                    // Parallel symmetric matvec + scatter.
-                    // Row i: result[i] = sum_j M(i,j) * res[j], exploiting symmetry.
+                    // All-float symmetric matvec, promote to double only for scatter.
                     Kokkos::parallel_for(
                         Kokkos::TeamThreadRange( team, CellDim ),
                         [&]( int i ) {
-                            ScalarType sum = ScalarType( 0 );
-                            const int  base_i = i * ( i + 1 ) / 2;
+                            StorageScalarType sum = StorageScalarType( 0 );
+                            const int         base_i = i * ( i + 1 ) / 2;
                             for ( int j = 0; j <= i; ++j )
-                                sum += static_cast< ScalarType >( mat_scratch( base_i + j ) ) * res_scratch( j );
+                                sum += mat_scratch( base_i + j ) * res_scratch( j );
                             for ( int j = i + 1; j < CellDim; ++j )
-                                sum += static_cast< ScalarType >( mat_scratch( j * ( j + 1 ) / 2 + i ) ) *
-                                       res_scratch( j );
+                                sum += mat_scratch( j * ( j + 1 ) / 2 + i ) * res_scratch( j );
 
                             const int node = i / BlockSize;
                             const int d    = i % BlockSize;
                             const int gx   = xc + ( node % 2 );
                             const int gy   = yc + ( ( node / 2 ) % 2 );
                             const int gr   = rc + ( node / 4 );
-                            Kokkos::atomic_add( &x_data( local_subdomain, gx, gy, gr, d ), omega * sum );
+                            Kokkos::atomic_add(
+                                &x_data( local_subdomain, gx, gy, gr, d ),
+                                omega * static_cast< ScalarType >( sum ) );
                         } );
                 } );
         }
         else
         {
-            // CPU path: flat MDRangePolicy, one thread per cell.
+            // CPU path: float residual + float matvec via PackedSymMat native operator*.
             Kokkos::parallel_for(
                 "CellVanka::apply_fused_direct",
                 Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >(
                     { 0, 0, 0, 0 },
                     { num_subdomains, num_cells_x, num_cells_y, num_cells_r } ),
                 KOKKOS_LAMBDA( int local_subdomain, int xc, int yc, int rc ) {
-                    dense::Vec< ScalarType, CellDim > local_res;
+                    dense::Vec< StorageScalarType, CellDim > local_res;
                     for ( int node = 0; node < NumNodesPerCell; ++node )
                     {
                         const int gx = xc + ( node % 2 );
                         const int gy = yc + ( ( node / 2 ) % 2 );
                         const int gr = rc + ( node / 4 );
                         for ( int d = 0; d < BlockSize; ++d )
-                            local_res( node * BlockSize + d ) =
+                            local_res( node * BlockSize + d ) = static_cast< StorageScalarType >(
                                 b_data( local_subdomain, gx, gy, gr, d ) -
-                                ax_data( local_subdomain, gx, gy, gr, d );
+                                ax_data( local_subdomain, gx, gy, gr, d ) );
                     }
 
+                    // Float matvec: PackedSymMat<float> * Vec<float> = Vec<float>.
                     const auto local_corr = inv_cells( local_subdomain, xc, yc, rc ) * local_res;
 
                     for ( int node = 0; node < NumNodesPerCell; ++node )
@@ -290,7 +276,7 @@ class CellVanka
                         for ( int d = 0; d < BlockSize; ++d )
                             Kokkos::atomic_add(
                                 &x_data( local_subdomain, gx, gy, gr, d ),
-                                omega * local_corr( node * BlockSize + d ) );
+                                omega * static_cast< ScalarType >( local_corr( node * BlockSize + d ) ) );
                     }
                 } );
         }
@@ -300,8 +286,9 @@ class CellVanka
 
     /// @brief Fused residual + Vanka apply into correction vector (communication path).
     ///
-    /// Same GPU/CPU dispatch as the direct path, but scatters omega-scaled corrections
-    /// into the correction vector instead of x. Correction must be zeroed before calling.
+    /// Same float-precision kernel as the direct path, but scatters omega-scaled
+    /// corrections into the correction vector instead of x.
+    /// Correction must be zeroed before calling.
     void apply_cell_vanka_fused_scaled( const RHSVectorType& b )
     {
         auto ax_data         = tmp_.grid_data();
@@ -322,8 +309,8 @@ class CellVanka
                 return;
 
             const size_t scratch_bytes =
-                ScratchStorageView::shmem_size( PackedSize ) +
-                ScratchComputeView::shmem_size( CellDim );
+                ScratchFloatView::shmem_size( PackedSize ) +
+                ScratchFloatView::shmem_size( CellDim );
 
             TeamPolicy policy( total_cells, Kokkos::AUTO );
             policy = policy.set_scratch_size( 0, Kokkos::PerTeam( scratch_bytes ) );
@@ -340,8 +327,8 @@ class CellVanka
                     const int xc = tmp_idx % num_cells_x;
                     const int local_subdomain = tmp_idx / num_cells_x;
 
-                    ScratchStorageView mat_scratch( team.team_shmem(), PackedSize );
-                    ScratchComputeView res_scratch( team.team_shmem(), CellDim );
+                    ScratchFloatView mat_scratch( team.team_shmem(), PackedSize );
+                    ScratchFloatView res_scratch( team.team_shmem(), CellDim );
 
                     const auto& packed_mat = inv_cells( local_subdomain, xc, yc, rc );
                     Kokkos::parallel_for(
@@ -356,9 +343,9 @@ class CellVanka
                             const int gx   = xc + ( node % 2 );
                             const int gy   = yc + ( ( node / 2 ) % 2 );
                             const int gr   = rc + ( node / 4 );
-                            res_scratch( k ) =
+                            res_scratch( k ) = static_cast< StorageScalarType >(
                                 b_data( local_subdomain, gx, gy, gr, d ) -
-                                ax_data( local_subdomain, gx, gy, gr, d );
+                                ax_data( local_subdomain, gx, gy, gr, d ) );
                         } );
 
                     team.team_barrier();
@@ -366,13 +353,12 @@ class CellVanka
                     Kokkos::parallel_for(
                         Kokkos::TeamThreadRange( team, CellDim ),
                         [&]( int i ) {
-                            ScalarType sum = ScalarType( 0 );
-                            const int  base_i = i * ( i + 1 ) / 2;
+                            StorageScalarType sum = StorageScalarType( 0 );
+                            const int         base_i = i * ( i + 1 ) / 2;
                             for ( int j = 0; j <= i; ++j )
-                                sum += static_cast< ScalarType >( mat_scratch( base_i + j ) ) * res_scratch( j );
+                                sum += mat_scratch( base_i + j ) * res_scratch( j );
                             for ( int j = i + 1; j < CellDim; ++j )
-                                sum += static_cast< ScalarType >( mat_scratch( j * ( j + 1 ) / 2 + i ) ) *
-                                       res_scratch( j );
+                                sum += mat_scratch( j * ( j + 1 ) / 2 + i ) * res_scratch( j );
 
                             const int node = i / BlockSize;
                             const int d    = i % BlockSize;
@@ -380,7 +366,8 @@ class CellVanka
                             const int gy   = yc + ( ( node / 2 ) % 2 );
                             const int gr   = rc + ( node / 4 );
                             Kokkos::atomic_add(
-                                &correction_data( local_subdomain, gx, gy, gr, d ), omega * sum );
+                                &correction_data( local_subdomain, gx, gy, gr, d ),
+                                omega * static_cast< ScalarType >( sum ) );
                         } );
                 } );
         }
@@ -392,16 +379,16 @@ class CellVanka
                     { 0, 0, 0, 0 },
                     { num_subdomains, num_cells_x, num_cells_y, num_cells_r } ),
                 KOKKOS_LAMBDA( int local_subdomain, int xc, int yc, int rc ) {
-                    dense::Vec< ScalarType, CellDim > local_res;
+                    dense::Vec< StorageScalarType, CellDim > local_res;
                     for ( int node = 0; node < NumNodesPerCell; ++node )
                     {
                         const int gx = xc + ( node % 2 );
                         const int gy = yc + ( ( node / 2 ) % 2 );
                         const int gr = rc + ( node / 4 );
                         for ( int d = 0; d < BlockSize; ++d )
-                            local_res( node * BlockSize + d ) =
+                            local_res( node * BlockSize + d ) = static_cast< StorageScalarType >(
                                 b_data( local_subdomain, gx, gy, gr, d ) -
-                                ax_data( local_subdomain, gx, gy, gr, d );
+                                ax_data( local_subdomain, gx, gy, gr, d ) );
                     }
 
                     const auto local_corr = inv_cells( local_subdomain, xc, yc, rc ) * local_res;
@@ -414,7 +401,7 @@ class CellVanka
                         for ( int d = 0; d < BlockSize; ++d )
                             Kokkos::atomic_add(
                                 &correction_data( local_subdomain, gx, gy, gr, d ),
-                                omega * local_corr( node * BlockSize + d ) );
+                                omega * static_cast< ScalarType >( local_corr( node * BlockSize + d ) ) );
                     }
                 } );
         }
