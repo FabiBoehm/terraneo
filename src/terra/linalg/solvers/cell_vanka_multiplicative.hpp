@@ -5,6 +5,7 @@
 #include "communication/shell/communication.hpp"
 #include "terra/dense/packed_sym_mat.hpp"
 #include "terra/dense/vec.hpp"
+#include "terra/grid/bit_masks.hpp"
 #include "terra/grid/grid_types.hpp"
 #include "terra/grid/shell/spherical_shell.hpp"
 
@@ -19,10 +20,15 @@ namespace terra::linalg::solvers {
 ///
 /// 8-coloring: color = (xc%2) + 2*(yc%2) + 4*(rc%2).
 /// Cells of the same color share no DOFs within a subdomain, so corrections
-/// within a color can be computed without race conditions.
+/// within a color can be applied without race conditions.
+///
+/// After each color pass, x is synchronized across subdomains: halo DOFs are
+/// zeroed and additively communicated, effectively replacing them with the
+/// owning subdomain's values. This is necessary because the FE operator
+/// communicates Ax (not x), so halo values of x become stale after local updates.
 ///
 /// Each smoothing step requires 8 operator applies (one per color), but the
-/// multiplicative nature gives much better convergence per step.
+/// multiplicative nature gives better convergence per step.
 ///
 /// @tparam OperatorT Operator type (must satisfy OperatorLike).
 /// @tparam BlockSize Size of the per-node blocks (number of DoFs per node).
@@ -49,21 +55,20 @@ class CellVankaMultiplicative
     /// @param inverse_cell_matrices Pre-computed inverse cell Vanka matrices.
     /// @param iterations Number of full multiplicative sweeps (each sweep = 8 color passes).
     /// @param tmp Temporary vector for workspace (residual Ax).
-    /// @param correction Temporary vector for accumulated corrections per color pass.
+    /// @param correction Unused (kept for API compatibility with CellVanka).
     /// @param omega Relaxation parameter (default 1.0 for multiplicative).
-    /// @param domain Domain pointer for inter-subdomain communication of corrections.
+    /// @param domain Domain pointer for inter-subdomain x synchronization.
     CellVankaMultiplicative(
         const InverseCellMatricesType& inverse_cell_matrices,
         const int                      iterations,
         const SolutionVectorType&      tmp,
-        const SolutionVectorType&      correction,
+        const SolutionVectorType&      /* correction */,
         const ScalarType               omega  = ScalarType( 1 ),
         const grid::shell::DistributedDomain* domain = nullptr,
         const ScalarType               /* chebyshev_lambda_max */ = ScalarType( 0 ) )
     : inverse_cell_matrices_( inverse_cell_matrices )
     , iterations_( iterations )
     , tmp_( tmp )
-    , correction_( correction )
     , omega_( omega )
     , domain_( domain )
     {}
@@ -71,10 +76,9 @@ class CellVankaMultiplicative
     /// @brief Multiplicative Vanka sweep: 8 color passes per iteration.
     ///
     /// For each color:
-    ///   1. Compute full residual Ax (operator handles boundary communication of x)
-    ///   2. Apply Vanka for cells of this color → scatter into correction vector
-    ///   3. Communicate correction additively across subdomain boundaries
-    ///   4. x += correction
+    ///   1. Compute Ax (operator communicates Ax additively)
+    ///   2. Apply Vanka for cells of this color → update x directly
+    ///   3. Synchronize x across subdomains (zero halo + additive communicate)
     void solve_impl( OperatorType& A, SolutionVectorType& x, const RHSVectorType& b )
     {
         for ( int iteration = 0; iteration < iterations_; ++iteration )
@@ -82,11 +86,9 @@ class CellVankaMultiplicative
             for ( int color = 0; color < 8; ++color )
             {
                 apply( A, x, tmp_ );
-                zero_correction();
-                apply_cell_vanka_color_to_correction( b, color );
+                apply_cell_vanka_color_direct( x, b, color );
                 if ( domain_ )
-                    communicate_correction();
-                update_x( x );
+                    synchronize_x( x );
             }
         }
     }
@@ -94,18 +96,20 @@ class CellVankaMultiplicative
     InverseCellMatricesType& get_inverse_cell_matrices() { return inverse_cell_matrices_; }
 
   private:
-    void zero_correction()
+    /// @brief Synchronize x across subdomains after a color pass.
+    ///
+    /// Zeroes halo DOFs (non-owned) then additively communicates x.
+    /// Since halo DOFs are 0 and owned DOFs have the correct value,
+    /// the additive communication effectively replaces halo values
+    /// with the owning subdomain's values.
+    void synchronize_x( SolutionVectorType& x )
     {
-        Kokkos::deep_copy( correction_.grid_data(), ScalarType( 0 ) );
-    }
+        auto x_data = x.grid_data();
+        auto mask   = x.mask_data();
 
-    void update_x( SolutionVectorType& x )
-    {
-        auto x_data    = x.grid_data();
-        auto corr_data = correction_.grid_data();
-
+        // Zero non-owned (halo) DOFs.
         Kokkos::parallel_for(
-            "CellVankaMult::update_x",
+            "CellVankaMult::zero_halo",
             Kokkos::MDRangePolicy< Kokkos::Rank< 5 > >(
                 { 0, 0, 0, 0, 0 },
                 { static_cast< long long >( x_data.extent( 0 ) ),
@@ -114,18 +118,16 @@ class CellVankaMultiplicative
                   static_cast< long long >( x_data.extent( 3 ) ),
                   static_cast< long long >( x_data.extent( 4 ) ) } ),
             KOKKOS_LAMBDA( int s, int i, int j, int k, int d ) {
-                x_data( s, i, j, k, d ) += corr_data( s, i, j, k, d );
+                if ( mask( s, i, j, k ) != grid::NodeOwnershipFlag::OWNED )
+                    x_data( s, i, j, k, d ) = ScalarType( 0 );
             } );
         Kokkos::fence();
-    }
 
-    void communicate_correction()
-    {
-        auto corr_data = correction_.grid_data();
+        // Additive communication: halo DOFs receive owner's values.
         communication::shell::SubdomainNeighborhoodSendRecvBuffer< ScalarType, BlockSize > send_buf( *domain_ );
         communication::shell::SubdomainNeighborhoodSendRecvBuffer< ScalarType, BlockSize > recv_buf( *domain_ );
-        communication::shell::pack_send_and_recv_local_subdomain_boundaries( *domain_, corr_data, send_buf, recv_buf );
-        communication::shell::unpack_and_reduce_local_subdomain_boundaries( *domain_, corr_data, recv_buf );
+        communication::shell::pack_send_and_recv_local_subdomain_boundaries( *domain_, x_data, send_buf, recv_buf );
+        communication::shell::unpack_and_reduce_local_subdomain_boundaries( *domain_, x_data, recv_buf );
     }
 
     static constexpr bool is_gpu =
@@ -143,17 +145,17 @@ class CellVankaMultiplicative
 
     static constexpr int PackedSize = PackedCellMatrixType::size;
 
-    /// @brief Apply Vanka correction for all cells of a given color into correction vector.
+    /// @brief Apply Vanka correction for all cells of a given color directly to x.
     ///
-    /// Cells of the same color do not share any DOFs within a subdomain.
-    /// Correction vector must be zeroed before calling.
-    void apply_cell_vanka_color_to_correction( const RHSVectorType& b, const int color )
+    /// Cells of the same color do not share any DOFs within a subdomain,
+    /// so corrections are applied directly to x without atomics.
+    void apply_cell_vanka_color_direct( SolutionVectorType& x, const RHSVectorType& b, const int color )
     {
-        auto ax_data         = tmp_.grid_data();
-        auto b_data          = b.grid_data();
-        auto correction_data = correction_.grid_data();
-        auto inv_cells       = inverse_cell_matrices_;
-        auto omega           = omega_;
+        auto ax_data   = tmp_.grid_data();
+        auto b_data    = b.grid_data();
+        auto x_data    = x.grid_data();
+        auto inv_cells = inverse_cell_matrices_;
+        auto omega     = omega_;
 
         const auto num_subdomains = static_cast< int >( inv_cells.extent( 0 ) );
         const auto num_cells_x   = static_cast< int >( inv_cells.extent( 1 ) );
@@ -238,8 +240,7 @@ class CellVankaMultiplicative
                             const int gx   = xc + ( node % 2 );
                             const int gy   = yc + ( ( node / 2 ) % 2 );
                             const int gr   = rc + ( node / 4 );
-                            // Same-color cells don't share DOFs, no atomics needed.
-                            correction_data( local_subdomain, gx, gy, gr, d ) =
+                            x_data( local_subdomain, gx, gy, gr, d ) +=
                                 omega * static_cast< ScalarType >( sum );
                         } );
                 } );
@@ -276,8 +277,7 @@ class CellVankaMultiplicative
                         const int gy = yc + ( ( node / 2 ) % 2 );
                         const int gr = rc + ( node / 4 );
                         for ( int d = 0; d < BlockSize; ++d )
-                            // Same-color cells don't share DOFs, direct assignment (not atomic).
-                            correction_data( local_subdomain, gx, gy, gr, d ) =
+                            x_data( local_subdomain, gx, gy, gr, d ) +=
                                 omega * static_cast< ScalarType >( local_corr( node * BlockSize + d ) );
                     }
                 } );
@@ -289,7 +289,6 @@ class CellVankaMultiplicative
     InverseCellMatricesType inverse_cell_matrices_;
     int                     iterations_;
     SolutionVectorType      tmp_;
-    SolutionVectorType      correction_;
     ScalarType              omega_;
     const grid::shell::DistributedDomain* domain_;
 };
