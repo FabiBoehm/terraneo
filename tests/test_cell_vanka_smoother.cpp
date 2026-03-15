@@ -649,7 +649,7 @@ void run_stokes_smoother_comparison(
     std::cout << "================================================================" << std::endl;
 
     double time_point = 0.0, time_block = 0.0, time_vanka_3 = 0.0, time_vanka_6 = 0.0;
-    double time_cheb_vanka_3 = 0.0, time_cheb_vanka_2 = 0.0;
+    double time_cheb_vanka_3 = 0.0, time_cheb_vanka_2 = 0.0, time_cheb_vanka_1 = 0.0;
     double time_cheb_jac_3 = 0.0, time_cheb_jac_2 = 0.0;
     double time_mult_vanka_1 = 0.0;
 
@@ -677,6 +677,9 @@ void run_stokes_smoother_comparison(
     const int iters_cheb_vanka_2 =
         run_stokes_fgmres< VankaSmoother >( "Cheb Vanka (2 steps)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 2, time_cheb_vanka_2, true );
 
+    const int iters_cheb_vanka_1 =
+        run_stokes_fgmres< VankaSmoother >( "Cheb Vanka (1 step)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 1, time_cheb_vanka_1, true );
+
     const int iters_mult_vanka_1 =
         run_stokes_fgmres< MultVankaSmoother >( "Mult Vanka (1 sweep)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 1, time_mult_vanka_1 );
 
@@ -685,11 +688,13 @@ void run_stokes_smoother_comparison(
               << "  vanka(3)=" << iters_vanka_3 << "  vanka(6)=" << iters_vanka_6
               << "  chebJac(3)=" << iters_cheb_jac_3 << "  chebJac(2)=" << iters_cheb_jac_2
               << "  chebVanka(3)=" << iters_cheb_vanka_3 << "  chebVanka(2)=" << iters_cheb_vanka_2
+              << "  chebVanka(1)=" << iters_cheb_vanka_1
               << "  multV(1)=" << iters_mult_vanka_1 << std::endl;
     std::cout << "Solve time:  point=" << time_point << "s  block=" << time_block
               << "s  vanka(3)=" << time_vanka_3 << "s  vanka(6)=" << time_vanka_6
               << "s  chebJac(3)=" << time_cheb_jac_3 << "s  chebJac(2)=" << time_cheb_jac_2
               << "s  chebVanka(3)=" << time_cheb_vanka_3 << "s  chebVanka(2)=" << time_cheb_vanka_2
+              << "s  chebVanka(1)=" << time_cheb_vanka_1
               << "s  multV(1)=" << time_mult_vanka_1 << "s" << std::endl;
 }
 
