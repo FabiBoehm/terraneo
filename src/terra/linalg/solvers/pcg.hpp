@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cmath>
+
 #include "identity_solver.hpp"
 #include "terra/linalg/operator.hpp"
 #include "terra/linalg/solvers/iterative_solver_info.hpp"
@@ -114,14 +116,18 @@ class PCG
             apply( A, p_, ap_ );
             const ScalarType alpha_den = dot( ap_, p_ );
 
+            // Breakdown: search direction is A-conjugate to itself (degenerate system).
+            if ( std::abs( alpha_den ) == ScalarType( 0 ) )
+            {
+                return;
+            }
+
             const ScalarType alpha = alpha_num / alpha_den;
 
             lincomb( x, { 1.0, alpha }, { x, p_ } );
             lincomb( r_, { 1.0, -alpha }, { r_, ap_ } );
 
-            // TODO: is this the correct term for the residual check?
             const ScalarType absolute_residual = std::sqrt( dot( r_, r_ ) );
-
             const ScalarType relative_residual = absolute_residual / initial_residual;
 
             if ( statistics_ )
@@ -133,12 +139,8 @@ class PCG
                       { "absolute_residual", absolute_residual } } );
             }
 
-            if ( relative_residual <= params_.relative_residual_tolerance() )
-            {
-                return;
-            }
-
-            if ( absolute_residual < params_.absolute_residual_tolerance() )
+            if ( relative_residual <= params_.relative_residual_tolerance() ||
+                 absolute_residual <= params_.absolute_residual_tolerance() )
             {
                 return;
             }
@@ -146,7 +148,14 @@ class PCG
             solve( preconditioner_, A, z_, r_ );
 
             const ScalarType beta_num = dot( z_, r_ );
-            const ScalarType beta     = beta_num / alpha_num;
+
+            // Breakdown: preconditioned residual is orthogonal to residual.
+            if ( std::abs( alpha_num ) == ScalarType( 0 ) )
+            {
+                return;
+            }
+
+            const ScalarType beta = beta_num / alpha_num;
 
             lincomb( p_, { 1.0, beta }, { z_, p_ } );
         }

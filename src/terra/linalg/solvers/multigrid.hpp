@@ -113,6 +113,8 @@ class Multigrid
 
     /// @brief Solve the linear system using multigrid cycles.
     /// Calls the recursive V-cycle and updates statistics.
+    /// Supports early stopping based on relative residual threshold,
+    /// independent of whether statistics collection is enabled.
     /// @param A Operator (matrix).
     /// @param x Solution vector (output).
     /// @param b Right-hand side vector (input).
@@ -128,34 +130,67 @@ class Multigrid
 
         const int max_level = P_additive_.size();
 
-        ScalarType initial_residual = 0.0;
+        // Only compute residuals between cycles when early stopping is possible
+        // (num_cycles > 1) or statistics are requested. This avoids the cost of
+        // an extra operator application per cycle when it cannot save work.
+        const bool check_residual = ( num_cycles_ > 1 ) || statistics_;
 
-        if ( statistics_ )
+        ScalarType initial_residual          = 0.0;
+        ScalarType previous_absolut_residual = 0.0;
+
+        if ( check_residual )
         {
             apply( A, x, tmp_[max_level] );
             lincomb( tmp_[max_level], { 1.0, -1.0 }, { b, tmp_[max_level] } );
-            initial_residual = norm_2( tmp_[max_level] );
+            initial_residual          = norm_2( tmp_[max_level] );
+            previous_absolut_residual = initial_residual;
 
-            statistics_->add_row(
-                { { "tag", tag_ },
-                  { "cycle", 0 },
-                  { "relative_residual", 1.0 },
-                  { "absolute_residual", initial_residual },
-                  { "residual_convergence_rate", 1.0 } } );
+            if ( statistics_ )
+            {
+                statistics_->add_row(
+                    { { "tag", tag_ },
+                      { "cycle", 0 },
+                      { "relative_residual", 1.0 },
+                      { "absolute_residual", initial_residual },
+                      { "residual_convergence_rate", 1.0 } } );
+            }
         }
-
-        ScalarType previous_absolut_residual = initial_residual;
 
         for ( int cycle = 1; cycle <= num_cycles_; ++cycle )
         {
             solve_recursive( A, x, b, max_level );
 
-            if ( statistics_ )
+            // Skip residual computation after the last cycle (nothing to decide).
+            if ( check_residual && cycle < num_cycles_ )
             {
                 apply( A, x, tmp_[max_level] );
                 lincomb( tmp_[max_level], { 1.0, -1.0 }, { b, tmp_[max_level] } );
                 const auto absolute_residual = norm_2( tmp_[max_level] );
+                const auto relative_residual = absolute_residual / initial_residual;
 
+                if ( statistics_ )
+                {
+                    statistics_->add_row(
+                        { { "tag", tag_ },
+                          { "cycle", cycle },
+                          { "relative_residual", relative_residual },
+                          { "absolute_residual", absolute_residual },
+                          { "residual_convergence_rate", absolute_residual / previous_absolut_residual } } );
+                }
+
+                if ( relative_residual <= relative_residual_threshold_ )
+                {
+                    return;
+                }
+
+                previous_absolut_residual = absolute_residual;
+            }
+            else if ( statistics_ && cycle == num_cycles_ )
+            {
+                // Log final residual for the last cycle.
+                apply( A, x, tmp_[max_level] );
+                lincomb( tmp_[max_level], { 1.0, -1.0 }, { b, tmp_[max_level] } );
+                const auto absolute_residual = norm_2( tmp_[max_level] );
                 const auto relative_residual = absolute_residual / initial_residual;
 
                 statistics_->add_row(
@@ -164,13 +199,6 @@ class Multigrid
                       { "relative_residual", relative_residual },
                       { "absolute_residual", absolute_residual },
                       { "residual_convergence_rate", absolute_residual / previous_absolut_residual } } );
-
-                if ( relative_residual <= relative_residual_threshold_ )
-                {
-                    return;
-                }
-
-                previous_absolut_residual = absolute_residual;
             }
         }
     }
