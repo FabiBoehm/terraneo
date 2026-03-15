@@ -36,6 +36,8 @@
 #include "util/init.hpp"
 #include "util/table.hpp"
 
+#include <variant>
+
 using namespace terra;
 
 using grid::Grid2DDataScalar;
@@ -51,6 +53,41 @@ using linalg::solvers::DiagonalSolver;
 using linalg::solvers::power_iteration;
 
 using ScalarType = double;
+
+// ============================================================================
+// Hybrid smoother: Jacobi or CellVanka per level, selected at construction.
+// ============================================================================
+
+template < linalg::OperatorLike OperatorT, int BlockSize >
+class HybridJacobiVankaSmoother
+{
+  public:
+    using OperatorType       = OperatorT;
+    using SolutionVectorType = linalg::SrcOf< OperatorType >;
+    using RHSVectorType      = linalg::DstOf< OperatorType >;
+    using ScalarType_        = typename SolutionVectorType::ScalarType;
+
+    using JacobiType = linalg::solvers::Jacobi< OperatorT >;
+    using VankaType  = linalg::solvers::CellVanka< OperatorT, BlockSize >;
+
+    /// @brief Construct as Jacobi smoother.
+    explicit HybridJacobiVankaSmoother( JacobiType jacobi )
+    : impl_( std::move( jacobi ) )
+    {}
+
+    /// @brief Construct as CellVanka smoother.
+    explicit HybridJacobiVankaSmoother( VankaType vanka )
+    : impl_( std::move( vanka ) )
+    {}
+
+    void solve_impl( OperatorType& A, SolutionVectorType& x, const RHSVectorType& b )
+    {
+        std::visit( [&]( auto& s ) { s.solve_impl( A, x, b ); }, impl_ );
+    }
+
+  private:
+    std::variant< JacobiType, VankaType > impl_;
+};
 
 /// @brief Initialize a velocity field with some smooth non-trivial function.
 struct InitialGuessVelocityInterpolator
@@ -622,6 +659,372 @@ int run_stokes_fgmres(
 }
 
 // ============================================================================
+// Hybrid: Chebyshev-Jacobi on finest level, Chebyshev-Vanka on coarser levels
+// ============================================================================
+
+int run_stokes_fgmres_hybrid(
+    const std::string&                                                          label,
+    const int                                                                   min_level,
+    const int                                                                   max_level,
+    const std::function< void( DistributedDomain&,
+                               const Grid3DDataVec< double, 3 >&,
+                               const Grid2DDataScalar< double >&,
+                               Grid4DDataScalar< double >& ) >&                k_setup,
+    const int                                                                   max_fgmres_iters,
+    const int                                                                   num_mg_cycles,
+    const int                                                                   jacobi_steps,
+    const int                                                                   vanka_steps,
+    double&                                                                     solve_time )
+{
+    using Stokes      = fe::wedge::operators::shell::EpsDivDivStokes< ScalarType >;
+    using Viscous     = typename Stokes::Block11Type;
+    using Gradient    = typename Stokes::Block12Type;
+    using PressureMass = fe::wedge::operators::shell::KMass< ScalarType >;
+
+    using Prolongation = fe::wedge::operators::shell::ProlongationVecLinear< ScalarType >;
+    using Restriction  = fe::wedge::operators::shell::RestrictionVecLinear< ScalarType >;
+
+    using HybridSmoother = HybridJacobiVankaSmoother< Viscous, 3 >;
+    using VankaSmoother  = linalg::solvers::CellVanka< Viscous, 3 >;
+    using InvCellType    = typename VankaSmoother::InverseCellMatricesType;
+
+    const auto num_levels     = static_cast< size_t >( max_level - min_level + 1 );
+    const auto velocity_level = num_levels - 1;
+    const auto pressure_level = num_levels - 2;
+
+    // Build domain hierarchy.
+    std::vector< DistributedDomain >                                  domains;
+    std::vector< Grid3DDataVec< double, 3 > >                         coords_shell;
+    std::vector< Grid2DDataScalar< double > >                         coords_radii;
+    std::vector< Grid4DDataScalar< grid::NodeOwnershipFlag > >        mask_data;
+    std::vector< Grid4DDataScalar< grid::shell::ShellBoundaryFlag > > boundary_mask_data;
+
+    for ( int level = min_level; level <= max_level; ++level )
+    {
+        const auto idx = static_cast< size_t >( level - min_level );
+        domains.push_back( DistributedDomain::create_uniform_single_subdomain_per_diamond( level, level, 0.5, 1.0 ) );
+        coords_shell.push_back( grid::shell::subdomain_unit_sphere_single_shell_coords< ScalarType >( domains[idx] ) );
+        coords_radii.push_back( grid::shell::subdomain_shell_radii< ScalarType >( domains[idx] ) );
+        mask_data.push_back( grid::setup_node_ownership_mask_data( domains[idx] ) );
+        boundary_mask_data.push_back( grid::shell::setup_boundary_mask_data( domains[idx] ) );
+    }
+
+    // Build viscosity on all levels.
+    std::vector< VectorQ1Scalar< ScalarType > > k_vecs;
+    for ( size_t level = 0; level < num_levels; ++level )
+    {
+        k_vecs.emplace_back( "k_" + std::to_string( level ), domains[level], mask_data[level] );
+        k_setup( domains[level], coords_shell[level], coords_radii[level], k_vecs.back().grid_data() );
+    }
+
+    // Build Stokes operator on finest level (with Dirichlet BCs).
+    Stokes K(
+        domains[velocity_level],
+        domains[pressure_level],
+        coords_shell[velocity_level],
+        coords_radii[velocity_level],
+        boundary_mask_data[velocity_level],
+        k_vecs[velocity_level].grid_data(),
+        true,
+        false );
+
+    Stokes K_neumann(
+        domains[velocity_level],
+        domains[pressure_level],
+        coords_shell[velocity_level],
+        coords_radii[velocity_level],
+        boundary_mask_data[velocity_level],
+        k_vecs[velocity_level].grid_data(),
+        false,
+        false );
+
+    Stokes K_neumann_diag(
+        domains[velocity_level],
+        domains[pressure_level],
+        coords_shell[velocity_level],
+        coords_radii[velocity_level],
+        boundary_mask_data[velocity_level],
+        k_vecs[velocity_level].grid_data(),
+        false,
+        true );
+
+    // Build coarse viscous operators for MG.
+    std::vector< Viscous > A_c;
+    for ( size_t level = 0; level < num_levels - 1; ++level )
+    {
+        A_c.emplace_back(
+            domains[level],
+            coords_shell[level],
+            coords_radii[level],
+            boundary_mask_data[level],
+            k_vecs[level].grid_data(),
+            true,
+            false );
+    }
+
+    // Transfer operators.
+    std::vector< Prolongation > P;
+    std::vector< Restriction >  R;
+    for ( size_t level = 0; level < num_levels - 1; ++level )
+    {
+        P.emplace_back( coords_shell[level + 1], coords_radii[level + 1], linalg::OperatorApplyMode::Add );
+        R.emplace_back( domains[level], coords_shell[level + 1], coords_radii[level + 1] );
+    }
+
+    // MG temporary vectors.
+    std::vector< VectorQ1Vec< ScalarType > > tmp_mg, tmp_mg_r, tmp_mg_e;
+    for ( size_t level = 0; level < num_levels; ++level )
+    {
+        tmp_mg.emplace_back( "tmp_mg_" + std::to_string( level ), domains[level], mask_data[level] );
+        if ( level < num_levels - 1 )
+        {
+            tmp_mg_r.emplace_back( "tmp_mg_r_" + std::to_string( level ), domains[level], mask_data[level] );
+            tmp_mg_e.emplace_back( "tmp_mg_e_" + std::to_string( level ), domains[level], mask_data[level] );
+        }
+    }
+
+    // Build hybrid smoothers.
+    std::vector< HybridSmoother >            smoothers;
+    std::vector< VectorQ1Vec< ScalarType > > inv_diags;
+    std::vector< VectorQ1Vec< ScalarType > > smoother_tmps;
+    std::vector< InvCellType >               inv_cell_mats;
+    std::vector< VectorQ1Vec< ScalarType > > vanka_corrs;
+    Kokkos::Timer timer_smoother_setup;
+
+    for ( size_t level = 0; level < num_levels; ++level )
+    {
+        // Compute inverse diagonal (needed for omega estimation and Jacobi).
+        inv_diags.emplace_back( "inv_diag_" + std::to_string( level ), domains[level], mask_data[level] );
+        {
+            VectorQ1Vec< ScalarType > ones( "ones", domains[level], mask_data[level] );
+            linalg::assign( ones, 1.0 );
+
+            if ( level == velocity_level )
+            {
+                K.block_11().set_diagonal( true );
+                linalg::apply( K.block_11(), ones, inv_diags.back() );
+                K.block_11().set_diagonal( false );
+            }
+            else
+            {
+                A_c[level].set_diagonal( true );
+                linalg::apply( A_c[level], ones, inv_diags.back() );
+                A_c[level].set_diagonal( false );
+            }
+            linalg::invert_entries( inv_diags.back() );
+        }
+
+        VectorQ1Vec< ScalarType > tmp0( "tmp0", domains[level], mask_data[level] );
+        VectorQ1Vec< ScalarType > tmp1( "tmp1", domains[level], mask_data[level] );
+        smoother_tmps.emplace_back( "smoother_tmp_" + std::to_string( level ), domains[level], mask_data[level] );
+
+        if ( level == velocity_level )
+        {
+            // Finest level: Chebyshev-Jacobi.
+            DiagonallyScaledOperator< Viscous > dA( K.block_11(), inv_diags.back() );
+            double max_ev = power_iteration< DiagonallyScaledOperator< Viscous > >( dA, tmp0, tmp1, 100 );
+            const double omega = 2.0 / ( 1.1 * max_ev );
+            const double lambda_max = omega * max_ev;
+
+            std::cout << "  Hybrid level " << level << " (Jacobi): rho(D^{-1}A) = " << max_ev
+                      << ", omega = " << omega << ", chebyshev lambda_max=" << lambda_max << std::endl;
+
+            smoothers.emplace_back( typename HybridSmoother::JacobiType(
+                inv_diags.back(), jacobi_steps, smoother_tmps.back(), omega, lambda_max ) );
+        }
+        else
+        {
+            // Coarser levels: Chebyshev-Vanka.
+            if ( level == velocity_level )
+            {
+                inv_cell_mats.push_back(
+                    linalg::solvers::compute_cell_vanka_matrices< Viscous, 3 >( K.block_11(), domains[level] ) );
+            }
+            else
+            {
+                inv_cell_mats.push_back(
+                    linalg::solvers::compute_cell_vanka_matrices< Viscous, 3 >( A_c[level], domains[level] ) );
+            }
+            vanka_corrs.emplace_back( "vk_corr_" + std::to_string( level ), domains[level], mask_data[level] );
+
+            VectorQ1Vec< ScalarType > vk_pi_tmp( "vk_pi_tmp", domains[level], mask_data[level] );
+            VankaSmoother vanka_unit( inv_cell_mats.back(), 1, vk_pi_tmp, vanka_corrs.back(), 1.0, &domains[level] );
+
+            VectorQ1Vec< ScalarType > vk_pi_op_tmp( "vk_pi_op_tmp", domains[level], mask_data[level] );
+            using VankaOp = VankaScaledOperator< Viscous, 3 >;
+            VankaOp vanka_op( A_c[level], vanka_unit, vk_pi_op_tmp );
+            double vanka_max_ev = power_iteration< VankaOp >( vanka_op, tmp0, tmp1, 100 );
+            const double omega_vanka = 2.0 / ( 1.1 * vanka_max_ev );
+            const double lambda_max_precond = omega_vanka * vanka_max_ev;
+
+            std::cout << "  Hybrid level " << level << " (Vanka): rho(V^{-1}A) = " << vanka_max_ev
+                      << ", omega = " << omega_vanka << ", chebyshev lambda_max=" << lambda_max_precond << std::endl;
+
+            smoothers.emplace_back( typename HybridSmoother::VankaType(
+                inv_cell_mats.back(), vanka_steps, smoother_tmps.back(), vanka_corrs.back(), omega_vanka,
+                &domains[level], lambda_max_precond ) );
+        }
+    }
+
+    Kokkos::fence();
+    const double time_smoother_setup = timer_smoother_setup.seconds();
+
+    // Coarse grid solver (PCG on level 0).
+    using CoarseGridSolver = linalg::solvers::PCG< Viscous >;
+    auto                                     cg_table = std::make_shared< util::Table >();
+    std::vector< VectorQ1Vec< ScalarType > > cg_tmps;
+    for ( int i = 0; i < 4; i++ )
+    {
+        cg_tmps.emplace_back( "tmp_cg", domains[0], mask_data[0] );
+    }
+    CoarseGridSolver coarse_solver(
+        linalg::solvers::IterativeSolverParameters{ 200, 1e-10, 1e-16 }, cg_table, cg_tmps );
+
+    // Velocity MG preconditioner.
+    using PrecVisc = linalg::solvers::Multigrid< Viscous, Prolongation, Restriction, HybridSmoother, CoarseGridSolver >;
+    PrecVisc prec_11(
+        P, R, A_c, tmp_mg_r, tmp_mg_e, tmp_mg, smoothers, smoothers, coarse_solver, num_mg_cycles, 1e-10 );
+
+    // Schur complement preconditioner: lumped inverse diagonal of (1/k)-weighted pressure mass.
+    VectorQ1Scalar< ScalarType > k_inv( "k_inv", domains[pressure_level], mask_data[pressure_level] );
+    linalg::assign( k_inv, k_vecs[pressure_level] );
+    linalg::invert_entries( k_inv );
+
+    PressureMass pmass(
+        domains[pressure_level], coords_shell[pressure_level], coords_radii[pressure_level], k_inv.grid_data(), false );
+    pmass.set_lumped_diagonal( true );
+
+    VectorQ1Scalar< ScalarType > lumped_diag_pmass(
+        "lumped_diag_pmass", domains[pressure_level], mask_data[pressure_level] );
+    {
+        VectorQ1Scalar< ScalarType > ones( "ones_p", domains[pressure_level], mask_data[pressure_level] );
+        linalg::assign( ones, 1.0 );
+        linalg::apply( pmass, ones, lumped_diag_pmass );
+    }
+
+    using PrecSchur = DiagonalSolver< PressureMass >;
+    PrecSchur inv_lumped_pmass( lumped_diag_pmass );
+
+    // Block triangular preconditioner.
+    using PrecStokes = linalg::solvers::
+        BlockTriangularPreconditioner2x2< Stokes, Viscous, PressureMass, Gradient, PrecVisc, PrecSchur >;
+
+    VectorQ1IsoQ2Q1< ScalarType > triangular_prec_tmp(
+        "tri_prec_tmp",
+        domains[velocity_level],
+        domains[pressure_level],
+        mask_data[velocity_level],
+        mask_data[pressure_level] );
+
+    PrecStokes prec_stokes( K.block_11(), pmass, K.block_12(), triangular_prec_tmp, prec_11, inv_lumped_pmass );
+
+    // FGMRES outer solver.
+    std::vector< VectorQ1IsoQ2Q1< ScalarType > > tmp_fgmres;
+    for ( int i = 0; i < 2 * max_fgmres_iters + 4; ++i )
+    {
+        tmp_fgmres.emplace_back(
+            "tmp_fgmres_" + std::to_string( i ),
+            domains[velocity_level],
+            domains[pressure_level],
+            mask_data[velocity_level],
+            mask_data[pressure_level] );
+    }
+
+    linalg::solvers::FGMRESOptions< ScalarType > fgmres_options;
+    fgmres_options.restart                      = max_fgmres_iters;
+    fgmres_options.max_iterations               = max_fgmres_iters;
+    fgmres_options.relative_residual_tolerance  = 1e-10;
+    fgmres_options.absolute_residual_tolerance  = 1e-16;
+
+    auto solver_table = std::make_shared< util::Table >();
+    linalg::solvers::FGMRES< Stokes, PrecStokes > fgmres( tmp_fgmres, fgmres_options, solver_table, prec_stokes );
+
+    // Set up Stokes vectors.
+    VectorQ1IsoQ2Q1< ScalarType > u(
+        "u",
+        domains[velocity_level],
+        domains[pressure_level],
+        mask_data[velocity_level],
+        mask_data[pressure_level] );
+
+    VectorQ1IsoQ2Q1< ScalarType > f(
+        "f",
+        domains[velocity_level],
+        domains[pressure_level],
+        mask_data[velocity_level],
+        mask_data[pressure_level] );
+
+    VectorQ1IsoQ2Q1< ScalarType > tmp_bc_0(
+        "tmp_bc_0",
+        domains[velocity_level],
+        domains[pressure_level],
+        mask_data[velocity_level],
+        mask_data[pressure_level] );
+
+    VectorQ1IsoQ2Q1< ScalarType > tmp_bc_1(
+        "tmp_bc_1",
+        domains[velocity_level],
+        domains[pressure_level],
+        mask_data[velocity_level],
+        mask_data[pressure_level] );
+
+    // RHS = 0 (homogeneous), initial guess is a smooth function.
+    linalg::assign( f, 0.0 );
+
+    // Set non-trivial initial guess for velocity.
+    Kokkos::parallel_for(
+        "initial_guess_vel",
+        grid::shell::local_domain_md_range_policy_nodes( domains[velocity_level] ),
+        InitialGuessVelocityInterpolator{
+            coords_shell[velocity_level], coords_radii[velocity_level], u.block_1().grid_data() } );
+
+    // Set non-trivial initial guess for pressure.
+    Kokkos::parallel_for(
+        "initial_guess_pre",
+        grid::shell::local_domain_md_range_policy_nodes( domains[pressure_level] ),
+        InitialGuessPressureInterpolator{
+            coords_shell[pressure_level], coords_radii[pressure_level], u.block_2().grid_data() } );
+
+    // Enforce Dirichlet BCs: zero velocity on boundary.
+    linalg::assign( tmp_bc_0, 0.0 );
+    fe::strong_algebraic_velocity_dirichlet_enforcement_stokes_like(
+        K_neumann,
+        K_neumann_diag,
+        tmp_bc_0,
+        tmp_bc_1,
+        f,
+        boundary_mask_data[velocity_level],
+        grid::shell::ShellBoundaryFlag::BOUNDARY );
+
+    // Zero out velocity boundary DOFs in the initial guess.
+    const int num_shells = domains[velocity_level].domain_info().subdomain_num_nodes_radially();
+    Kokkos::parallel_for(
+        "zero_boundary_u",
+        grid::shell::local_domain_md_range_policy_nodes( domains[velocity_level] ),
+        SetOnBoundary{ tmp_bc_0.block_1().grid_data(), u.block_1().grid_data(), num_shells } );
+
+    // Solve.
+    std::cout << "\n=== FGMRES + " << label << " ===" << std::endl;
+    std::cout << "Smoother setup time: " << time_smoother_setup << "s" << std::endl;
+
+    Kokkos::Timer timer_solve;
+    linalg::solvers::solve( fgmres, K, u, f );
+    Kokkos::fence();
+    solve_time = timer_solve.seconds();
+
+    solver_table->query_rows_equals( "tag", "fgmres_solver" )
+        .select_columns( { "iteration", "absolute_residual", "relative_residual" } )
+        .print_pretty();
+
+    const int iterations =
+        static_cast< int >( solver_table->query_rows_equals( "tag", "fgmres_solver" ).rows().size() );
+
+    std::cout << "FGMRES iterations: " << iterations << ", solve time: " << solve_time << "s" << std::endl;
+
+    return iterations;
+}
+
+// ============================================================================
 // Run comparison for one viscosity profile
 // ============================================================================
 
@@ -683,19 +1086,34 @@ void run_stokes_smoother_comparison(
     const int iters_mult_vanka_1 =
         run_stokes_fgmres< MultVankaSmoother >( "Mult Vanka (1 sweep)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 1, time_mult_vanka_1 );
 
+    // Hybrid: chebJac on finest, chebVanka on coarser levels.
+    double time_hybrid_j2_v2 = 0.0, time_hybrid_j2_v3 = 0.0, time_hybrid_j3_v3 = 0.0;
+    const int iters_hybrid_j2_v2 =
+        run_stokes_fgmres_hybrid( "Hybrid chebJac(2)+chebVanka(2)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 2, 2, time_hybrid_j2_v2 );
+    const int iters_hybrid_j2_v3 =
+        run_stokes_fgmres_hybrid( "Hybrid chebJac(2)+chebVanka(3)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 2, 3, time_hybrid_j2_v3 );
+    const int iters_hybrid_j3_v3 =
+        run_stokes_fgmres_hybrid( "Hybrid chebJac(3)+chebVanka(3)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 3, 3, time_hybrid_j3_v3 );
+
     std::cout << "\n--- Summary: " << label << " ---" << std::endl;
     std::cout << "FGMRES iterations:  point=" << iters_point << "  block=" << iters_block
               << "  vanka(3)=" << iters_vanka_3 << "  vanka(6)=" << iters_vanka_6
               << "  chebJac(3)=" << iters_cheb_jac_3 << "  chebJac(2)=" << iters_cheb_jac_2
               << "  chebVanka(3)=" << iters_cheb_vanka_3 << "  chebVanka(2)=" << iters_cheb_vanka_2
               << "  chebVanka(1)=" << iters_cheb_vanka_1
-              << "  multV(1)=" << iters_mult_vanka_1 << std::endl;
+              << "  multV(1)=" << iters_mult_vanka_1
+              << "  hybrid(j2v2)=" << iters_hybrid_j2_v2
+              << "  hybrid(j2v3)=" << iters_hybrid_j2_v3
+              << "  hybrid(j3v3)=" << iters_hybrid_j3_v3 << std::endl;
     std::cout << "Solve time:  point=" << time_point << "s  block=" << time_block
               << "s  vanka(3)=" << time_vanka_3 << "s  vanka(6)=" << time_vanka_6
               << "s  chebJac(3)=" << time_cheb_jac_3 << "s  chebJac(2)=" << time_cheb_jac_2
               << "s  chebVanka(3)=" << time_cheb_vanka_3 << "s  chebVanka(2)=" << time_cheb_vanka_2
               << "s  chebVanka(1)=" << time_cheb_vanka_1
-              << "s  multV(1)=" << time_mult_vanka_1 << "s" << std::endl;
+              << "s  multV(1)=" << time_mult_vanka_1
+              << "s  hybrid(j2v2)=" << time_hybrid_j2_v2
+              << "s  hybrid(j2v3)=" << time_hybrid_j2_v3
+              << "s  hybrid(j3v3)=" << time_hybrid_j3_v3 << "s" << std::endl;
 }
 
 // ============================================================================
