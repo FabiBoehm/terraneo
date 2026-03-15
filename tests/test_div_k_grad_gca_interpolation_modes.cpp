@@ -865,11 +865,11 @@ std::pair< int, T > run_multigrid_solve(
     }
 
     // Solve.
-    linalg::solvers::IterativeSolverParameters solver_params{ 200, 1e-7, 1e-7 };
+    linalg::solvers::IterativeSolverParameters solver_params{ 1000, 1e-8, 1e-8 };
     CoarseGridSolver coarse_grid_solver( solver_params, table, coarse_grid_tmps );
 
     linalg::solvers::Multigrid< DivKGrad, Prolongation, Restriction, Smoother, CoarseGridSolver > multigrid_solver(
-        P_additive, R, A_c, tmp_r_c, tmp_e_c, tmp, smoothers, smoothers, coarse_grid_solver, 200, 1e-6 );
+        P_additive, R, A_c, tmp_r_c, tmp_e_c, tmp, smoothers, smoothers, coarse_grid_solver, 100, 1e-6 );
     multigrid_solver.collect_statistics( table );
 
     Kokkos::fence();
@@ -965,6 +965,10 @@ std::string interp_mode_name( InterpolationMode mode )
         return "Linear";
     case InterpolationMode::OperatorDependent:
         return "OperatorDependent";
+    case InterpolationMode::UnknownBasedAMG:
+        return "UnknownBasedAMG";
+    case InterpolationMode::UnknownBasedAMGLateral:
+        return "UB_AMG_Lateral";
     default:
         return "Unknown";
     }
@@ -1044,7 +1048,10 @@ int run_test()
 
     std::vector< InterpolationMode > modes = {
         InterpolationMode::Constant,
+        InterpolationMode::Linear,
         InterpolationMode::OperatorDependent,
+        InterpolationMode::UnknownBasedAMG,
+        InterpolationMode::UnknownBasedAMGLateral,
     };
     std::vector< double > beta_values = { 0.0 };
 
@@ -1106,17 +1113,17 @@ int run_test()
     }
 
     std::vector< CoeffScenario > scenarios = {
-        { "Constant coefficient (k=1)", 0.0, 1.0, CoeffType::Constant, 0, 5, {}, {} },
-        { "Variable coefficient (k_max=10, alpha=1)", 1.0, 10.0, CoeffType::Tanh, 0, 5, {}, {} },
-        { "Unaligned lateral step (k_max=10)", 0.0, 10.0, CoeffType::UnalignedLateralStep, 0, 5, {}, {} },
-        { "Unaligned lateral step (k_max=100)", 0.0, 100.0, CoeffType::UnalignedLateralStep, 0, 5, {}, {} },
-        { "Unaligned lateral step (k_max=1000)", 0.0, 1000.0, CoeffType::UnalignedLateralStep, 0, 5, {}, {} },
-        { "Unaligned lateral step (k_max=1e4)", 0.0, 1e4, CoeffType::UnalignedLateralStep, 0, 5, {}, {} },
-        { "Unaligned lateral step (k_max=1e5)", 0.0, 1e5, CoeffType::UnalignedLateralStep, 0, 5, {}, {} },
-        { "Unaligned lateral step (k_max=1e6)", 0.0, 1e6, CoeffType::UnalignedLateralStep, 0, 5, {}, {} },
-        { "Lin et al. 2022 viscosity profile", 0.0, 0.0, CoeffType::RadialProfile, 0, 5,
+        { "Constant coefficient (k=1)", 0.0, 1.0, CoeffType::Constant, 0, 3, {}, {} },
+        { "Variable coefficient (k_max=10, alpha=1)", 1.0, 10.0, CoeffType::Tanh, 0, 3, {}, {} },
+        { "Unaligned lateral step (k_max=10)", 0.0, 10.0, CoeffType::UnalignedLateralStep, 0, 3, {}, {} },
+        { "Unaligned lateral step (k_max=100)", 0.0, 100.0, CoeffType::UnalignedLateralStep, 0, 3, {}, {} },
+        { "Unaligned lateral step (k_max=1000)", 0.0, 1000.0, CoeffType::UnalignedLateralStep, 0, 3, {}, {} },
+        { "Unaligned lateral step (k_max=1e4)", 0.0, 1e4, CoeffType::UnalignedLateralStep, 0, 3, {}, {} },
+        { "Unaligned lateral step (k_max=1e5)", 0.0, 1e5, CoeffType::UnalignedLateralStep, 0, 3, {}, {} },
+        { "Unaligned lateral step (k_max=1e6)", 0.0, 1e6, CoeffType::UnalignedLateralStep, 0, 3, {}, {} },
+        { "Lin et al. 2022 viscosity profile", 0.0, 0.0, CoeffType::RadialProfile, 0, 3,
           lin_radii, lin_values },
-        { "Stotz et al. 2017 viscosity profile", 0.0, 0.0, CoeffType::RadialProfile, 0, 5,
+        { "Stotz et al. 2017 viscosity profile", 0.0, 0.0, CoeffType::RadialProfile, 0, 3,
           stotz_radii, stotz_values },
     };
 
