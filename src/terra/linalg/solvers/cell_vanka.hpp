@@ -71,19 +71,23 @@ class CellVanka
     /// @param domain Optional domain pointer for inter-subdomain communication of corrections.
     ///               When provided, corrections are additively communicated across subdomain boundaries
     ///               after each Vanka sweep, ensuring consistency at shared nodes.
+    /// @param chebyshev_lambda_max Max eigenvalue of the preconditioned operator omega*M^{-1}*A.
+    ///                            Set to 0 (default) to disable Chebyshev and use standard Richardson.
     CellVanka(
         const InverseCellMatricesType& inverse_cell_matrices,
         const int                      iterations,
         const SolutionVectorType&      tmp,
         const SolutionVectorType&      correction,
         const ScalarType               omega  = static_cast< ScalarType >( 1.0 / 8.0 ),
-        const grid::shell::DistributedDomain* domain = nullptr )
+        const grid::shell::DistributedDomain* domain = nullptr,
+        const ScalarType               chebyshev_lambda_max = ScalarType( 0 ) )
     : inverse_cell_matrices_( inverse_cell_matrices )
     , iterations_( iterations )
     , tmp_( tmp )
     , correction_( correction )
     , omega_( omega )
     , domain_( domain )
+    , chebyshev_lambda_max_( chebyshev_lambda_max )
     {}
 
     /// @brief Solve the linear system using cell Vanka iteration.
@@ -98,7 +102,11 @@ class CellVanka
     /// @param b Right-hand side vector (input).
     void solve_impl( OperatorType& A, SolutionVectorType& x, const RHSVectorType& b )
     {
-        if ( domain_ )
+        if ( chebyshev_lambda_max_ > ScalarType( 0 ) )
+        {
+            solve_chebyshev( A, x, b );
+        }
+        else if ( domain_ )
         {
             // Communication path: accumulate corrections, communicate, then update x.
             for ( int iteration = 0; iteration < iterations_; ++iteration )
@@ -440,12 +448,61 @@ class CellVanka
         communication::shell::unpack_and_reduce_local_subdomain_boundaries( *domain_, corr_data, recv_buf );
     }
 
+    /// @brief Chebyshev-accelerated Vanka iteration.
+    ///
+    /// Uses the 3-term Chebyshev recurrence to optimally damp error components
+    /// in the eigenvalue range [lambda_min, lambda_max] of the preconditioned
+    /// operator M^{-1}A (where M = omega * V^{-1}).
+    ///
+    /// For k iterations, Chebyshev reduces the error by ~ ((sqrt(kappa)-1)/(sqrt(kappa)+1))^k
+    /// vs the fixed rate (1 - 2/(kappa+1))^k for standard Richardson, where kappa = lambda_max/lambda_min.
+    /// For kappa ~= 10: 2 Chebyshev steps ~= 3 standard steps.
+    ///
+    /// Algorithm:
+    ///   Step 0: x_old = x; z_0 = M^{-1}(b - Ax); x += (1/theta) * z_0
+    ///   Step k >= 1: z_k = M^{-1}(b - Ax); x_new = x + mu_k * ((2/theta)*z_k + x - x_old); x_old = x; x = x_new
+    void solve_chebyshev( OperatorType& A, SolutionVectorType& x, const RHSVectorType& b )
+    {
+        // Chebyshev polynomial smoother using the "roots form":
+        // Each step applies x += (1/t_j) * P * r, where t_j are the roots of the
+        // Chebyshev polynomial T_k on [lambda_min, lambda_max] and P = omega*M^{-1}.
+        //
+        // This is mathematically equivalent to the 3-term recurrence but simpler and
+        // less error-prone. The polynomial p(t) = prod_j (1 - t/t_j) is optimal over
+        // [lambda_min, lambda_max] in the minimax sense.
+        const int            degree           = iterations_;
+        // Use eigenvalue ratio proportional to degree squared (standard heuristic).
+        const ScalarType lambda_min_ratio = ScalarType( std::max( 3, 2 * degree * degree ) );
+        const ScalarType     lambda_max       = chebyshev_lambda_max_;
+        const ScalarType     lambda_min       = lambda_max / lambda_min_ratio;
+        const ScalarType     center           = ( lambda_max + lambda_min ) / ScalarType( 2 );
+        const ScalarType     half_width       = ( lambda_max - lambda_min ) / ScalarType( 2 );
+
+        for ( int j = 0; j < degree; ++j )
+        {
+            // Root j of T_degree mapped to [lambda_min, lambda_max]:
+            //   t_j = center + half_width * cos(pi * (2j+1) / (2*degree))
+            const ScalarType root = center + half_width * std::cos(
+                ScalarType( M_PI ) * ScalarType( 2 * j + 1 ) / ScalarType( 2 * degree ) );
+
+            apply( A, x, tmp_ );
+            zero_correction();
+            apply_cell_vanka_fused_scaled( b );
+            if ( domain_ )
+                communicate_correction();
+
+            // x += (1/t_j) * correction
+            lincomb( x, { ScalarType( 1 ), ScalarType( 1 ) / root }, { x, correction_ } );
+        }
+    }
+
     InverseCellMatricesType inverse_cell_matrices_;  ///< Inverse cell Vanka matrices.
     int                     iterations_;              ///< Number of iterations.
     SolutionVectorType      tmp_;                     ///< Temporary workspace (residual).
     SolutionVectorType      correction_;              ///< Temporary workspace (correction).
     ScalarType              omega_;                   ///< Relaxation parameter.
     const grid::shell::DistributedDomain* domain_;   ///< Optional domain for correction communication.
+    ScalarType              chebyshev_lambda_max_;    ///< Max eigenvalue of M^{-1}A (0 = disabled).
 };
 
 // ---------------------------------------------------------------------------

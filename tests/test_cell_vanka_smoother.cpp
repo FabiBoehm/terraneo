@@ -196,7 +196,8 @@ int run_stokes_fgmres(
     const int                                                                   max_fgmres_iters,
     const int                                                                   num_mg_cycles,
     const int                                                                   smoother_steps_override,
-    double&                                                                     solve_time )
+    double&                                                                     solve_time,
+    const bool                                                                  use_chebyshev = false )
 {
     using Stokes      = fe::wedge::operators::shell::EpsDivDivStokes< ScalarType >;
     using Viscous     = typename Stokes::Block11Type;
@@ -314,7 +315,6 @@ int run_stokes_fgmres(
     std::vector< InvBlockDiagType >          inv_block_diags;
     std::vector< InvCellType >               inv_cell_mats;
     std::vector< VectorQ1Vec< ScalarType > > vanka_corrs;
-
     Kokkos::Timer timer_smoother_setup;
 
     for ( size_t level = 0; level < num_levels; ++level )
@@ -411,11 +411,23 @@ int run_stokes_fgmres(
             }
             const double omega_vanka = 2.0 / ( 1.1 * vanka_max_ev );
             std::cout << "  Vanka level " << level << ": rho(V^{-1}A) = " << vanka_max_ev
-                      << ", omega = " << omega_vanka << std::endl;
+                      << ", omega = " << omega_vanka;
 
-            smoothers.emplace_back(
-                inv_cell_mats.back(), smoother_steps, smoother_tmps.back(), vanka_corrs.back(), omega_vanka,
-                &domains[level] );
+            if ( use_chebyshev )
+            {
+                const double lambda_max_precond = omega_vanka * vanka_max_ev;
+                std::cout << ", chebyshev lambda_max=" << lambda_max_precond << std::endl;
+                smoothers.emplace_back(
+                    inv_cell_mats.back(), smoother_steps, smoother_tmps.back(), vanka_corrs.back(), omega_vanka,
+                    &domains[level], lambda_max_precond );
+            }
+            else
+            {
+                std::cout << std::endl;
+                smoothers.emplace_back(
+                    inv_cell_mats.back(), smoother_steps, smoother_tmps.back(), vanka_corrs.back(), omega_vanka,
+                    &domains[level] );
+            }
         }
     }
 
@@ -604,6 +616,7 @@ void run_stokes_smoother_comparison(
     std::cout << "================================================================" << std::endl;
 
     double time_point = 0.0, time_block = 0.0, time_vanka_3 = 0.0, time_vanka_6 = 0.0;
+    double time_cheb_3 = 0.0, time_cheb_2 = 0.0;
 
     const int iters_point =
         run_stokes_fgmres< PointSmoother >( "Point Jacobi (3 steps)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 3, time_point );
@@ -617,11 +630,19 @@ void run_stokes_smoother_comparison(
     const int iters_vanka_6 =
         run_stokes_fgmres< VankaSmoother >( "Cell Vanka (6 steps)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 6, time_vanka_6 );
 
+    const int iters_cheb_3 =
+        run_stokes_fgmres< VankaSmoother >( "Chebyshev Vanka (3 steps)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 3, time_cheb_3, true );
+
+    const int iters_cheb_2 =
+        run_stokes_fgmres< VankaSmoother >( "Chebyshev Vanka (2 steps)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 2, time_cheb_2, true );
+
     std::cout << "\n--- Summary: " << label << " ---" << std::endl;
     std::cout << "FGMRES iterations:  point=" << iters_point << "  block=" << iters_block
-              << "  vanka(3)=" << iters_vanka_3 << "  vanka(6)=" << iters_vanka_6 << std::endl;
+              << "  vanka(3)=" << iters_vanka_3 << "  vanka(6)=" << iters_vanka_6
+              << "  cheb(3)=" << iters_cheb_3 << "  cheb(2)=" << iters_cheb_2 << std::endl;
     std::cout << "Solve time:  point=" << time_point << "s  block=" << time_block
-              << "s  vanka(3)=" << time_vanka_3 << "s  vanka(6)=" << time_vanka_6 << "s" << std::endl;
+              << "s  vanka(3)=" << time_vanka_3 << "s  vanka(6)=" << time_vanka_6
+              << "s  cheb(3)=" << time_cheb_3 << "s  cheb(2)=" << time_cheb_2 << "s" << std::endl;
 }
 
 // ============================================================================
