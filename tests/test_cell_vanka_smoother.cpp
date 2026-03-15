@@ -20,6 +20,7 @@
 #include "linalg/solvers/block_jacobi.hpp"
 #include "linalg/solvers/block_preconditioner_2x2.hpp"
 #include "linalg/solvers/cell_vanka.hpp"
+#include "linalg/solvers/cell_vanka_multiplicative.hpp"
 #include "linalg/solvers/fgmres.hpp"
 #include "linalg/solvers/jacobi.hpp"
 #include "linalg/solvers/multigrid.hpp"
@@ -308,8 +309,9 @@ int run_stokes_fgmres(
     std::vector< VectorQ1Vec< ScalarType > > smoother_tmps;
 
     // Extra storage for block/vanka smoother data (kept alive).
-    using BlockSmoother = linalg::solvers::BlockJacobi< Viscous, 3 >;
-    using VankaSmoother = linalg::solvers::CellVanka< Viscous, 3 >;
+    using BlockSmoother    = linalg::solvers::BlockJacobi< Viscous, 3 >;
+    using VankaSmoother    = linalg::solvers::CellVanka< Viscous, 3 >;
+    using MultVankaSmoother = linalg::solvers::CellVankaMultiplicative< Viscous, 3 >;
     using InvBlockDiagType = typename BlockSmoother::InverseBlockDiagonalType;
     using InvCellType      = typename VankaSmoother::InverseCellMatricesType;
     std::vector< InvBlockDiagType >          inv_block_diags;
@@ -438,6 +440,46 @@ int run_stokes_fgmres(
                     inv_cell_mats.back(), smoother_steps, smoother_tmps.back(), vanka_corrs.back(), omega_vanka,
                     &domains[level] );
             }
+        }
+        else if constexpr ( std::is_same_v< SmootherT, MultVankaSmoother > )
+        {
+            if ( level == velocity_level )
+            {
+                inv_cell_mats.push_back(
+                    linalg::solvers::compute_cell_vanka_matrices< Viscous, 3 >(
+                        K.block_11(), domains[level] ) );
+            }
+            else
+            {
+                inv_cell_mats.push_back(
+                    linalg::solvers::compute_cell_vanka_matrices< Viscous, 3 >(
+                        A_c[level], domains[level] ) );
+            }
+            vanka_corrs.emplace_back( "vk_corr_" + std::to_string( level ), domains[level], mask_data[level] );
+
+            // Estimate spectral radius using additive Vanka (same cell matrices).
+            VectorQ1Vec< ScalarType > mv_pi_tmp( "mv_pi_tmp", domains[level], mask_data[level] );
+            using AddVanka = linalg::solvers::CellVanka< Viscous, 3 >;
+            AddVanka vanka_unit_mv( inv_cell_mats.back(), 1, mv_pi_tmp, vanka_corrs.back(), 1.0, &domains[level] );
+
+            VectorQ1Vec< ScalarType > mv_pi_op_tmp( "mv_pi_op_tmp", domains[level], mask_data[level] );
+            using VankaOpMV = VankaScaledOperator< Viscous, 3 >;
+            double mv_max_ev = 0.0;
+            if ( level == velocity_level )
+            {
+                VankaOpMV vanka_op( K.block_11(), vanka_unit_mv, mv_pi_op_tmp );
+                mv_max_ev = power_iteration< VankaOpMV >( vanka_op, tmp0, tmp1, 100 );
+            }
+            else
+            {
+                VankaOpMV vanka_op( A_c[level], vanka_unit_mv, mv_pi_op_tmp );
+                mv_max_ev = power_iteration< VankaOpMV >( vanka_op, tmp0, tmp1, 100 );
+            }
+            const double omega_mult = 2.0 / ( 1.1 * mv_max_ev );
+            std::cout << "  Mult Vanka level " << level << ": rho(V^{-1}A) = " << mv_max_ev
+                      << ", omega = " << omega_mult << std::endl;
+            smoothers.emplace_back(
+                inv_cell_mats.back(), smoother_steps, smoother_tmps.back(), vanka_corrs.back(), omega_mult, &domains[level] );
         }
     }
 
@@ -617,9 +659,10 @@ void run_stokes_smoother_comparison(
     using Stokes  = fe::wedge::operators::shell::EpsDivDivStokes< ScalarType >;
     using Viscous = typename Stokes::Block11Type;
 
-    using PointSmoother = linalg::solvers::Jacobi< Viscous >;
-    using BlockSmoother = linalg::solvers::BlockJacobi< Viscous, 3 >;
-    using VankaSmoother = linalg::solvers::CellVanka< Viscous, 3 >;
+    using PointSmoother    = linalg::solvers::Jacobi< Viscous >;
+    using BlockSmoother    = linalg::solvers::BlockJacobi< Viscous, 3 >;
+    using VankaSmoother    = linalg::solvers::CellVanka< Viscous, 3 >;
+    using MultVankaSmoother = linalg::solvers::CellVankaMultiplicative< Viscous, 3 >;
 
     std::cout << "\n================================================================" << std::endl;
     std::cout << "  Stokes smoother comparison: " << label << std::endl;
@@ -628,6 +671,7 @@ void run_stokes_smoother_comparison(
     double time_point = 0.0, time_block = 0.0, time_vanka_3 = 0.0, time_vanka_6 = 0.0;
     double time_cheb_vanka_3 = 0.0, time_cheb_vanka_2 = 0.0;
     double time_cheb_jac_3 = 0.0, time_cheb_jac_2 = 0.0;
+    double time_mult_vanka_1 = 0.0, time_mult_vanka_2 = 0.0;
 
     const int iters_point =
         run_stokes_fgmres< PointSmoother >( "Point Jacobi (3 steps)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 3, time_point );
@@ -653,15 +697,23 @@ void run_stokes_smoother_comparison(
     const int iters_cheb_vanka_2 =
         run_stokes_fgmres< VankaSmoother >( "Cheb Vanka (2 steps)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 2, time_cheb_vanka_2, true );
 
+    const int iters_mult_vanka_1 =
+        run_stokes_fgmres< MultVankaSmoother >( "Mult Vanka (1 sweep)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 1, time_mult_vanka_1 );
+
+    const int iters_mult_vanka_2 =
+        run_stokes_fgmres< MultVankaSmoother >( "Mult Vanka (2 sweeps)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 2, time_mult_vanka_2 );
+
     std::cout << "\n--- Summary: " << label << " ---" << std::endl;
     std::cout << "FGMRES iterations:  point=" << iters_point << "  block=" << iters_block
               << "  vanka(3)=" << iters_vanka_3 << "  vanka(6)=" << iters_vanka_6
               << "  chebJac(3)=" << iters_cheb_jac_3 << "  chebJac(2)=" << iters_cheb_jac_2
-              << "  chebVanka(3)=" << iters_cheb_vanka_3 << "  chebVanka(2)=" << iters_cheb_vanka_2 << std::endl;
+              << "  chebVanka(3)=" << iters_cheb_vanka_3 << "  chebVanka(2)=" << iters_cheb_vanka_2
+              << "  multV(1)=" << iters_mult_vanka_1 << "  multV(2)=" << iters_mult_vanka_2 << std::endl;
     std::cout << "Solve time:  point=" << time_point << "s  block=" << time_block
               << "s  vanka(3)=" << time_vanka_3 << "s  vanka(6)=" << time_vanka_6
               << "s  chebJac(3)=" << time_cheb_jac_3 << "s  chebJac(2)=" << time_cheb_jac_2
-              << "s  chebVanka(3)=" << time_cheb_vanka_3 << "s  chebVanka(2)=" << time_cheb_vanka_2 << "s" << std::endl;
+              << "s  chebVanka(3)=" << time_cheb_vanka_3 << "s  chebVanka(2)=" << time_cheb_vanka_2
+              << "s  multV(1)=" << time_mult_vanka_1 << "s  multV(2)=" << time_mult_vanka_2 << "s" << std::endl;
 }
 
 // ============================================================================
