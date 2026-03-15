@@ -1,5 +1,7 @@
 #pragma once
 
+#include <limits>
+
 #include "eigen/eigen_wrapper.hpp"
 #include "identity_solver.hpp"
 #include "terra/linalg/operator.hpp"
@@ -180,6 +182,8 @@ class FGMRES
                 apply( A, zj, w );
 
                 // Modified Gram-Schmidt orthogonalization against V_0..V_j
+                // with re-orthogonalization ("twice is enough" strategy, Kahan)
+                // to maintain orthogonality for ill-conditioned systems.
                 for ( int i = 0; i <= j; ++i )
                 {
                     auto&            vi  = tmp_[offV + i];
@@ -188,11 +192,26 @@ class FGMRES
                     lincomb( w, { 1.0, -hij }, { w, vi } );
                 }
 
+                // Second orthogonalization pass for numerical stability.
+                for ( int i = 0; i <= j; ++i )
+                {
+                    auto&            vi   = tmp_[offV + i];
+                    const ScalarType corr = dot( w, vi );
+                    H( i, j ) += corr;
+                    lincomb( w, { 1.0, -corr }, { w, vi } );
+                }
+
                 // Compute h_{j+1,j} and normalize to get v_{j+1}
                 const ScalarType h_jp1j = std::sqrt( dot( w, w ) );
                 H( j + 1, j )           = h_jp1j;
 
-                if ( h_jp1j > ScalarType( 0 ) )
+                // Lucky breakdown: Krylov subspace contains the exact solution.
+                if ( h_jp1j <= std::numeric_limits< ScalarType >::epsilon() * beta0 )
+                {
+                    inner_its = j + 1;
+                    break;
+                }
+
                 {
                     auto& vjp1 = tmp_[offV + j + 1];
                     lincomb( vjp1, { 1.0 / h_jp1j }, { w } );
@@ -239,7 +258,9 @@ class FGMRES
                 inner_its = j + 1;
 
                 // Check for convergence
-                if ( rel_res <= options_.relative_residual_tolerance || abs_res < options_.absolute_residual_tolerance )
+                bool converged =
+                    rel_res <= options_.relative_residual_tolerance || abs_res <= options_.absolute_residual_tolerance;
+                if ( converged )
                 {
                     break;
                 }
@@ -257,21 +278,39 @@ class FGMRES
             }
 
             // Update solution: x += sum_{i=0}^{inner_its-1} y_i * z_i
-            auto& acc = tmp_[idxAcc];
-            assign( acc, 0 );
-            for ( int i = 0; i < inner_its; ++i )
+            // Batched into a single lincomb call to reduce kernel launch overhead.
             {
-                auto& zi = tmp_[offZ + i];
-                lincomb( acc, { 1.0, y( i ) }, { acc, zi } );
+                std::vector< ScalarType >          coeffs( inner_its );
+                std::vector< SolutionVectorType >   z_vecs( inner_its );
+                for ( int i = 0; i < inner_its; ++i )
+                {
+                    coeffs[i] = y( i );
+                    z_vecs[i] = tmp_[offZ + i];
+                }
+                auto& acc = tmp_[idxAcc];
+                lincomb( acc, coeffs, z_vecs );
+                lincomb( x, { 1.0, 1.0 }, { x, acc } );
             }
-            lincomb( x, { 1.0, 1.0 }, { x, acc } );
+
+            // Check if the inner loop converged. If so, the least-squares residual
+            // estimate is reliable and we can skip the expensive residual recomputation.
+            {
+                const ScalarType abs_res = std::abs( g( inner_its ) );
+                const ScalarType rel_res = abs_res / initial_residual;
+
+                if ( rel_res <= options_.relative_residual_tolerance ||
+                     abs_res <= options_.absolute_residual_tolerance )
+                {
+                    return;
+                }
+            }
 
             // Recompute residual r = b - A*x for next restart
             apply( A, x, r );
             lincomb( r, { 1.0, -1.0 }, { b, r } );
             beta0 = std::sqrt( dot( r, r ) );
 
-            // Check for final convergence
+            // Check for convergence with true residual
             if ( beta0 <= options_.absolute_residual_tolerance ||
                  beta0 / initial_residual <= options_.relative_residual_tolerance )
             {
