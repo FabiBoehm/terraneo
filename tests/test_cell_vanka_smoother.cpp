@@ -360,7 +360,17 @@ int run_stokes_fgmres(
 
         if constexpr ( std::is_same_v< SmootherT, linalg::solvers::Jacobi< Viscous > > )
         {
-            smoothers.emplace_back( inv_diags.back(), smoother_steps, smoother_tmps.back(), omega );
+            if ( use_chebyshev )
+            {
+                const double lambda_max_precond = omega * max_ev;
+                std::cout << "  Jacobi level " << level << ": rho(D^{-1}A) = " << max_ev
+                          << ", omega = " << omega << ", chebyshev lambda_max=" << lambda_max_precond << std::endl;
+                smoothers.emplace_back( inv_diags.back(), smoother_steps, smoother_tmps.back(), omega, lambda_max_precond );
+            }
+            else
+            {
+                smoothers.emplace_back( inv_diags.back(), smoother_steps, smoother_tmps.back(), omega );
+            }
         }
         else if constexpr ( std::is_same_v< SmootherT, BlockSmoother > )
         {
@@ -616,7 +626,8 @@ void run_stokes_smoother_comparison(
     std::cout << "================================================================" << std::endl;
 
     double time_point = 0.0, time_block = 0.0, time_vanka_3 = 0.0, time_vanka_6 = 0.0;
-    double time_cheb_3 = 0.0, time_cheb_2 = 0.0;
+    double time_cheb_vanka_3 = 0.0, time_cheb_vanka_2 = 0.0;
+    double time_cheb_jac_3 = 0.0, time_cheb_jac_2 = 0.0;
 
     const int iters_point =
         run_stokes_fgmres< PointSmoother >( "Point Jacobi (3 steps)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 3, time_point );
@@ -630,19 +641,27 @@ void run_stokes_smoother_comparison(
     const int iters_vanka_6 =
         run_stokes_fgmres< VankaSmoother >( "Cell Vanka (6 steps)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 6, time_vanka_6 );
 
-    const int iters_cheb_3 =
-        run_stokes_fgmres< VankaSmoother >( "Chebyshev Vanka (3 steps)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 3, time_cheb_3, true );
+    const int iters_cheb_jac_3 =
+        run_stokes_fgmres< PointSmoother >( "Cheb Jacobi (3 steps)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 3, time_cheb_jac_3, true );
 
-    const int iters_cheb_2 =
-        run_stokes_fgmres< VankaSmoother >( "Chebyshev Vanka (2 steps)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 2, time_cheb_2, true );
+    const int iters_cheb_jac_2 =
+        run_stokes_fgmres< PointSmoother >( "Cheb Jacobi (2 steps)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 2, time_cheb_jac_2, true );
+
+    const int iters_cheb_vanka_3 =
+        run_stokes_fgmres< VankaSmoother >( "Cheb Vanka (3 steps)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 3, time_cheb_vanka_3, true );
+
+    const int iters_cheb_vanka_2 =
+        run_stokes_fgmres< VankaSmoother >( "Cheb Vanka (2 steps)", min_level, max_level, k_setup, max_fgmres_iters, num_mg_cycles, 2, time_cheb_vanka_2, true );
 
     std::cout << "\n--- Summary: " << label << " ---" << std::endl;
     std::cout << "FGMRES iterations:  point=" << iters_point << "  block=" << iters_block
               << "  vanka(3)=" << iters_vanka_3 << "  vanka(6)=" << iters_vanka_6
-              << "  cheb(3)=" << iters_cheb_3 << "  cheb(2)=" << iters_cheb_2 << std::endl;
+              << "  chebJac(3)=" << iters_cheb_jac_3 << "  chebJac(2)=" << iters_cheb_jac_2
+              << "  chebVanka(3)=" << iters_cheb_vanka_3 << "  chebVanka(2)=" << iters_cheb_vanka_2 << std::endl;
     std::cout << "Solve time:  point=" << time_point << "s  block=" << time_block
               << "s  vanka(3)=" << time_vanka_3 << "s  vanka(6)=" << time_vanka_6
-              << "s  cheb(3)=" << time_cheb_3 << "s  cheb(2)=" << time_cheb_2 << "s" << std::endl;
+              << "s  chebJac(3)=" << time_cheb_jac_3 << "s  chebJac(2)=" << time_cheb_jac_2
+              << "s  chebVanka(3)=" << time_cheb_vanka_3 << "s  chebVanka(2)=" << time_cheb_vanka_2 << "s" << std::endl;
 }
 
 // ============================================================================
@@ -655,7 +674,7 @@ int main( int argc, char** argv )
 
     const int min_level        = 1;
     const int max_level        = 3;
-    const int max_fgmres_iters = 100;
+    const int max_fgmres_iters = 150;
     const int num_mg_cycles    = 2;
 
     std::cout << "\n################################################################" << std::endl;

@@ -2,6 +2,8 @@
 
 #include "solver.hpp"
 
+#include <cmath>
+
 namespace terra::linalg::solvers {
 
 /// @brief Jacobi iterative solver for linear systems.
@@ -11,6 +13,10 @@ namespace terra::linalg::solvers {
 /// The update rule is:
 /// \f[ x^{(k+1)} = x^{(k)} + \omega D^{-1} (b - Ax^{(k)}) \f]
 /// where \f$ D \f$ is the diagonal of \f$ A \f$ and \f$ \omega \f$ is the relaxation parameter.
+///
+/// When chebyshev_lambda_max > 0, uses Chebyshev polynomial acceleration (roots form):
+/// each step applies x += (omega/t_j) * D^{-1}(b - Ax) where t_j are roots of the
+/// Chebyshev polynomial on [lambda_min, lambda_max].
 /// @tparam OperatorT Operator type (must satisfy OperatorLike).
 template < OperatorLike OperatorT >
 class Jacobi
@@ -31,15 +37,18 @@ class Jacobi
     /// @param iterations Number of Jacobi iterations to perform.
     /// @param tmp Temporary vector for workspace.
     /// @param omega Relaxation parameter (default 1.0).
+    /// @param chebyshev_lambda_max Max eigenvalue of omega*D^{-1}*A (0 = disabled).
     Jacobi(
         const SolutionVectorType& inverse_diagonal,
         const int                 iterations,
         const SolutionVectorType& tmp,
-        const ScalarType          omega = 1.0 )
+        const ScalarType          omega                = 1.0,
+        const ScalarType          chebyshev_lambda_max = ScalarType( 0 ) )
     : inverse_diagonal_( inverse_diagonal )
     , iterations_( iterations )
     , tmp_( tmp )
     , omega_( omega )
+    , chebyshev_lambda_max_( chebyshev_lambda_max )
     {}
 
     /// @brief Solve the linear system using Jacobi iteration.
@@ -49,24 +58,54 @@ class Jacobi
     /// @param b Right-hand side vector (input).
     void solve_impl( OperatorType& A, SolutionVectorType& x, const RHSVectorType& b )
     {
-        for ( int iteration = 0; iteration < iterations_; ++iteration )
+        if ( chebyshev_lambda_max_ > ScalarType( 0 ) )
         {
-            apply( A, x, tmp_ );
-            lincomb( tmp_, { 1.0, -1.0 }, { b, tmp_ } );
-            scale_in_place( tmp_, inverse_diagonal_ );
-            lincomb( x, { 1.0, omega_ }, { x, tmp_ } );
+            solve_chebyshev( A, x, b );
+        }
+        else
+        {
+            for ( int iteration = 0; iteration < iterations_; ++iteration )
+            {
+                apply( A, x, tmp_ );
+                lincomb( tmp_, { 1.0, -1.0 }, { b, tmp_ } );
+                scale_in_place( tmp_, inverse_diagonal_ );
+                lincomb( x, { 1.0, omega_ }, { x, tmp_ } );
+            }
         }
     }
 
     SolutionVectorType& get_inverse_diagonal() {
       return inverse_diagonal_;
     }
-    
+
   private:
+    /// @brief Chebyshev polynomial smoother (roots form).
+    void solve_chebyshev( OperatorType& A, SolutionVectorType& x, const RHSVectorType& b )
+    {
+        const int        degree          = iterations_;
+        const ScalarType lambda_min_ratio = ScalarType( std::max( 3, 2 * degree * degree ) );
+        const ScalarType lambda_max       = chebyshev_lambda_max_;
+        const ScalarType lambda_min       = lambda_max / lambda_min_ratio;
+        const ScalarType center           = ( lambda_max + lambda_min ) / ScalarType( 2 );
+        const ScalarType half_width       = ( lambda_max - lambda_min ) / ScalarType( 2 );
+
+        for ( int j = 0; j < degree; ++j )
+        {
+            const ScalarType root = center + half_width * std::cos(
+                ScalarType( M_PI ) * ScalarType( 2 * j + 1 ) / ScalarType( 2 * degree ) );
+
+            apply( A, x, tmp_ );
+            lincomb( tmp_, { 1.0, -1.0 }, { b, tmp_ } );
+            scale_in_place( tmp_, inverse_diagonal_ );
+            lincomb( x, { 1.0, omega_ / root }, { x, tmp_ } );
+        }
+    }
+
     SolutionVectorType inverse_diagonal_; ///< Inverse diagonal vector.
     int                iterations_;       ///< Number of iterations.
     SolutionVectorType tmp_;              ///< Temporary workspace vector.
     ScalarType         omega_;            ///< Relaxation parameter.
+    ScalarType         chebyshev_lambda_max_; ///< Max eigenvalue of omega*D^{-1}*A (0 = disabled).
 };
 
 /// @brief Static assertion: Jacobi satisfies SolverLike concept.
