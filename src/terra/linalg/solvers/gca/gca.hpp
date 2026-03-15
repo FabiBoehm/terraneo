@@ -835,7 +835,11 @@ class TwoGridGCA
                                 }
 
                                 // Is it a 2-parent (strong F) node? (cx_even, cy_even, cr_odd)
-                                bool is_2parent = ( cx % 2 == 0 && cy % 2 == 0 && cr % 2 != 0 );
+                                // Only treat as strong F for r_odd nodes where all 4 parents are active
+                                // and the radial 2-parent neighbors' parents fully map to i's parents.
+                                // For r_even nodes (2 active lateral parents), radial 2-parent neighbors'
+                                // weights encode radial info irrelevant for lateral interpolation — lump them.
+                                bool is_2parent = !r_even && ( cx % 2 == 0 && cy % 2 == 0 && cr % 2 != 0 );
                                 if ( is_2parent )
                                 {
                                     // Check if already in strong F list.
