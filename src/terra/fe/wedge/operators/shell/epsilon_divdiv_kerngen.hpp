@@ -147,6 +147,13 @@ class EpsilonDivDivKerngen
      */
     void update_kernel_path_flag_host_only()
     {
+        // Serial backend: always use slow path (fast paths require shared memory / larger teams).
+        if constexpr ( std::is_same_v< Kokkos::DefaultExecutionSpace, Kokkos::Serial > )
+        {
+            kernel_path_ = KernelPath::Slow;
+            return;
+        }
+
         const BoundaryConditionFlag cmb_bc     = get_boundary_condition_flag( bcs_, CMB );
         const BoundaryConditionFlag surface_bc = get_boundary_condition_flag( bcs_, SURFACE );
 
@@ -199,9 +206,19 @@ class EpsilonDivDivKerngen
         hex_rad_                                   = domain_info.subdomain_num_nodes_radially() - 1;
         lat_refinement_level_                      = domain_info.diamond_lateral_refinement_level();
 
-        lat_tile_     = 4;
-        r_tile_       = 8;
-        r_passes_     = 2;
+        // On Serial backend, team_size must be 1 => use 1x1x1 tiles.
+        if constexpr ( std::is_same_v< Kokkos::DefaultExecutionSpace, Kokkos::Serial > )
+        {
+            lat_tile_     = 1;
+            r_tile_       = 1;
+            r_passes_     = 1;
+        }
+        else
+        {
+            lat_tile_     = 4;
+            r_tile_       = 8;
+            r_passes_     = 2;
+        }
         r_tile_block_ = r_tile_ * r_passes_;
 
         lat_tiles_ = ( hex_lat_ + lat_tile_ - 1 ) / lat_tile_;
