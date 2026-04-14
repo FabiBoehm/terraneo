@@ -1,0 +1,14 @@
+# Pass 1: Occupancy and wave activity
+pmc: SQ_WAVES SQ_WAVE_CYCLES SQ_BUSY_CYCLES GRBM_GUI_ACTIVE
+
+# Pass 2: VALU/SALU activity + stalls
+pmc: SQ_ACTIVE_INST_VALU SQ_INST_CYCLES_SALU SQ_WAIT_INST_ANY SQ_LDS_BANK_CONFLICT
+
+# Pass 3: Instruction mix
+pmc: SQ_INSTS_VALU SQ_INSTS_SALU SQ_INSTS_LDS SQ_INSTS_FLAT
+
+# Pass 4: L2 cache traffic
+pmc: TCC_READ_sum TCC_WRITE_sum
+
+# Pass 5: HBM traffic
+pmc: TCC_EA_RDREQ_32B_sum TCC_EA_WRREQ_sum TCC_EA_WRREQ_64B_sum
