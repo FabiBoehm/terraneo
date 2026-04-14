@@ -236,66 +236,64 @@ int main( int argc, char* argv[] )
     const int iterations = 50;
     const double scalar  = 3.14159;
 
-    // Sizes from 1 KB to 16 GB (must be divisible by 64 for 4D split)
-    std::vector< size_t > sizes_bytes;
-    for ( size_t s = 1024; s <= 16ULL * 1024 * 1024 * 1024; s *= 2 )
+    // Parse --size-kb to run a single size (useful for rocprof profiling)
+    size_t single_size_kb = 0;
+    for ( int a = 1; a < argc; ++a )
     {
-        sizes_bytes.push_back( s );
+        if ( std::string( argv[a] ) == "--size-kb" && a + 1 < argc )
+            single_size_kb = std::atol( argv[++a] );
     }
 
-    using Static  = Kokkos::Schedule< Kokkos::Static >;
-    using Dynamic = Kokkos::Schedule< Kokkos::Dynamic >;
+    std::vector< size_t > sizes_bytes;
+    if ( single_size_kb > 0 )
+    {
+        sizes_bytes.push_back( single_size_kb * 1024 );
+    }
+    else
+    {
+        for ( size_t s = 1024; s <= 16ULL * 1024 * 1024 * 1024; s *= 2 )
+            sizes_bytes.push_back( s );
+    }
 
     // Header
     std::cout << std::setw( 12 ) << "Size (MB)"
               << std::setw( 12 ) << "Raw HIP"
               << std::setw( 12 ) << "K 1D"
               << std::setw( 12 ) << "K 2D"
-              << std::setw( 12 ) << "K 2D/S"
               << std::setw( 12 ) << "K 3D"
-              << std::setw( 12 ) << "K 3D/S"
               << std::setw( 12 ) << "K 4D"
-              << std::setw( 12 ) << "K 4D/S"
               << "   (all GB/s)\n";
-    std::cout << std::string( 108, '-' ) << "\n";
+    std::cout << std::string( 72, '-' ) << "\n";
 
     // CSV header on stderr
-    std::cerr << "size_bytes,size_mb,raw_hip,kokkos_1d,kokkos_2d,kokkos_2d_static,kokkos_3d,kokkos_3d_static,kokkos_4d,kokkos_4d_static\n";
+    std::cerr << "size_bytes,size_mb,raw_hip,kokkos_1d,kokkos_2d,kokkos_3d,kokkos_4d\n";
 
     for ( size_t total_bytes : sizes_bytes )
     {
         const size_t N  = total_bytes / sizeof( double );
         double size_mb  = total_bytes / ( 1024.0 * 1024.0 );
 
-        // N must be divisible by 64 for the 4D case
         if ( N < 64 )
             continue;
 
-        auto r_raw  = bench_raw( N, warmup, iterations, scalar );
-        auto r_1d   = bench_kokkos_1d( N, warmup, iterations, scalar );
-        auto r_2d   = bench_kokkos_2d< Dynamic >( N, warmup, iterations, scalar );
-        auto r_2ds  = bench_kokkos_2d< Static >( N, warmup, iterations, scalar );
-        auto r_3d   = bench_kokkos_3d< Dynamic >( N, warmup, iterations, scalar );
-        auto r_3ds  = bench_kokkos_3d< Static >( N, warmup, iterations, scalar );
-        auto r_4d   = bench_kokkos_4d< Dynamic >( N, warmup, iterations, scalar );
-        auto r_4ds  = bench_kokkos_4d< Static >( N, warmup, iterations, scalar );
+        auto r_raw = bench_raw( N, warmup, iterations, scalar );
+        auto r_1d  = bench_kokkos_1d( N, warmup, iterations, scalar );
+        auto r_2d  = bench_kokkos_2d<>( N, warmup, iterations, scalar );
+        auto r_3d  = bench_kokkos_3d<>( N, warmup, iterations, scalar );
+        auto r_4d  = bench_kokkos_4d<>( N, warmup, iterations, scalar );
 
         std::cout << std::setw( 12 ) << std::fixed << std::setprecision( 2 ) << size_mb
                   << std::setw( 12 ) << std::fixed << std::setprecision( 1 ) << r_raw.bw_gbs
                   << std::setw( 12 ) << std::fixed << std::setprecision( 1 ) << r_1d.bw_gbs
                   << std::setw( 12 ) << std::fixed << std::setprecision( 1 ) << r_2d.bw_gbs
-                  << std::setw( 12 ) << std::fixed << std::setprecision( 1 ) << r_2ds.bw_gbs
                   << std::setw( 12 ) << std::fixed << std::setprecision( 1 ) << r_3d.bw_gbs
-                  << std::setw( 12 ) << std::fixed << std::setprecision( 1 ) << r_3ds.bw_gbs
                   << std::setw( 12 ) << std::fixed << std::setprecision( 1 ) << r_4d.bw_gbs
-                  << std::setw( 12 ) << std::fixed << std::setprecision( 1 ) << r_4ds.bw_gbs
                   << "\n";
 
         std::cerr << total_bytes << "," << size_mb << ","
                   << r_raw.bw_gbs << "," << r_1d.bw_gbs << ","
-                  << r_2d.bw_gbs << "," << r_2ds.bw_gbs << ","
-                  << r_3d.bw_gbs << "," << r_3ds.bw_gbs << ","
-                  << r_4d.bw_gbs << "," << r_4ds.bw_gbs << "\n";
+                  << r_2d.bw_gbs << "," << r_3d.bw_gbs << ","
+                  << r_4d.bw_gbs << "\n";
     }
 
     return 0;

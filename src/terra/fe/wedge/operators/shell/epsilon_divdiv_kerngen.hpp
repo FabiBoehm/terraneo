@@ -184,7 +184,10 @@ class EpsilonDivDivKerngen
         linalg::OperatorApplyMode         operator_apply_mode = linalg::OperatorApplyMode::Replace,
         linalg::OperatorCommunicationMode operator_communication_mode =
             linalg::OperatorCommunicationMode::CommunicateAdditively,
-        linalg::OperatorStoredMatrixMode operator_stored_matrix_mode = linalg::OperatorStoredMatrixMode::Off )
+        linalg::OperatorStoredMatrixMode operator_stored_matrix_mode = linalg::OperatorStoredMatrixMode::Off,
+        int lat_tile_override = 0,
+        int r_tile_override   = 0,
+        int r_passes_override = 0 )
     : domain_( domain )
     , grid_( grid )
     , radii_( radii )
@@ -239,9 +242,9 @@ class EpsilonDivDivKerngen
 #endif
         else
         {
-            lat_tile_     = 4;
-            r_tile_       = 8;
-            r_passes_     = 2;
+            lat_tile_     = lat_tile_override > 0 ? lat_tile_override : 4;
+            r_tile_       = r_tile_override   > 0 ? r_tile_override   : 8;
+            r_passes_     = r_passes_override > 0 ? r_passes_override : 2;
         }
         r_tile_block_ = r_tile_ * r_passes_;
 
@@ -563,7 +566,7 @@ class EpsilonDivDivKerngen
         }
         else
         {
-            Kokkos::TeamPolicy< Kokkos::LaunchBounds< 128, 5 > > dn_policy( blocks_, team_size_ );
+            Kokkos::TeamPolicy< Kokkos::LaunchBounds< 512, 2 > > dn_policy( blocks_, team_size_ );
             dn_policy.set_scratch_size( 0, Kokkos::PerTeam( team_shmem_size_dn( team_size_ ) ) );
             if ( diagonal_ )
             {

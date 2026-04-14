@@ -45,8 +45,15 @@ class EpsDivDivStokes
         const grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag >& mask,
         const grid::Grid4DDataScalar< ScalarType >&                     k,
         BoundaryConditions                                              bcs,
-        bool                                                            diagonal )
-    : A_( domain_fine, grid, radii, mask, k, bcs, diagonal )
+        bool                                                            diagonal,
+        int lat_tile_override = 0,
+        int r_tile_override   = 0,
+        int r_passes_override = 0 )
+    : A_( domain_fine, grid, radii, mask, k, bcs, diagonal,
+          linalg::OperatorApplyMode::Replace,
+          linalg::OperatorCommunicationMode::CommunicateAdditively,
+          linalg::OperatorStoredMatrixMode::Off,
+          lat_tile_override, r_tile_override, r_passes_override )
     , B_T_( domain_fine, domain_coarse, grid, radii, mask, bcs )
     , B_( domain_fine, domain_coarse, grid, radii, mask, bcs )
     , diagonal_( diagonal )

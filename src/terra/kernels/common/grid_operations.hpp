@@ -33,12 +33,18 @@ void set_constant( const grid::Grid3DDataScalar< ScalarType >& x, ScalarType val
 template < typename ScalarType >
 void set_constant( const grid::Grid4DDataScalar< ScalarType >& x, ScalarType value )
 {
-    Kokkos::parallel_for(
-        "set_constant (Grid4DDataScalar)",
-        Kokkos::MDRangePolicy( { 0, 0, 0, 0 }, { x.extent( 0 ), x.extent( 1 ), x.extent( 2 ), x.extent( 3 ) } ),
-        KOKKOS_LAMBDA( int subdomain, int i, int j, int k ) { x( subdomain, i, j, k ) = value; } );
-
-    Kokkos::fence();
+    if ( value == ScalarType( 0 ) )
+    {
+        Kokkos::deep_copy( x, ScalarType( 0 ) );
+    }
+    else
+    {
+        Kokkos::parallel_for(
+            "set_constant (Grid4DDataScalar)",
+            Kokkos::MDRangePolicy( { 0, 0, 0, 0 }, { x.extent( 0 ), x.extent( 1 ), x.extent( 2 ), x.extent( 3 ) } ),
+            KOKKOS_LAMBDA( int subdomain, int i, int j, int k ) { x( subdomain, i, j, k ) = value; } );
+        Kokkos::fence();
+    }
 }
 
 template < typename ScalarType, int VecDim >
