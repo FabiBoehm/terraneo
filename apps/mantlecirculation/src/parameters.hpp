@@ -351,9 +351,10 @@ inline void nondimensionalise( Parameters& prm )
 
     // --- Domain ---
 
-    // radius_max is unchanged from default, always 1.0 per construction
-    mesh.radius_min         = mesh.radius_cmb_m / mesh.radius_surface_m;
+    // Nondimensionalise radii with mantle thickness -- rescale to unit sphere for output
     mesh.mantle_thickness_m = mesh.radius_surface_m - mesh.radius_cmb_m;
+    mesh.radius_max         = mesh.radius_surface_m / mesh.mantle_thickness_m;
+    mesh.radius_min         = mesh.radius_cmb_m / mesh.mantle_thickness_m;
 
     // --- Boundary conditions ---
 
@@ -370,6 +371,7 @@ inline void nondimensionalise( Parameters& prm )
     phys.calc_cm_per_year = phys.characteristic_velocity * 60 * 60 * 24 * 365 * 100; // Velocity in cm/a
 
     phys.calc_time_Ma = mesh.mantle_thickness_m / ( phys.calc_cm_per_year * 1e4 ); // Time in Ma
+
     // Acount for plate velocity scaling
     if ( boundary.plate_parameters.apply_plate_velocities )
     {
@@ -377,7 +379,7 @@ inline void nondimensionalise( Parameters& prm )
     }
 
     // Nondimensionalise time
-    time.t_end = time.t_end_Ma / phys.calc_time_Ma;
+    time.t_end  = time.t_end_Ma / phys.calc_time_Ma;
     time.dt_max = time.dt_max_Ma / phys.calc_time_Ma;
     time.dt_min = time.dt_min_Ma / phys.calc_time_Ma;
 
@@ -659,7 +661,7 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
         ->group( "Time Discretization" )
         ->description( "Maximum/minimum time step size in Ma" );
     add_option_with_default( app, "--dt-min", parameters.time_stepping_parameters.dt_min_Ma )
-        ->group( "Time Discretization" )
+        ->group( "Time Discretization" );
     add_option_with_default( app, "--max-timesteps", parameters.time_stepping_parameters.max_timesteps )
         ->group( "Time Discretization" )
         ->description(
