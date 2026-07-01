@@ -12,6 +12,7 @@
 #include "communication/shell/redistribute.hpp"
 #include "fe/strong_algebraic_dirichlet_enforcement.hpp"
 #include "fe/strong_algebraic_freeslip_enforcement.hpp"
+#include "fe/wedge/linearforms/shell/inv_rho_grad_rho_dot_u.hpp"
 #include "fe/wedge/operators/shell/epsilon_divdiv_stokes.hpp"
 #include "fe/wedge/operators/shell/kmass.hpp"
 #include "fe/wedge/operators/shell/prolongation_constant.hpp"
@@ -141,17 +142,19 @@ class MGAgglomeration
 template < typename ScalarType >
 class StokesContext
 {
-    using Stokes           = fe::wedge::operators::shell::EpsDivDivStokes< ScalarType >;
-    using Viscous          = typename Stokes::Block11Type;
-    using Gradient         = typename Stokes::Block12Type;
-    using ViscousMass      = fe::wedge::operators::shell::VectorMass< ScalarType >;
-    using Prolongation     = fe::wedge::operators::shell::ProlongationVecConstant< ScalarType >;
-    using Restriction      = fe::wedge::operators::shell::RestrictionVecConstant< ScalarType >;
-    using PressureMass     = fe::wedge::operators::shell::KMass< ScalarType >;
-    using Smoother         = linalg::solvers::Chebyshev< Viscous >;
-    using CoarseGridSolver = linalg::solvers::PCG< Viscous >;
-    using VelGridData      = grid::Grid4DDataVec< ScalarType, 3 >;
-    using Redistribute     = communication::shell::Redistribute< VelGridData >;
+    using Stokes            = fe::wedge::operators::shell::EpsDivDivStokes< ScalarType >;
+    using Viscous           = typename Stokes::Block11Type;
+    using Gradient          = typename Stokes::Block12Type;
+    using ViscousMass       = fe::wedge::operators::shell::VectorMass< ScalarType >;
+    using Prolongation      = fe::wedge::operators::shell::ProlongationVecConstant< ScalarType >;
+    using Restriction       = fe::wedge::operators::shell::RestrictionVecConstant< ScalarType >;
+    using RestrictionScalar = fe::wedge::operators::shell::RestrictionConstant< ScalarType >;
+    using PressureMass      = fe::wedge::operators::shell::KMass< ScalarType >;
+    using TALARHS           = fe::wedge::linearforms::shell::InvRhoGradRhoDotU< ScalarType >;
+    using Smoother          = linalg::solvers::Chebyshev< Viscous >;
+    using CoarseGridSolver  = linalg::solvers::PCG< Viscous >;
+    using VelGridData       = grid::Grid4DDataVec< ScalarType, 3 >;
+    using Redistribute      = communication::shell::Redistribute< VelGridData >;
     using PrecVisc =
         linalg::solvers::Multigrid< Viscous, Prolongation, Restriction, Smoother, CoarseGridSolver, Redistribute >;
     using PrecSchur  = linalg::solvers::DiagonalSolver< PressureMass >;
@@ -199,7 +202,7 @@ class StokesContext
             kernels::common::count_masked< long >( ownership_mask_[pressure_level_], grid::NodeOwnershipFlag::OWNED );
 
         // ---------------- Stokes block vectors ----------------
-        std::vector< std::string > stok_vec_names = { "u", "f", "tmp" };
+        std::vector< std::string > stok_vec_names = { "u", "f", "tmp", "u_prev" };
         for ( const auto& name : stok_vec_names )
         {
             stok_vecs_[name] = VectorQ1IsoQ2Q1< ScalarType >(
@@ -209,6 +212,24 @@ class StokesContext
                 ownership_mask_[velocity_level_],
                 ownership_mask_[pressure_level_] );
         }
+
+        // ---------------- Density ------------------
+        // Initialise and fill density -- time-independent for now (either constant or background profile )
+        rho_ =
+            linalg::VectorQ1Scalar< ScalarType >( "rho", *domains_[velocity_level_], ownership_mask_[velocity_level_] );
+
+        Kokkos::parallel_for(
+            "density_init",
+            grid::shell::local_domain_md_range_policy_nodes( *domains_[velocity_level_] ),
+            DensityInit{
+                rho_.grid_data(),
+                coords_radii_[velocity_level_],
+                prm_.mesh_parameters.radius_max,
+                prm_.physics_parameters.surface_density_nondim,
+                prm_.physics_parameters.dissipation_number,
+                prm_.physics_parameters.grueneisen_parameter,
+                prm_.physics_parameters.compressible } );
+        Kokkos::fence();
 
         // ---------------- Viscosity ----------------
         // Radial profile (constant or CSV-driven), then projected into Q1 on every level.
@@ -587,12 +608,18 @@ class StokesContext
             table_,
             *prec_stokes_ );
         stokes_fgmres_->set_tag( "stokes_fgmres" );
+
+        // Helper objects for TALA rhs grid transfer
+        R_scalar_ = std::make_unique< RestrictionScalar >( *domains_[pressure_level_], linalg::OperatorApplyMode::Add );
+        tala_rhs_tmp_ = linalg::VectorQ1Scalar< ScalarType >(
+            "tala_rhs_tmp", *domains_[velocity_level_], ownership_mask_[velocity_level_] );
     }
 
     // Public accessors needed by the rest of the app.
 
     linalg::VectorQ1IsoQ2Q1< ScalarType >& solution() { return stok_vecs_["u"]; }
     linalg::VectorQ1Scalar< ScalarType >&  eta_fine() { return eta_[velocity_level_]; }
+    linalg::VectorQ1Scalar< ScalarType >&  density() { return rho_; }
     long                                   num_dofs_pressure() const { return num_dofs_pressure_; }
     const grid::shell::BoundaryConditions& boundary_conditions() const { return bcs_; }
 
@@ -621,7 +648,7 @@ class StokesContext
     /// preconditioner.  When `log_convergence` is true, the per-step Stokes
     /// and coarse-grid PCG tables are printed; in either case the table is
     /// cleared at the end of the call.
-    void solve( const linalg::VectorQ1Scalar< ScalarType >& T_for_buoyancy, bool log_convergence )
+    void solve( const linalg::VectorQ1Scalar< ScalarType >& T_for_buoyancy, bool compressible, bool log_convergence )
     {
         util::Timer timer_stokes( "stokes" );
 
@@ -650,6 +677,21 @@ class StokesContext
             boundary_mask_[velocity_level_],
             grid::shell::get_shell_boundary_flag( bcs_, grid::shell::BoundaryConditionFlag::FREESLIP ) );
 
+        // Apply TALA RHS if needed...
+        if ( compressible )
+        {
+            TALARHS tala_rhs(
+                *domains_[velocity_level_],
+                coords_shell_[velocity_level_],
+                coords_radii_[velocity_level_],
+                rho_,
+                stok_vecs_["u_prev"].block_1() );
+            linalg::apply( tala_rhs, tala_rhs_tmp_ );
+
+            // Restrict from velocity level to pressure level
+            linalg::apply( *R_scalar_, tala_rhs_tmp_, stok_vecs_["f"].block_2() );
+        }
+
         util::logroot << "Solving Stokes ..." << std::endl;
 
         ::terra::linalg::solvers::solve( *stokes_fgmres_, *K_, stok_vecs_["u"], stok_vecs_["f"] );
@@ -667,6 +709,9 @@ class StokesContext
             kernels::common::masked_sum( p.grid_data(), p.mask_data(), grid::NodeOwnershipFlag::OWNED ) /
             static_cast< ScalarType >( num_dofs_pressure_ );
         linalg::lincomb( p, { 1.0 }, { p }, -avg_pressure_approximation );
+
+        // Store u_prev for the next timestep
+        linalg::assign( stok_vecs_["u_prev"], stok_vecs_["u"] );
     }
 
   private:
@@ -692,9 +737,11 @@ class StokesContext
     // destroyed later, so things that other members hold by-reference (eta_,
     // stok_vecs_, *_tmp_*) must come first.
     std::vector< linalg::VectorQ1Scalar< ScalarType > >            eta_;
+    linalg::VectorQ1Scalar< ScalarType >                           rho_;
     linalg::VectorQ1Scalar< ScalarType >                           GCAElements_;
     std::map< std::string, linalg::VectorQ1IsoQ2Q1< ScalarType > > stok_vecs_;
     std::vector< linalg::VectorQ1IsoQ2Q1< ScalarType > >           stokes_tmp_fgmres_;
+    linalg::VectorQ1Scalar< ScalarType >                           tala_rhs_tmp_;
     std::vector< linalg::VectorQ1Vec< ScalarType > >               tmp_mg_;
     std::vector< linalg::VectorQ1Vec< ScalarType > >               tmp_mg_2_;
     std::vector< linalg::VectorQ1Vec< ScalarType > >               tmp_mg_r_;
@@ -704,14 +751,15 @@ class StokesContext
 
     // Heavy operators / solvers held via unique_ptr so we can construct in
     // body order (rather than fighting member-init order).
-    std::unique_ptr< Stokes >           K_;
-    std::unique_ptr< Stokes >           K_neumann_;
-    std::unique_ptr< ViscousMass >      M_;
-    std::vector< Viscous >              A_c_;
-    std::vector< Prolongation >         P_;
-    std::vector< Restriction >          R_;
-    std::vector< Smoother >             smoothers_;
-    std::unique_ptr< CoarseGridSolver > coarse_grid_solver_;
+    std::unique_ptr< Stokes >            K_;
+    std::unique_ptr< Stokes >            K_neumann_;
+    std::unique_ptr< ViscousMass >       M_;
+    std::vector< Viscous >               A_c_;
+    std::vector< Prolongation >          P_;
+    std::vector< Restriction >           R_;
+    std::unique_ptr< RestrictionScalar > R_scalar_;
+    std::vector< Smoother >              smoothers_;
+    std::unique_ptr< CoarseGridSolver >  coarse_grid_solver_;
 
     // Comm-aware MG agglomeration (empty/no-op when agglom_factors is all 1s).
     std::vector< std::shared_ptr< grid::shell::DistributedDomain > > domains_upper_;
