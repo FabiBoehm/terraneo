@@ -175,12 +175,18 @@ struct PhysicsParameters
     double characteristic_velocity = 1e-10; // characteristic diffusive velocity
 
     double reference_density      = 4500;
+    double surface_density_dim    = 3300;
+    double surface_density_nondim = 1.0;
+
     double thermal_expansivity    = 2.5e-5;
     double thermal_conductivity   = 3.0;
     double specific_heat_capacity = 1230;
+    double grueneisen_parameter   = 1.1;
 
     bool   internal_heating      = false;
     double internal_heating_rate = 1.0;
+
+    bool compressible = false;
 
     double calc_cm_per_year = 3e-4; // from non-dim velocity to cm/a
     double calc_time_Ma     = 1e6;  // from non-dim time to Ma
@@ -362,6 +368,9 @@ inline void nondimensionalise( Parameters& prm )
     boundary.temperature_min = boundary.temperature_surface_K / boundary.delta_T_K;
     boundary.temperature_max = boundary.temperature_cmb_K / boundary.delta_T_K;
 
+    // Surface density
+    phys.surface_density_nondim = phys.surface_density_dim / phys.reference_density;
+
     // Compute characteristic velocity and thermal diffusivity
     phys.characteristic_velocity =
         phys.thermal_conductivity / ( phys.reference_density * phys.specific_heat_capacity * mesh.mantle_thickness_m );
@@ -537,6 +546,7 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
     //////////////////////////////
     /// Geophysical parameters ///
     //////////////////////////////
+    add_flag_with_default( app, "--compressible", parameters.physics_parameters.compressible );
     add_flag_with_default( app, "--internal-heating-enabled", parameters.physics_parameters.internal_heating );
     add_option_with_default( app, "--internal-heating-rate", parameters.physics_parameters.internal_heating_rate );
 
