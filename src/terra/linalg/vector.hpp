@@ -285,6 +285,16 @@ ScalarOf< Vector > norm_2_scaled( const Vector& y, const ScalarOf< Vector >& sca
     return std::sqrt( dot_prod * scaling_factor_under_the_root );
 }
 
+/// @brief Check if a vector contains negative entries.
+/// Returns true if any entry of \f& y \f$ is negative.
+/// @param y Input vector.
+/// @return True if negative value is present, false otherwise.
+template < VectorLike Vector >
+bool has_negative( const Vector& y )
+{
+    return y.has_negative_impl();
+}
+
 /// @brief Check if a vector contains NaN or inf entries.
 /// Returns true if any entry of \f$ y \f$ is NaN or inf.
 /// @param y Input vector.
