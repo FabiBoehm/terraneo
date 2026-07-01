@@ -121,6 +121,79 @@ int main()
         }
     }
 
+    // === Step 2: face_neighbors + touches_diamond_corner =========================================
+    // Use S_lat=2 so interior lateral faces exist (base anchors at 0 and 8, extent 16).
+
+    // --- same-level neighbor -----------------------------------------------------------------------
+    {
+        AdaptiveForest f( D, S_lat, S_rad );
+        ForestLeaf     L{ BrickId{ 0, 0, 0, 0 }, 0 };
+        auto           fn = f.face_neighbors( L, Face::XHIGH );
+        CHECK( fn.kind == NeighborKind::Interior );
+        CHECK( fn.neighbors.size() == 1 );
+        if ( fn.neighbors.size() == 1 )
+        {
+            CHECK( fn.neighbors[0].rel_level == 0 );
+            CHECK( fn.neighbors[0].leaf.anchor == ( BrickId{ 0, 8, 0, 0 } ) );
+            CHECK( fn.neighbors[0].neighbor_face == Face::XLOW );
+        }
+    }
+
+    // --- finer neighbor: refine the block across XHIGH, expect 4 finer neighbors -------------------
+    {
+        AdaptiveForest f( D, S_lat, S_rad );
+        ForestLeaf     L{ BrickId{ 0, 0, 0, 0 }, 0 };
+        ForestLeaf     R{ BrickId{ 0, 8, 0, 0 }, 0 };
+        f.refine( { R } );
+        auto fn = f.face_neighbors( L, Face::XHIGH );
+        CHECK( fn.kind == NeighborKind::Interior );
+        CHECK( fn.neighbors.size() == 4 );
+        int octmask = 0;
+        for ( const auto& nb : fn.neighbors )
+        {
+            CHECK( nb.rel_level == +1 );
+            CHECK( nb.leaf.depth == 1 );
+            octmask |= ( 1 << nb.sub_octant );
+        }
+        CHECK( octmask == 0b1111 ); // all four quadrants distinct
+
+        // --- coarser neighbor: from a child's XLOW, the neighbor is L (one level coarser) ----------
+        ForestLeaf child{ BrickId{ 0, 8, 0, 0 }, 1 };
+        auto       fnc = f.face_neighbors( child, Face::XLOW );
+        CHECK( fnc.kind == NeighborKind::Interior );
+        CHECK( fnc.neighbors.size() == 1 );
+        if ( fnc.neighbors.size() == 1 )
+        {
+            CHECK( fnc.neighbors[0].rel_level == -1 );
+            CHECK( fnc.neighbors[0].leaf == L );
+        }
+    }
+
+    // --- radial domain boundary (S_rad=1: both radial faces are CMB/surface) -----------------------
+    {
+        AdaptiveForest f( D, S_lat, S_rad );
+        ForestLeaf     L{ BrickId{ 0, 0, 0, 0 }, 0 };
+        CHECK( f.face_neighbors( L, Face::RLOW ).kind == NeighborKind::DomainBoundary );
+        CHECK( f.face_neighbors( L, Face::RHIGH ).kind == NeighborKind::DomainBoundary );
+    }
+
+    // --- lateral diamond seam ----------------------------------------------------------------------
+    {
+        AdaptiveForest f( D, S_lat, S_rad );
+        ForestLeaf     L{ BrickId{ 0, 0, 0, 0 }, 0 };
+        CHECK( f.face_neighbors( L, Face::XLOW ).kind == NeighborKind::DiamondCrossing );
+        CHECK( f.face_neighbors( L, Face::YLOW ).kind == NeighborKind::DiamondCrossing );
+    }
+
+    // --- touches_diamond_corner (S_lat=4: interior base blocks are not corners) --------------------
+    {
+        AdaptiveForest f4( D, 4, S_rad ); // base anchors at 0,8,16,24; extent 32
+        CHECK( f4.touches_diamond_corner( ForestLeaf{ BrickId{ 0, 0, 0, 0 }, 0 } ) );    // corner
+        CHECK( f4.touches_diamond_corner( ForestLeaf{ BrickId{ 0, 24, 24, 0 }, 0 } ) );  // corner
+        CHECK( !f4.touches_diamond_corner( ForestLeaf{ BrickId{ 0, 8, 8, 0 }, 0 } ) );   // interior
+        CHECK( !f4.touches_diamond_corner( ForestLeaf{ BrickId{ 0, 8, 0, 0 }, 0 } ) );   // edge, not corner
+    }
+
     if ( g_failures == 0 )
         std::printf( "test_adaptive_forest: ALL PASS\n" );
     else

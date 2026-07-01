@@ -22,11 +22,43 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <unordered_map>
 #include <vector>
 
 namespace terra::grid::shell::amr {
+
+// The 6 faces of a block, named by axis (x/y lateral, r radial) and side (low/high).
+enum class Face
+{
+    XLOW,
+    XHIGH,
+    YLOW,
+    YHIGH,
+    RLOW,
+    RHIGH
+};
+
+inline Face opposite( Face f )
+{
+    switch ( f )
+    {
+    case Face::XLOW:
+        return Face::XHIGH;
+    case Face::XHIGH:
+        return Face::XLOW;
+    case Face::YLOW:
+        return Face::YHIGH;
+    case Face::YHIGH:
+        return Face::YLOW;
+    case Face::RLOW:
+        return Face::RHIGH;
+    case Face::RHIGH:
+        return Face::RLOW;
+    }
+    return f;
+}
 
 // A block identifier in finest-level index units (maps to SubdomainInfo's (diamond,x,y,r) at finest res).
 struct BrickId
@@ -49,6 +81,31 @@ struct ForestLeaf
     int     depth = -1;
 
     bool operator==( const ForestLeaf& o ) const { return anchor == o.anchor && depth == o.depth; }
+};
+
+// One neighbor across a face. rel_level = neighbor.depth - my.depth (0 same, -1 coarser, +1 finer).
+// sub_octant (0..3) identifies which quarter of my face a finer neighbor covers; 0 for same/coarser.
+struct FaceNeighbor
+{
+    ForestLeaf leaf;
+    int        rel_level;
+    int        sub_octant;
+    Face       neighbor_face; // the face of `leaf` that touches me (opposite of the queried face)
+};
+
+// What lies across a face: interior neighbor(s), the CMB/surface radial boundary, or a diamond seam.
+enum class NeighborKind
+{
+    Interior,
+    DomainBoundary,  // radial: CMB or surface -- no neighbor
+    DiamondCrossing  // lateral diamond seam -- resolved later via the existing pole logic (Milestone A
+                     // keeps such blocks at depth 0, so this is only ever hit by base leaves)
+};
+
+struct FaceNeighbors
+{
+    NeighborKind              kind = NeighborKind::Interior;
+    std::vector< FaceNeighbor > neighbors; // empty if boundary; 1 if same/coarser; up to 4 if finer
 };
 
 class AdaptiveForest
@@ -158,6 +215,76 @@ class AdaptiveForest
                 return it->second;
         }
         return std::nullopt;
+    }
+
+    // All neighbors across one face of `L`. Interior faces return 1 neighbor (same/coarser) or up to 4
+    // (finer). Radial-boundary faces return DomainBoundary; lateral diamond-seam faces DiamondCrossing.
+    // Detection is by sampling the 2x2 finer sub-face centers just outside the face and looking up which
+    // leaf covers each -- one distinct hit => same/coarser, four distinct hits => finer.
+    [[nodiscard]] FaceNeighbors face_neighbors( const ForestLeaf& L, Face f ) const
+    {
+        FaceNeighbors res;
+        const int     s      = span( L.depth );
+        const int     base[3] = { L.anchor.x, L.anchor.y, L.anchor.r };
+
+        int axis, side; // axis: 0=x,1=y,2=r ; side: +1 high, -1 low
+        switch ( f )
+        {
+        case Face::XLOW:  axis = 0; side = -1; break;
+        case Face::XHIGH: axis = 0; side = +1; break;
+        case Face::YLOW:  axis = 1; side = -1; break;
+        case Face::YHIGH: axis = 1; side = +1; break;
+        case Face::RLOW:  axis = 2; side = -1; break;
+        default:          axis = 2; side = +1; break; // RHIGH
+        }
+
+        const int out_coord = side > 0 ? base[axis] + s : base[axis] - 1;
+        const int extent     = ( axis == 2 ) ? radial_extent() : lateral_extent();
+        if ( out_coord < 0 || out_coord >= extent )
+        {
+            res.kind = ( axis == 2 ) ? NeighborKind::DomainBoundary : NeighborKind::DiamondCrossing;
+            return res;
+        }
+
+        const int a1 = ( axis == 0 ) ? 1 : 0;         // first in-face axis
+        const int a2 = ( axis == 2 ) ? 1 : 2;         // second in-face axis
+        const int nsamp = ( s > 1 ) ? 2 : 1;
+        auto      off   = [&]( int q ) { return s > 1 ? ( q == 0 ? s / 4 : 3 * s / 4 ) : 0; };
+
+        std::map< std::size_t, int > found; // leaf index -> first quadrant it was sampled from
+        for ( int qi = 0; qi < nsamp; ++qi )
+            for ( int qj = 0; qj < nsamp; ++qj )
+            {
+                int pt[3];
+                pt[axis] = out_coord;
+                pt[a1]   = base[a1] + off( qi );
+                pt[a2]   = base[a2] + off( qj );
+                auto hit = leaf_at( L.anchor.diamond, pt[0], pt[1], pt[2] );
+                if ( hit )
+                    found.emplace( *hit, qi + 2 * qj );
+            }
+
+        const bool single = ( found.size() == 1 );
+        for ( const auto& [idx, quad] : found )
+        {
+            const ForestLeaf& N = leaves_[idx];
+            res.neighbors.push_back(
+                FaceNeighbor{ N, N.depth - L.depth, single ? 0 : quad, opposite( f ) } );
+        }
+        return res;
+    }
+
+    // True if `L` sits at a diamond corner (both lateral block indices at an extreme). Milestone A
+    // forbids refining these so the hardcoded pole stitching stays valid at base level.
+    [[nodiscard]] bool touches_diamond_corner( const ForestLeaf& L ) const
+    {
+        const int sp   = span( L.depth );
+        const int bx   = L.anchor.x / sp;
+        const int by   = L.anchor.y / sp;
+        const int nblk = S_lat_ << L.depth;
+        const bool xext = ( bx == 0 || bx == nblk - 1 );
+        const bool yext = ( by == 0 || by == nblk - 1 );
+        return xext && yext;
     }
 
     // Consistency check for tests: alignment, in-range, no duplicates, and a volume partition check.
