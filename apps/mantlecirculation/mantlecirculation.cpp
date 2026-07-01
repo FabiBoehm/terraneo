@@ -712,6 +712,14 @@ Result<> run( const Parameters& prm )
                     << std::endl;
             break;
         }
+
+        if ( has_negative( T ) )
+        {
+            logroot << "\nDETECTED NEGATIVE TEMPERATURE VALUES.\n"
+                       "Aborting simulation...\n"
+                    << std::endl;
+            break;
+        }
     }
 
     return { Ok{} };
