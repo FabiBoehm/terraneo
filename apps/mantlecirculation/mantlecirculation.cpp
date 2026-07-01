@@ -177,6 +177,9 @@ Result<> run( const Parameters& prm )
     fv::hex::initialize_cell_centers(
         fv_cell_centers, ( *domains[velocity_level] ), coords_shell[velocity_level], coords_radii[velocity_level] );
 
+    // Initialise and fill density -- time-independent for now
+    VectorQ1Scalar< ScalarType > rho( "rho", ( *domains[velocity_level] ), ownership_mask_data[velocity_level] );
+
     // Counting DoFs.
     int world_size = mpi::num_processes();
 
@@ -291,6 +294,7 @@ Result<> run( const Parameters& prm )
     xdmf_output->add( T.grid_data() );                 // Temperature
     xdmf_output->add( u.block_1().grid_data() );       // Velocity
     xdmf_output->add( stokes.eta_fine().grid_data() ); // Viscosity
+    xdmf_output->add( stokes.density().grid_data() );  // Density
 
     if ( prm.io_parameters.output_pressure )
     {
@@ -425,6 +429,7 @@ Result<> run( const Parameters& prm )
             T.grid_data(),
             u.block_1().grid_data(),
             stokes.eta_fine().grid_data(),
+            stokes.density().grid_data(),
             u.block_2().grid_data() );
     }
 
@@ -557,7 +562,7 @@ Result<> run( const Parameters& prm )
             }
 
             // --- Stokes solve ---
-            stokes.solve( T, /*log_convergence=*/( picard == num_picard - 1 ) );
+            stokes.solve( T, prm.physics_parameters.compressible, /*log_convergence=*/( picard == num_picard - 1 ) );
 
             if ( timestep == timestep_initial + 1 && picard == 0 )
                 log_hbm( "after first Stokes solve (peak)" );
@@ -587,6 +592,7 @@ Result<> run( const Parameters& prm )
                 T.grid_data(),
                 u.block_1().grid_data(),
                 stokes.eta_fine().grid_data(),
+                stokes.density().grid_data(),
                 u.block_2().grid_data() );
         }
 
