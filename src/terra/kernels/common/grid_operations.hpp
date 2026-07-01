@@ -849,12 +849,32 @@ ScalarType dot_product_subset(
 }
 
 template < typename ScalarType >
+bool has_negative( const grid::Grid4DDataScalar< ScalarType >& x, MPI_Comm comm = MPI_COMM_WORLD )
+{
+    bool has_negative = false;
+
+    Kokkos::parallel_reduce(
+        "has_negative",
+        Kokkos::MDRangePolicy( { 0, 0, 0, 0 }, { x.extent( 0 ), x.extent( 1 ), x.extent( 2 ), x.extent( 3 ) } ),
+        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, bool& local_has_negative ) {
+            local_has_negative = local_has_negative || ( x( local_subdomain, i, j, k ) < ScalarType( 0 ) );
+        },
+        Kokkos::LOr< bool >( has_negative ) );
+
+    Kokkos::fence();
+
+    MPI_Allreduce( MPI_IN_PLACE, &has_negative, 1, mpi::mpi_datatype< bool >(), MPI_LOR, comm );
+
+    return has_negative;
+}
+
+template < typename ScalarType >
 bool has_nan_or_inf( const grid::Grid4DDataScalar< ScalarType >& x, MPI_Comm comm = MPI_COMM_WORLD )
 {
     bool has_nan_or_inf = false;
 
     Kokkos::parallel_reduce(
-        "masked_dot_product",
+        "has_nan_or_inf",
         Kokkos::MDRangePolicy( { 0, 0, 0, 0 }, { x.extent( 0 ), x.extent( 1 ), x.extent( 2 ), x.extent( 3 ) } ),
         KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, bool& local_has_nan_or_inf ) {
             local_has_nan_or_inf = local_has_nan_or_inf || ( Kokkos::isnan( x( local_subdomain, i, j, k ) ) ||
