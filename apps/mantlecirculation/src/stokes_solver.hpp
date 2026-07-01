@@ -811,7 +811,7 @@ class StokesContext
         if ( log_convergence )
         {
             table_->query_rows_equals( "tag", "stokes_fgmres" ).print_pretty();
-            table_->query_rows_equals( "tag", "coarse_grid_pcg" ).print_pretty();
+            //table_->query_rows_equals( "tag", "coarse_grid_pcg" ).print_pretty();
         }
         table_->clear();
 
