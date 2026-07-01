@@ -135,6 +135,11 @@ class VectorQ1Scalar
     /// @return Maximum absolute value.
     ScalarType max_abs_entry_impl() const { return kernels::common::max_abs_entry( grid_data_, comm_ ); }
 
+    /// @brief Negative value check implementation for VectorLike concept.
+    /// Returns true if any entry in grid_data < ScalarType( 0 ).
+    /// @return True if negative value is found.
+    bool has_negative_impl() const { return kernels::common::has_negative( grid_data_, comm_ ); }
+
     /// @brief NaN/inf check implementation for VectorLike concept.
     /// Returns true if any entry of grid_data is NaN/inf.
     /// @return True if NaN/inf is present.
