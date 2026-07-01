@@ -1,0 +1,236 @@
+#pragma once
+
+// Adaptive mesh refinement -- forest-of-octree-leaves bookkeeper for the icosahedral shell.
+//
+// This header is intentionally DEPENDENCY-FREE (no Kokkos, no MPI, no other terra headers): the forest
+// is pure integer arithmetic in a "finest-level" index space, so it compiles and unit-tests on the host
+// with a bare C++ compiler. Integration with grid::shell::SubdomainInfo happens at the boundary (a thin
+// converter, added in a later step) -- the core stays trivially testable.
+//
+// Index conventions (the whole design rests on these):
+//   * D                     = finest octree depth. depth 0 = a base subdomain (today's uniform block);
+//                             depth d = split d times.
+//   * finest-index space    = coordinates measured in units where a depth-D leaf spans 1. A depth-d leaf
+//                             has span s = 2^(D-d) per axis. Its anchor (min corner) is s-aligned.
+//   * per diamond           = lateral index in [0, S_lat * 2^D), radial in [0, S_rad * 2^D), where
+//                             S_lat = base subdomains per diamond side, S_rad = base radial subdomains.
+//   * 10 diamonds           = the icosahedral macro-structure (hardcoded, as in spherical_shell.hpp).
+//
+// Refining a leaf replaces it with its 8 children (2x2x2), each at depth+1, each covering 1/8 the volume
+// but the SAME node count -- which is why it fits terra's single rectangular Kokkos::View storage.
+
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <optional>
+#include <unordered_map>
+#include <vector>
+
+namespace terra::grid::shell::amr {
+
+// A block identifier in finest-level index units (maps to SubdomainInfo's (diamond,x,y,r) at finest res).
+struct BrickId
+{
+    int diamond = -1;
+    int x       = -1; // lateral, finest-index units
+    int y       = -1; // lateral, finest-index units
+    int r       = -1; // radial,  finest-index units
+
+    bool operator==( const BrickId& o ) const
+    {
+        return diamond == o.diamond && x == o.x && y == o.y && r == o.r;
+    }
+};
+
+// A leaf of the forest: a block anchored at its min-corner finest index, at octree depth `depth`.
+struct ForestLeaf
+{
+    BrickId anchor;
+    int     depth = -1;
+
+    bool operator==( const ForestLeaf& o ) const { return anchor == o.anchor && depth == o.depth; }
+};
+
+class AdaptiveForest
+{
+  public:
+    static constexpr int kNumDiamonds = 10;
+
+    // Start from a uniform mesh: every base block present at depth 0.
+    // finest_level D: deepest refinement permitted. lateral/radial base subdomain counts per diamond.
+    AdaptiveForest( int finest_level, int lateral_subdomains_per_diamond, int radial_subdomains )
+    : D_( finest_level )
+    , S_lat_( lateral_subdomains_per_diamond )
+    , S_rad_( radial_subdomains )
+    {
+        const int base_span = 1 << D_;
+        for ( int d = 0; d < kNumDiamonds; ++d )
+            for ( int bx = 0; bx < S_lat_; ++bx )
+                for ( int by = 0; by < S_lat_; ++by )
+                    for ( int br = 0; br < S_rad_; ++br )
+                        leaves_.push_back(
+                            ForestLeaf{ BrickId{ d, bx * base_span, by * base_span, br * base_span }, 0 } );
+        normalize();
+    }
+
+    // --- geometry / arithmetic ---------------------------------------------------------------------
+
+    [[nodiscard]] int finest_level() const { return D_; }
+    [[nodiscard]] int lateral_extent() const { return S_lat_ << D_; } // finest units, per diamond side
+    [[nodiscard]] int radial_extent() const { return S_rad_ << D_; }  // finest units
+
+    // Side length of a depth-`depth` leaf, in finest-index units.
+    [[nodiscard]] int span( int depth ) const { return 1 << ( D_ - depth ); }
+
+    [[nodiscard]] bool aligned( const ForestLeaf& l ) const
+    {
+        const int s = span( l.depth );
+        return l.anchor.x % s == 0 && l.anchor.y % s == 0 && l.anchor.r % s == 0;
+    }
+
+    [[nodiscard]] bool in_range( const ForestLeaf& l ) const
+    {
+        const int s = span( l.depth );
+        return l.anchor.diamond >= 0 && l.anchor.diamond < kNumDiamonds && l.anchor.x >= 0 &&
+               l.anchor.x + s <= lateral_extent() && l.anchor.y >= 0 && l.anchor.y + s <= lateral_extent() &&
+               l.anchor.r >= 0 && l.anchor.r + s <= radial_extent();
+    }
+
+    // Parent: depth d -> d-1, anchor rounded down to the coarser alignment.
+    [[nodiscard]] ForestLeaf parent( const ForestLeaf& l ) const
+    {
+        const int ps = span( l.depth - 1 ); // = 2 * span(l.depth)
+        return ForestLeaf{ BrickId{ l.anchor.diamond, ( l.anchor.x / ps ) * ps, ( l.anchor.y / ps ) * ps,
+                                    ( l.anchor.r / ps ) * ps },
+                           l.depth - 1 };
+    }
+
+    // The 8 children (2x2x2) at depth+1. octant bit 0 = x, bit 1 = y, bit 2 = r.
+    [[nodiscard]] std::array< ForestLeaf, 8 > children( const ForestLeaf& l ) const
+    {
+        const int cs = span( l.depth + 1 ); // half the parent span
+        std::array< ForestLeaf, 8 > out{};
+        for ( int oct = 0; oct < 8; ++oct )
+            out[oct] = ForestLeaf{ BrickId{ l.anchor.diamond, l.anchor.x + ( ( oct >> 0 ) & 1 ) * cs,
+                                            l.anchor.y + ( ( oct >> 1 ) & 1 ) * cs,
+                                            l.anchor.r + ( ( oct >> 2 ) & 1 ) * cs },
+                                   l.depth + 1 };
+        return out;
+    }
+
+    // --- mutation ----------------------------------------------------------------------------------
+
+    // Replace each given leaf with its 8 children. (2:1 balancing is a separate step.)
+    void refine( const std::vector< ForestLeaf >& to_split )
+    {
+        for ( const auto& l : to_split )
+            refine_one( l );
+        normalize();
+    }
+
+    // Merge each 8-sibling group (identified by any one representative) back into its parent.
+    void coarsen( const std::vector< ForestLeaf >& sibling_reps )
+    {
+        for ( const auto& rep : sibling_reps )
+            coarsen_one( rep );
+        normalize();
+    }
+
+    // --- queries -----------------------------------------------------------------------------------
+
+    [[nodiscard]] const std::vector< ForestLeaf >& leaves() const { return leaves_; }
+    [[nodiscard]] std::size_t                      size() const { return leaves_.size(); }
+
+    [[nodiscard]] bool contains( const ForestLeaf& l ) const { return lookup_.count( key( l ) ) > 0; }
+
+    // Return the index (into leaves()) of the leaf covering the given finest-index point, if any.
+    // O(D): tries candidate depths finest->coarsest, aligning the point to each.
+    [[nodiscard]] std::optional< std::size_t > leaf_at( int diamond, int fx, int fy, int fr ) const
+    {
+        for ( int cd = D_; cd >= 0; --cd )
+        {
+            const int  shift = D_ - cd;
+            ForestLeaf cand{ BrickId{ diamond, ( fx >> shift ) << shift, ( fy >> shift ) << shift,
+                                      ( fr >> shift ) << shift },
+                             cd };
+            auto       it = lookup_.find( key( cand ) );
+            if ( it != lookup_.end() )
+                return it->second;
+        }
+        return std::nullopt;
+    }
+
+    // Consistency check for tests: alignment, in-range, no duplicates, and a volume partition check.
+    [[nodiscard]] bool validate() const
+    {
+        std::unordered_map< uint64_t, int > seen;
+        std::uint64_t                       vol = 0;
+        for ( const auto& l : leaves_ )
+        {
+            if ( !aligned( l ) || !in_range( l ) )
+                return false;
+            if ( ++seen[key( l )] > 1 )
+                return false;
+            const std::uint64_t s = static_cast< std::uint64_t >( span( l.depth ) );
+            vol += s * s * s;
+        }
+        const std::uint64_t total = static_cast< std::uint64_t >( kNumDiamonds ) * lateral_extent() *
+                                    lateral_extent() * radial_extent();
+        return vol == total;
+    }
+
+  private:
+    int D_, S_lat_, S_rad_;
+
+    std::vector< ForestLeaf >                    leaves_; // kept sorted + unique
+    std::unordered_map< std::uint64_t, std::size_t > lookup_; // key(leaf) -> index into leaves_
+
+    // Pack (diamond, depth, x, y, r) into 64 bits. x,y,r < 2^18, depth < 2^6, diamond < 2^4.
+    static std::uint64_t key( const ForestLeaf& l )
+    {
+        return ( static_cast< std::uint64_t >( l.anchor.diamond ) << 60 ) |
+               ( static_cast< std::uint64_t >( l.depth ) << 54 ) |
+               ( static_cast< std::uint64_t >( l.anchor.x ) << 36 ) |
+               ( static_cast< std::uint64_t >( l.anchor.y ) << 18 ) |
+               ( static_cast< std::uint64_t >( l.anchor.r ) );
+    }
+
+    void refine_one( const ForestLeaf& l )
+    {
+        auto it = lookup_.find( key( l ) );
+        if ( it == lookup_.end() )
+            return; // not present; ignore
+        // Mark for removal by clearing depth; children appended. normalize() rebuilds.
+        leaves_[it->second].depth = -1;
+        for ( const auto& c : children( l ) )
+            leaves_.push_back( c );
+    }
+
+    void coarsen_one( const ForestLeaf& rep )
+    {
+        const ForestLeaf par  = parent( rep );
+        const auto       kids = children( par );
+        for ( const auto& c : kids )
+            if ( !contains( c ) )
+                return; // not a complete sibling group; ignore
+        for ( const auto& c : kids )
+            leaves_[lookup_.at( key( c ) )].depth = -1; // mark removed
+        leaves_.push_back( par );
+    }
+
+    // Drop removed leaves (depth < 0), sort, dedupe, rebuild lookup.
+    void normalize()
+    {
+        leaves_.erase( std::remove_if( leaves_.begin(), leaves_.end(),
+                                       []( const ForestLeaf& l ) { return l.depth < 0; } ),
+                       leaves_.end() );
+        std::sort( leaves_.begin(), leaves_.end(),
+                   []( const ForestLeaf& a, const ForestLeaf& b ) { return key( a ) < key( b ); } );
+        leaves_.erase( std::unique( leaves_.begin(), leaves_.end() ), leaves_.end() );
+        lookup_.clear();
+        for ( std::size_t i = 0; i < leaves_.size(); ++i )
+            lookup_[key( leaves_[i] )] = i;
+    }
+};
+
+} // namespace terra::grid::shell::amr
