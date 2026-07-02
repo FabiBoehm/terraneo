@@ -76,60 +76,64 @@ int main( int argc, char** argv )
         const FaceAxes A_fa = face_axes( Face::XHIGH, nx, ny, nr );
         auto interior = [&]( int a1, int a2 ) { return a1 > 0 && a1 < ny - 1 && a2 > 0 && a2 < nr - 1; };
 
-        // ---- (1) constraint alone: hanging = interpolation of the coarse face -------------------
+        // ---- (1) constraint alone: hanging = linear interpolation of the fine block's own even nodes
+        // The constraint is local to each fine block: a hanging (odd-index) face node is overwritten
+        // with the interpolation of its bracketing EVEN neighbors on the same face. Put a linear field
+        // on each child's shared face; since linear interpolation of a linear field is exact, after the
+        // constraint every hanging node equals that same linear field (and even nodes are untouched).
         {
             Field field( (int) dom.subdomains().size(), nx, ny, nr );
+            auto  lin = []( int a1, int a2 ) { return 2.0 * a1 - 3.0 * a2 + 0.5; };
 
-            // linear pattern on A's x-high face; garbage 999 on the children's shared faces
-            std::vector< double > A_slab( (std::size_t) ny * nr );
-            for ( int a1 = 0; a1 < ny; ++a1 )
-                for ( int a2 = 0; a2 < nr; ++a2 )
-                    A_slab[a1 * nr + a2] = 2.0 * a1 - 3.0 * a2 + 0.5;
-            insert_slab( field, A_sub, A_fa, A_slab );
             for ( const auto* nb : kids )
+            {
+                std::vector< double > slab( (std::size_t) ny * nr );
+                for ( int a1 = 0; a1 < ny; ++a1 )
+                    for ( int a2 = 0; a2 < nr; ++a2 )
+                        slab[a1 * nr + a2] = lin( a1, a2 );
                 insert_slab( field, local_index( dom, nb->anchor ),
-                             face_axes( nb->neighbor_face, nx, ny, nr ),
-                             std::vector< double >( (std::size_t) ny * nr, 999.0 ) );
+                             face_axes( nb->neighbor_face, nx, ny, nr ), slab );
+            }
+
+            // stamp garbage on the odd (hanging) nodes so the check isn't vacuous
+            for ( const auto* nb : kids )
+            {
+                const int      ksub = local_index( dom, nb->anchor );
+                const FaceAxes kfa  = face_axes( nb->neighbor_face, nx, ny, nr );
+                auto           kslab = extract_slab( field, ksub, kfa );
+                for ( int a1 = 0; a1 < ny; ++a1 )
+                    for ( int a2 = 0; a2 < nr; ++a2 )
+                        if ( ( a1 & 1 ) || ( a2 & 1 ) )
+                            kslab[a1 * nr + a2] = -777.0;
+                insert_slab( field, ksub, kfa, kslab );
+            }
 
             constrain_hanging_faces( dom, field, nx, ny, nr );
 
-            // A's own face untouched by the constraint
-            auto A_after = extract_slab( field, A_sub, A_fa );
-            bool A_kept  = true;
-            for ( std::size_t i = 0; i < A_after.size(); ++i )
-                if ( !close( A_after[i], A_slab[i] ) )
-                    A_kept = false;
-            CHECK( A_kept );
-
-            // interior hanging nodes = P(A_slab); interior coincident nodes still 999
+            // every face node (hanging overwritten, even kept) now equals the linear field
             int  hanging_checked = 0;
-            bool hang_ok = true, coin_kept = true;
+            bool exact = true, even_kept = true;
             for ( const auto* nb : kids )
             {
                 auto kslab = extract_slab( field, local_index( dom, nb->anchor ),
                                            face_axes( nb->neighbor_face, nx, ny, nr ) );
-                auto pf    = prolongate_face( A_slab, ny, nr, nb->sub_octant );
-                for ( const auto& nd : face_correspondence( ny, nr, nb->sub_octant ) )
-                {
-                    if ( !interior( nd.a1, nd.a2 ) )
-                        continue;
-                    const double val = kslab[nd.a1 * nr + nd.a2];
-                    if ( nd.coincident )
+                for ( int a1 = 0; a1 < ny; ++a1 )
+                    for ( int a2 = 0; a2 < nr; ++a2 )
                     {
-                        if ( !close( val, 999.0 ) )
-                            coin_kept = false;
+                        const double val = kslab[a1 * nr + a2];
+                        if ( ( a1 & 1 ) || ( a2 & 1 ) )
+                        {
+                            ++hanging_checked;
+                            if ( !close( val, lin( a1, a2 ) ) )
+                                exact = false;
+                        }
+                        else if ( !close( val, lin( a1, a2 ) ) )
+                            even_kept = false;
                     }
-                    else
-                    {
-                        ++hanging_checked;
-                        if ( !close( val, pf[nd.a1 * nr + nd.a2] ) )
-                            hang_ok = false;
-                    }
-                }
             }
-            CHECK( hang_ok );
-            CHECK( coin_kept );
-            CHECK( hanging_checked == 4 * 8 ); // 8 interior hanging nodes per 5x5 quadrant face
+            CHECK( exact );
+            CHECK( even_kept );
+            CHECK( hanging_checked == 4 * ( ny * nr - 3 * 3 ) ); // 16 hanging per 5x5 face, 4 faces
 
             // idempotence: a second application changes nothing anywhere
             const std::vector< double > snapshot = field.v;

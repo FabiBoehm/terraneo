@@ -144,16 +144,24 @@ int main( int argc, char** argv )
             const auto t = build_2to1_tables( dom, nx, ny, nr ); // must NOT throw
             CHECK( !t.con_np.empty() );                          // seam-hanging nodes exist
 
-            // at least one constraint row must span diamonds (fine copy in d0, parents in d4 or v.v.)
+            // Constraint rows are now local to each fine block (parents = own even nodes), so the
+            // cross-diamond coupling lives in the ASSEMBLY: some node class must span diamonds -- that
+            // is what makes the seam-hanging nodes' even parents seam-consistent after the exchange.
             auto diamond_of_sub = [&]( int s ) {
                 return dom.subdomain_info_from_local_idx( s ).diamond_id();
             };
-            bool cross_diamond_row = false;
-            for ( std::size_t i = 0; i < t.con_np.size(); ++i )
+            for ( std::size_t i = 0; i < t.con_np.size(); ++i )   // constraint rows stay in-diamond
                 for ( int p = 0; p < t.con_np[i]; ++p )
-                    if ( diamond_of_sub( t.con_dst[i].s ) != diamond_of_sub( t.con_src[i][p].s ) )
-                        cross_diamond_row = true;
-            CHECK( cross_diamond_row );
+                    CHECK( diamond_of_sub( t.con_dst[i].s ) == diamond_of_sub( t.con_src[i][p].s ) );
+            bool cross_diamond_class = false;                     // but a class crosses the seam
+            for ( std::size_t c = 0; c + 1 < t.cls_offsets.size(); ++c )
+            {
+                const int d0 = diamond_of_sub( t.cls_members[t.cls_offsets[c]].s );
+                for ( int m = t.cls_offsets[c] + 1; m < t.cls_offsets[c + 1]; ++m )
+                    if ( diamond_of_sub( t.cls_members[m].s ) != d0 )
+                        cross_diamond_class = true;
+            }
+            CHECK( cross_diamond_class );
 
             Field field( nsub, nx, ny, nr ); // all ones
             apply_exchange_tables( t, field );

@@ -24,6 +24,7 @@
 #include "fe/wedge/operators/shell/vector_mass.hpp"
 #include "linalg/solvers/pcg.hpp"
 #include "terra/grid/grid_types.hpp"
+#include "terra/grid/shell/adaptive_distribute.hpp"
 #include "terra/grid/shell/adaptive_solve.hpp"
 #include "terra/grid/shell/spherical_shell.hpp"
 #include "terra/kernels/common/grid_operations.hpp"
@@ -328,6 +329,81 @@ static SolveResult solve_eps( const DistributedDomain& dom, const TwoToOneTables
     return SolveResult{ l2, ndofs, relres, t.con_np.size() };
 }
 
+// Distributed (multi-rank) adaptive solve. Same physics/BCs as solve_eps; the operator is the
+// distributed constrained wrapper (local constraint + element apply + cross-rank additive halo), and
+// masks/ownership are the distributed ones. Degenerates to the single-rank adaptive solve at np=1.
+static SolveResult solve_eps_distributed( const DistributedAdaptiveMesh&        mesh,
+                                          const std::shared_ptr< util::Table >& table,
+                                          const std::string&                    tag )
+{
+    using ScalarType  = double;
+    using Epsilon     = fe::wedge::operators::shell::EpsilonDivDivKerngen< ScalarType, 3 >;
+    using Mass        = fe::wedge::operators::shell::VectorMass< ScalarType, 3 >;
+    using Wrapper     = AdaptiveDistributedConstrainedOperator< Epsilon >;
+    using MassWrapper = AdaptiveDistributedConstrainedOperator< Mass >;
+
+    const auto& dom   = mesh.domain;
+    const auto  mask  = distributed_ownership_mask( mesh );
+    const auto  bmask = adaptive_boundary_mask( dom );
+
+    VectorQ1Vec< ScalarType >    u( "u", dom, mask ), g( "g", dom, mask ), tmp( "tmp", dom, mask );
+    VectorQ1Vec< ScalarType >    Adiagg( "Adiagg", dom, mask ), solution( "solution", dom, mask );
+    VectorQ1Vec< ScalarType >    error( "error", dom, mask ), b( "b", dom, mask ), rr( "rr", dom, mask );
+    VectorQ1Vec< ScalarType >    scratch_a( "sa", dom, mask ), scratch_n( "sn", dom, mask ), scratch_m( "sm", dom, mask );
+    VectorQ1Scalar< ScalarType > k( "k", dom, mask );
+
+    const auto ndofs = kernels::common::count_masked< long >( mask, grid::NodeOwnershipFlag::OWNED, mesh.comm );
+
+    const auto coords  = grid::shell::subdomain_unit_sphere_single_shell_coords< ScalarType >( dom );
+    const auto radii_g = grid::shell::subdomain_shell_radii< ScalarType >( dom );
+
+    Kokkos::parallel_for( "k", grid::shell::local_domain_md_range_policy_nodes( dom ),
+                          KInterpolator( coords, radii_g, k.grid_data() ) );
+    Kokkos::parallel_for( "sol", grid::shell::local_domain_md_range_policy_nodes( dom ),
+                          SolutionInterpolator( coords, radii_g, solution.grid_data(), bmask, false ) );
+    Kokkos::parallel_for( "g", grid::shell::local_domain_md_range_policy_nodes( dom ),
+                          SolutionInterpolator( coords, radii_g, g.grid_data(), bmask, true ) );
+    Kokkos::parallel_for( "rhs", grid::shell::local_domain_md_range_policy_nodes( dom ),
+                          RHSInterpolator( coords, radii_g, tmp.grid_data() ) );
+    Kokkos::fence();
+
+    BoundaryConditions bcs_nn = { { CMB, NEUMANN }, { SURFACE, NEUMANN } };
+    Epsilon A_loc( dom, coords, radii_g, bmask, k.grid_data(), bcs_nn, false,
+                   linalg::OperatorApplyMode::Replace, linalg::OperatorCommunicationMode::SkipCommunication );
+    Mass    M_loc( dom, coords, radii_g, false, linalg::OperatorApplyMode::Replace,
+                linalg::OperatorCommunicationMode::SkipCommunication );
+
+    Wrapper     A_sys( A_loc, mesh, scratch_a, bmask, grid::shell::ShellBoundaryFlag::BOUNDARY );
+    Wrapper     A_neu( A_loc, mesh, scratch_n );
+    MassWrapper M_c( M_loc, mesh, scratch_m );
+
+    linalg::apply( M_c, tmp, b );
+    linalg::apply( A_neu, g, tmp );
+    linalg::lincomb( b, { 1.0, -1.0 }, { b, tmp } );
+    kernels::common::assign_masked_else_keep_old( b.grid_data(), g.grid_data(), bmask,
+                                                  grid::shell::ShellBoundaryFlag::BOUNDARY );
+    Kokkos::fence();
+
+    linalg::solvers::IterativeSolverParameters solver_params{ 4000, 1e-12, 1e-12 };
+    linalg::solvers::PCG< Wrapper >            pcg( solver_params, table, { tmp, Adiagg, error, rr } );
+    pcg.set_tag( tag );
+    linalg::solvers::solve( pcg, A_sys, u, b );
+    Kokkos::fence();
+
+    apply_constraint_device( mesh.t_local_d, u.grid_data() ); // final local conformity
+
+    linalg::lincomb( error, { 1.0, -1.0 }, { u, solution } );
+    const double l2 = std::sqrt( dot( error, error ) / static_cast< double >( ndofs ) );
+    linalg::apply( A_sys, u, rr );
+    linalg::lincomb( rr, { 1.0, -1.0 }, { b, rr } );
+    const double relres = std::sqrt( dot( rr, rr ) / dot( b, b ) );
+
+    if ( mpi::rank( mesh.comm ) == 0 )
+        std::printf( "  [%s] dofs %ld  l2 %.12e  relres %.3e  hanging(local r0) %zu\n", tag.c_str(),
+                     ndofs, l2, relres, mesh.t_local.con_np.size() );
+    return SolveResult{ l2, ndofs, relres, mesh.t_local.con_np.size() };
+}
+
 int main( int argc, char** argv )
 {
     util::terra_initialize( &argc, &argv );
@@ -343,21 +419,20 @@ int main( int argc, char** argv )
         }
         radii9.push_back( radii5.back() );
 
-        // ---- T1: all-refined adaptive solve == uniform reference solve ----------------------------
+        const int nprocs = mpi::num_processes( MPI_COMM_WORLD );
+
+        // ---- T1: all-refined adaptive (DISTRIBUTED) == uniform reference ---------------------------
         {
             const int      LDR = 3, S_lat = 2, S_rad = 1, M = 1;
             AdaptiveForest f( M, S_lat, S_rad );
             const auto     base = f.leaves(); // copy: refine() mutates the leaf set
             f.refine( base );
             CHECK( f.validate() );
-            auto dom_a = DistributedDomain::create_adaptive_on_comm( MPI_COMM_WORLD, LDR, radii5, f,
-                                                                     subdomain_to_rank_all_root );
-            const int  nx  = dom_a.domain_info().subdomain_num_nodes_per_side_laterally();
-            const int  nr  = dom_a.domain_info().subdomain_num_nodes_radially();
-            const auto t_a = build_2to1_tables( dom_a, nx, nx, nr );
-            CHECK( t_a.con_np.empty() ); // uniformly subdivided: conforming everywhere
 
-            const auto res_a = solve_eps( dom_a, t_a, true, table, "T1_adaptive_all_refined" );
+            auto mesh_a = build_distributed_mesh( MPI_COMM_WORLD, LDR, radii5, f,
+                                                  grid::shell::subdomain_to_rank_by_diamond );
+            CHECK( mesh_a.t_local.con_np.empty() ); // uniformly subdivided: conforming everywhere
+            const auto res_a = solve_eps_distributed( mesh_a, table, "T1_adaptive_all_refined" );
 
             const auto     dom_u = DistributedDomain::create_uniform( LDR + 1, radii9, 2, 1 );
             TwoToOneTables t_empty;
@@ -367,25 +442,24 @@ int main( int argc, char** argv )
             CHECK( res_a.ndofs == res_u.ndofs ); // same physical node set
             CHECK( res_a.relres < 1e-6 );
             CHECK( res_u.relres < 1e-6 );
-            CHECK( res_a.l2 < 0.1 && res_u.l2 < 0.1 ); // sane discretization errors
+            CHECK( res_a.l2 < 0.1 && res_u.l2 < 0.1 );
             CHECK( std::fabs( res_a.l2 - res_u.l2 ) < 1e-5 * res_u.l2 ); // identical discretization
         }
 
-        // ---- T2: locally refined mesh, hanging nodes active in the solve --------------------------
+        // ---- T2: locally refined adaptive (DISTRIBUTED), hanging nodes active in the solve ---------
         {
             const int      LDR = 4, S_lat = 4, S_rad = 1, M = 1;
             AdaptiveForest f( M, S_lat, S_rad );
             f.refine( { ForestLeaf{ SubdomainInfo{ 0, 1, 1, 0 }, 0 } } ); // non-corner block
             f.balance_2to1();
             CHECK( f.validate() );
-            auto dom_a = DistributedDomain::create_adaptive_on_comm( MPI_COMM_WORLD, LDR, radii5, f,
-                                                                     subdomain_to_rank_all_root );
-            const int  nx  = dom_a.domain_info().subdomain_num_nodes_per_side_laterally();
-            const int  nr  = dom_a.domain_info().subdomain_num_nodes_radially();
-            const auto t_a = build_2to1_tables( dom_a, nx, nx, nr );
-            CHECK( !t_a.con_np.empty() ); // 2:1 interfaces present
 
-            const auto res_a = solve_eps( dom_a, t_a, true, table, "T2_adaptive_refined_block" );
+            auto       mesh_a = build_distributed_mesh( MPI_COMM_WORLD, LDR, radii5, f,
+                                                        grid::shell::subdomain_to_rank_by_diamond );
+            long       hanging_local = (long) mesh_a.t_local.con_np.size(), hanging_total = 0;
+            MPI_Allreduce( &hanging_local, &hanging_total, 1, MPI_LONG, MPI_SUM, MPI_COMM_WORLD );
+            CHECK( hanging_total > 0 ); // 2:1 interfaces present somewhere
+            const auto res_a = solve_eps_distributed( mesh_a, table, "T2_adaptive_refined_block" );
 
             const auto     dom_u = DistributedDomain::create_uniform( LDR, radii5, 2, 0 );
             TwoToOneTables t_empty;
@@ -397,11 +471,18 @@ int main( int argc, char** argv )
             CHECK( res_a.l2 < 0.1 && res_u.l2 < 0.1 );
             CHECK( res_a.l2 <= res_u.l2 * 1.0001 ); // locally finer mesh must not be worse
         }
+
+        if ( mpi::rank( MPI_COMM_WORLD ) == 0 )
+            std::printf( "  (ran on %d rank%s)\n", nprocs, nprocs == 1 ? "" : "s" );
     }
 
-    if ( g_failures == 0 )
-        std::printf( "test_adaptive_epsilon_divdiv_gpu: ALL PASS (%d checks)\n", g_checks );
-    else
-        std::printf( "test_adaptive_epsilon_divdiv_gpu: %d/%d FAILURE(S)\n", g_failures, g_checks );
-    return g_failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+    const bool ok = ( g_failures == 0 );
+    if ( mpi::rank( MPI_COMM_WORLD ) == 0 )
+    {
+        if ( ok )
+            std::printf( "test_adaptive_epsilon_divdiv_gpu: ALL PASS (%d checks)\n", g_checks );
+        else
+            std::printf( "test_adaptive_epsilon_divdiv_gpu: %d/%d FAILURE(S)\n", g_failures, g_checks );
+    }
+    return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

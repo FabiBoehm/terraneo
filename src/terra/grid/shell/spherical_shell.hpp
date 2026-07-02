@@ -654,6 +654,19 @@ inline mpi::MPIRank subdomain_to_rank_all_root(
     return 0;
 }
 
+/// @brief AMR partition by diamond: each of the 10 diamonds (and all its refined blocks) goes to one
+///        rank, contiguously. Cross-rank interfaces are then diamond seams only; intra-diamond assembly
+///        is local. Simple and locality-preserving (not load-balanced under refinement -- a follow-up).
+///        Deterministic function of the anchor alone, so every rank agrees on ownership.
+inline mpi::MPIRank subdomain_to_rank_by_diamond(
+    const SubdomainInfo& subdomain_info,
+    const int            num_subdomains_per_diamond_laterally,
+    const int            num_subdomains_per_diamond_radially )
+{
+    const auto nprocs = mpi::num_processes();
+    return static_cast< mpi::MPIRank >( static_cast< long >( subdomain_info.diamond_id() ) * nprocs / 10 );
+}
+
 /// @brief Distributes subdomains to ranks as evenly as possible.
 ///
 /// Not really sophisticated, just iterates over subdomain indices.
@@ -2610,37 +2623,47 @@ class DistributedDomain
         const amr::AdaptiveForest&                 forest,
         const SubdomainToRankDistributionFunction& subdomain_to_rank )
     {
+        const int my_rank = ( comm != MPI_COMM_NULL ) ? static_cast< int >( mpi::rank( comm ) ) : -1;
+        DistributedDomain domain =
+            create_adaptive_for_rank( lateral_diamond_refinement_level, radii, forest, subdomain_to_rank, my_rank );
+        domain.comm_ = comm;
+        return domain;
+    }
+
+    /// @brief Owned-only adaptive domain for an EXPLICIT rank (no MPI). The comm version delegates here;
+    ///        tests and the distributed setup use it to construct any rank's domain on one process.
+    ///        Pass my_rank = -1 for an empty domain. Neighborhoods reference remote neighbors by their
+    ///        finest anchor + owner rank; the cross-rank coupling is carried by the comm plan, not here.
+    static DistributedDomain create_adaptive_for_rank(
+        const int                                  lateral_diamond_refinement_level,
+        const std::vector< double >&               radii,
+        const amr::AdaptiveForest&                 forest,
+        const SubdomainToRankDistributionFunction& subdomain_to_rank,
+        const int                                  my_rank )
+    {
         DistributedDomain domain;
         domain.domain_info_ = DomainInfo(
             lateral_diamond_refinement_level, radii, forest.lateral_subdomains_per_diamond(),
             forest.radial_subdomains() );
-        domain.comm_            = comm;
         domain.adaptive_        = true;
         domain.max_subdivision_ = forest.max_subdivision();
 
-        // rank of a leaf given its finest-frame anchor (adapts the uniform partition function).
         const auto rank_of = [&]( const SubdomainInfo& a ) {
             return subdomain_to_rank( a, forest.lateral_subdomains_per_diamond(),
                                       forest.radial_subdomains() );
         };
 
-        if ( comm != MPI_COMM_NULL )
+        int idx = 0;
+        for ( const auto& leaf : forest.leaves() )
         {
-            const auto my_rank = mpi::rank( comm );
-            int        idx     = 0;
-            for ( const auto& leaf : forest.leaves() )
-            {
-                const SubdomainInfo anchor = forest.finest_anchor( leaf );
-                if ( rank_of( anchor ) != my_rank )
-                {
-                    continue;
-                }
-                domain.subdomains_[anchor]                           = { idx, SubdomainNeighborhood() };
-                domain.local_subdomain_index_to_subdomain_info_[idx] = anchor;
-                domain.subdomain_subdivision_[anchor]                = leaf.subdivision;
-                domain.adaptive_neighborhoods_[anchor] = amr::face_neighborhood_of( forest, leaf, rank_of );
-                idx++;
-            }
+            const SubdomainInfo anchor = forest.finest_anchor( leaf );
+            if ( static_cast< int >( rank_of( anchor ) ) != my_rank )
+                continue;
+            domain.subdomains_[anchor]                           = { idx, SubdomainNeighborhood() };
+            domain.local_subdomain_index_to_subdomain_info_[idx] = anchor;
+            domain.subdomain_subdivision_[anchor]                = leaf.subdivision;
+            domain.adaptive_neighborhoods_[anchor] = amr::face_neighborhood_of( forest, leaf, rank_of );
+            idx++;
         }
         return domain;
     }

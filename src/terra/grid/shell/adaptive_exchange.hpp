@@ -143,7 +143,12 @@ struct TwoToOneTables
     std::vector< int >                     con_np;
 };
 
-inline TwoToOneTables build_2to1_tables( const DistributedDomain& dom, int nx, int ny, int nr )
+// `guard_corners` rejects an unsupported 2:1 pole/corner seam. It is a GLOBAL mesh-validity check, so
+// it must be true when all seam partners are present (the single-rank / all-leaves build). On an
+// owned-only distributed domain a corner block's seam partner lives on another rank and would look
+// "missing"; pass false there -- the all-leaves build already validated the mesh.
+inline TwoToOneTables build_2to1_tables( const DistributedDomain& dom, int nx, int ny, int nr,
+                                         bool guard_corners = true )
 {
     static constexpr Face kFaces[6] = { Face::XLOW, Face::XHIGH, Face::YLOW,
                                         Face::YHIGH, Face::RLOW, Face::RHIGH };
@@ -152,44 +157,69 @@ inline TwoToOneTables build_2to1_tables( const DistributedDomain& dom, int nx, i
     using Key4 = std::array< int, 4 >; // copy identity (s,x,y,r)
     auto key_of = []( const Idx4& i ) { return Key4{ i.s, i.x, i.y, i.r }; };
 
-    // ---- pass 1: hanging copies + raw constraint rows (from the 2:1 face correspondence) ----------
-    std::set< Key4 > hanging; // all hanging copies (constraint destinations)
+    // ---- pass 1: hanging DoFs + constraint rows (LOCAL to each fine block) -------------------------
+    // A 2:1 fine face carries hanging nodes at odd in-face indices; their parents are the bracketing
+    // EVEN nodes of the SAME (fine) block's face. Those even nodes are coincident with the coarse
+    // parents, so after the class exchange they hold the assembled coarse values -- interpolating from
+    // them is identical to interpolating from the coarse parents. Expressing the rule purely on the
+    // fine block's own face (no coarse block, correspondence, or seam reference) makes the constraint
+    // and the hanging P^T scatter fully local, which is what lets each rank own its hanging nodes.
+    std::set< Key4 > hanging;
     for ( const auto& [anchor, tup] : dom.subdomains() )
     {
         const int   sub = std::get< 0 >( tup );
         const auto& nbh = dom.adaptive_neighborhood( anchor );
         for ( Face fc : kFaces )
         {
-            const FaceAxes fa = face_axes( fc, nx, ny, nr );
+            bool coarser_across = false;
             for ( const auto& nb : nbh.faces )
-            {
-                if ( nb.my_face != fc || nb.rel_level != +1 )
-                    continue;
-                const int      fsub = local_index( dom, nb.anchor );
-                const FaceAxes nfa  = face_axes( nb.neighbor_face, nx, ny, nr );
-                for ( const auto& nd : face_correspondence( fa.n1, fa.n2, nb.sub_octant ) )
+                if ( nb.my_face == fc && nb.rel_level == -1 )
+                    coarser_across = true;
+            if ( !coarser_across )
+                continue; // not a 2:1 fine face -> no hanging nodes here
+
+            const FaceAxes fa = face_axes( fc, nx, ny, nr );
+            for ( int a1 = 0; a1 < fa.n1; ++a1 )
+                for ( int a2 = 0; a2 < fa.n2; ++a2 )
                 {
-                    if ( nd.coincident )
-                        continue;
-                    // for reversed seams the fine block's in-face LATERAL index runs backwards
-                    // relative to my frame (nd.a1 is in my frame; a2 is radial, never reversed)
-                    const int  fa1  = nb.seam_reversed ? nfa.n1 - 1 - nd.a1 : nd.a1;
-                    const Idx4 fine = face_node( fsub, nfa, fa1, nd.a2 );
+                    const bool o1 = a1 & 1, o2 = a2 & 1;
+                    if ( !o1 && !o2 )
+                        continue; // even/even -> coincident with a coarse node -> genuine, not hanging
+                    const Idx4 fine = face_node( sub, fa, a1, a2 );
                     if ( !hanging.insert( key_of( fine ) ).second )
-                        continue; // a face-edge hanging copy seen via a second coarse face: same row
+                        continue; // block-edge hanging node shared by a second 2:1 face: same row
+
                     std::array< Idx4, 4 >   srcs{};
                     std::array< double, 4 > ws{};
-                    for ( int p = 0; p < nd.n_parents; ++p )
+                    int                     np = 0;
+                    if ( o1 && !o2 ) // edge midpoint along a1
                     {
-                        srcs[p] = face_node( sub, fa, nd.pa1[p], nd.pa2[p] );
-                        ws[p]   = nd.w[p];
+                        srcs[0] = face_node( sub, fa, a1 - 1, a2 );
+                        srcs[1] = face_node( sub, fa, a1 + 1, a2 );
+                        ws[0] = ws[1] = 0.5;
+                        np              = 2;
+                    }
+                    else if ( !o1 && o2 ) // edge midpoint along a2
+                    {
+                        srcs[0] = face_node( sub, fa, a1, a2 - 1 );
+                        srcs[1] = face_node( sub, fa, a1, a2 + 1 );
+                        ws[0] = ws[1] = 0.5;
+                        np              = 2;
+                    }
+                    else // face centre
+                    {
+                        srcs[0] = face_node( sub, fa, a1 - 1, a2 - 1 );
+                        srcs[1] = face_node( sub, fa, a1 + 1, a2 - 1 );
+                        srcs[2] = face_node( sub, fa, a1 - 1, a2 + 1 );
+                        srcs[3] = face_node( sub, fa, a1 + 1, a2 + 1 );
+                        ws[0] = ws[1] = ws[2] = ws[3] = 0.25;
+                        np                            = 4;
                     }
                     t.con_dst.push_back( fine );
                     t.con_src.push_back( srcs );
                     t.con_w.push_back( ws );
-                    t.con_np.push_back( nd.n_parents );
+                    t.con_np.push_back( np );
                 }
-            }
         }
     }
 
@@ -314,7 +344,7 @@ inline TwoToOneTables build_2to1_tables( const DistributedDomain& dom, int nx, i
                         ++corner_misses; // seam-hanging here; only fatal for corner blocks (below)
                 }
         }
-        if ( corner_guard && corner_misses > 0 )
+        if ( guard_corners && corner_guard && corner_misses > 0 )
             throw std::runtime_error(
                 "AMR seam assembly: 2:1 interface at a pole/corner-touching refined block is not "
                 "supported (refine its seam neighbors to the same subdivision or keep it coarse)." );
