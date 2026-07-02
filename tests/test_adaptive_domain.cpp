@@ -105,12 +105,43 @@ int main( int argc, char** argv )
         CHECK( checked_a_subdiv1 );
     }
 
-    // --- uniform (non-adaptive) domain is unaffected: adaptive() false, subdivision_of == 0 --------
+    // --- adaptive neighborhoods populated and self-consistent -------------------------------------
+    {
+        AdaptiveForest f( M, S_lat, S_rad );
+        f.refine( { ForestLeaf{ SubdomainInfo{ 0, 1, 0, 0 }, 0 } } ); // single-level jump (already 2:1)
+        CHECK( f.validate() );
+
+        auto dom = DistributedDomain::create_adaptive_on_comm(
+            MPI_COMM_WORLD, LDR, radii, f, subdomain_to_rank_all_root );
+
+        // coarse leaf (0,0,0,0) sees 4 finer across x-high + 1 same across y-high
+        const SubdomainInfo Lanchor{ 0, 0, 0, 0 };
+        CHECK( dom.subdomains().count( Lanchor ) == 1 );
+        const auto& nbh = dom.adaptive_neighborhood( Lanchor );
+        CHECK( nbh.faces.size() == 5u );
+        int finer = 0, same = 0;
+        for ( const auto& fn : nbh.faces )
+        {
+            if ( fn.rel_level == +1 ) ++finer;
+            if ( fn.rel_level == 0 ) ++same;
+        }
+        CHECK( finer == 4 && same == 1 );
+
+        // closure: on a single rank, every referenced neighbor anchor is itself a local subdomain
+        for ( const auto& [sub, tup] : dom.subdomains() )
+            for ( const auto& fn : dom.adaptive_neighborhood( sub ).faces )
+                CHECK( dom.subdomains().count( fn.anchor ) == 1 );
+    }
+
+    // --- uniform (non-adaptive) domain is unaffected: adaptive() false, no neighborhoods -----------
     {
         auto uni = DistributedDomain::create_uniform( LDR, radii, 1, 0, subdomain_to_rank_all_root );
         CHECK( !uni.adaptive() );
         for ( const auto& [sub, tup] : uni.subdomains() )
+        {
             CHECK( uni.subdivision_of( sub ) == 0 );
+            CHECK( uni.adaptive_neighborhood( sub ).faces.empty() );
+        }
     }
 
     int rc = g_failures;

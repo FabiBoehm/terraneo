@@ -15,6 +15,7 @@
 #include "subdomain_info.hpp"
 #include "adaptive_forest.hpp"
 #include "adaptive_geometry.hpp"
+#include "adaptive_neighborhood.hpp"
 
 namespace terra::grid::shell {
 
@@ -2617,6 +2618,12 @@ class DistributedDomain
         domain.adaptive_        = true;
         domain.max_subdivision_ = forest.max_subdivision();
 
+        // rank of a leaf given its finest-frame anchor (adapts the uniform partition function).
+        const auto rank_of = [&]( const SubdomainInfo& a ) {
+            return subdomain_to_rank( a, forest.lateral_subdomains_per_diamond(),
+                                      forest.radial_subdomains() );
+        };
+
         if ( comm != MPI_COMM_NULL )
         {
             const auto my_rank = mpi::rank( comm );
@@ -2624,14 +2631,14 @@ class DistributedDomain
             for ( const auto& leaf : forest.leaves() )
             {
                 const SubdomainInfo anchor = forest.finest_anchor( leaf );
-                if ( subdomain_to_rank( anchor, forest.lateral_subdomains_per_diamond(),
-                                        forest.radial_subdomains() ) != my_rank )
+                if ( rank_of( anchor ) != my_rank )
                 {
                     continue;
                 }
                 domain.subdomains_[anchor]                           = { idx, SubdomainNeighborhood() };
                 domain.local_subdomain_index_to_subdomain_info_[idx] = anchor;
                 domain.subdomain_subdivision_[anchor]                = leaf.subdivision;
+                domain.adaptive_neighborhoods_[anchor] = amr::face_neighborhood_of( forest, leaf, rank_of );
                 idx++;
             }
         }
@@ -2654,6 +2661,14 @@ class DistributedDomain
     /// @brief Maximum subdivision (AMR split budget) of this domain; 0 for uniform domains.
     [[nodiscard]] int max_subdivision() const { return max_subdivision_; }
 
+    /// @brief Adaptive (2:1) face-neighbor table of a local subdomain (empty for uniform domains).
+    [[nodiscard]] const amr::AdaptiveNeighborhood& adaptive_neighborhood( const SubdomainInfo& subdomain ) const
+    {
+        static const amr::AdaptiveNeighborhood empty;
+        const auto                             it = adaptive_neighborhoods_.find( subdomain );
+        return it == adaptive_neighborhoods_.end() ? empty : it->second;
+    }
+
     [[nodiscard]] const std::map< SubdomainInfo, std::tuple< LocalSubdomainIdx, SubdomainNeighborhood > >&
         subdomains() const
     {
@@ -2672,9 +2687,10 @@ class DistributedDomain
     MPI_Comm                                     comm_ = MPI_COMM_WORLD;
 
     // AMR only (empty / false / 0 for uniform domains -- the uniform path never touches these):
-    std::map< SubdomainInfo, int > subdomain_subdivision_; // finest-frame anchor -> subdivision
-    bool                           adaptive_        = false;
-    int                            max_subdivision_ = 0;
+    std::map< SubdomainInfo, int >                        subdomain_subdivision_; // finest anchor -> subdivision
+    std::map< SubdomainInfo, amr::AdaptiveNeighborhood >  adaptive_neighborhoods_; // finest anchor -> 2:1 faces
+    bool                                                  adaptive_        = false;
+    int                                                   max_subdivision_ = 0;
 };
 
 struct SubdomainDistribution
