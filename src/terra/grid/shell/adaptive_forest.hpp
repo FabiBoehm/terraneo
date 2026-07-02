@@ -2,30 +2,31 @@
 
 // Adaptive mesh refinement -- forest-of-octree-leaves bookkeeper for the icosahedral shell.
 //
-// This header is intentionally DEPENDENCY-FREE (no Kokkos, no MPI, no other terra headers): the forest
-// is pure integer arithmetic in a "finest-level" index space, so it compiles and unit-tests on the host
-// with a bare C++ compiler. Integration with grid::shell::SubdomainInfo happens at the boundary (a thin
-// converter, added in a later step) -- the core stays trivially testable.
+// A leaf is one macro-block: terra's own grid::shell::SubdomainInfo (diamond, x, y, r) plus a
+// `subdivision` count = how many times that base subdomain has been split (0 = a base block, exactly
+// as terra creates today). Splitting a subdomain replaces it with its 8 children (2x2x2), each at
+// subdivision+1, each covering 1/8 the volume but the SAME node count -- which is why it fits terra's
+// single rectangular Kokkos::View storage.
 //
-// Index conventions (the whole design rests on these):
-//   * D                     = finest octree depth. depth 0 = a base subdomain (today's uniform block);
-//                             depth d = split d times.
-//   * finest-index space    = coordinates measured in units where a depth-D leaf spans 1. A depth-d leaf
-//                             has span s = 2^(D-d) per axis. Its anchor (min corner) is s-aligned.
-//   * per diamond           = lateral index in [0, S_lat * 2^D), radial in [0, S_rad * 2^D), where
-//                             S_lat = base subdomains per diamond side, S_rad = base radial subdomains.
-//   * 10 diamonds           = the icosahedral macro-structure (hardcoded, as in spherical_shell.hpp).
+// Indices are at the block's OWN subdivision grid: a subdivision-k block lives on a lateral grid of
+// S_lat * 2^k per diamond side (radial S_rad * 2^k). So a uniform forest with every leaf at
+// subdivision 0 IS today's uniform mesh, using the identical SubdomainInfo indices -- no translation.
 //
-// Refining a leaf replaces it with its 8 children (2x2x2), each at depth+1, each covering 1/8 the volume
-// but the SAME node count -- which is why it fits terra's single rectangular Kokkos::View storage.
+// Note: `subdivision` is a NEW axis (splitting subdomains). It is orthogonal to terra's multigrid
+// "refinement level" (node density within a fixed subdomain); the two must not be conflated.
+//
+// Internally the neighbor/balance arithmetic maps a leaf to a "finest-frame" interval on the fly
+// (index << (max_subdivision - subdivision)); the finest frame is a common grid where a leaf at the
+// deepest subdivision spans 1. Nothing is stored twice -- the finest frame is derived, not kept.
 
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <map>
 #include <optional>
-#include <unordered_map>
 #include <vector>
+
+#include "subdomain_info.hpp"
 
 namespace terra::grid::shell::amr {
 
@@ -60,31 +61,17 @@ inline Face opposite( Face f )
     return f;
 }
 
-// A block identifier in finest-level index units (maps to SubdomainInfo's (diamond,x,y,r) at finest res).
-struct BrickId
-{
-    int diamond = -1;
-    int x       = -1; // lateral, finest-index units
-    int y       = -1; // lateral, finest-index units
-    int r       = -1; // radial,  finest-index units
-
-    bool operator==( const BrickId& o ) const
-    {
-        return diamond == o.diamond && x == o.x && y == o.y && r == o.r;
-    }
-};
-
-// A leaf of the forest: a block anchored at its min-corner finest index, at octree depth `depth`.
+// A leaf of the forest: a terra subdomain at a given subdivision.
 struct ForestLeaf
 {
-    BrickId anchor;
-    int     depth = -1;
+    SubdomainInfo id;             // (diamond, x, y, r), indices at this leaf's own subdivision grid
+    int           subdivision = -1;
 
-    bool operator==( const ForestLeaf& o ) const { return anchor == o.anchor && depth == o.depth; }
+    bool operator==( const ForestLeaf& o ) const { return id == o.id && subdivision == o.subdivision; }
 };
 
-// One neighbor across a face. rel_level = neighbor.depth - my.depth (0 same, -1 coarser, +1 finer).
-// sub_octant (0..3) identifies which quarter of my face a finer neighbor covers; 0 for same/coarser.
+// One neighbor across a face. rel_level = neighbor.subdivision - my.subdivision (0 same, -1 coarser,
+// +1 finer). sub_octant (0..3) identifies which quarter of my face a finer neighbor covers; 0 else.
 struct FaceNeighbor
 {
     ForestLeaf leaf;
@@ -99,12 +86,12 @@ enum class NeighborKind
     Interior,
     DomainBoundary,  // radial: CMB or surface -- no neighbor
     DiamondCrossing  // lateral diamond seam -- resolved later via the existing pole logic (Milestone A
-                     // keeps such blocks at depth 0, so this is only ever hit by base leaves)
+                     // keeps such blocks at subdivision 0, so this is only hit by base leaves)
 };
 
 struct FaceNeighbors
 {
-    NeighborKind              kind = NeighborKind::Interior;
+    NeighborKind                kind = NeighborKind::Interior;
     std::vector< FaceNeighbor > neighbors; // empty if boundary; 1 if same/coarser; up to 4 if finer
 };
 
@@ -113,65 +100,57 @@ class AdaptiveForest
   public:
     static constexpr int kNumDiamonds = 10;
 
-    // Start from a uniform mesh: every base block present at depth 0.
-    // finest_level D: deepest refinement permitted. lateral/radial base subdomain counts per diamond.
-    AdaptiveForest( int finest_level, int lateral_subdomains_per_diamond, int radial_subdomains )
-    : D_( finest_level )
+    // Start from a uniform mesh: every base block present at subdivision 0.
+    // max_subdivision: deepest split permitted. lateral/radial base subdomain counts per diamond.
+    AdaptiveForest( int max_subdivision, int lateral_subdomains_per_diamond, int radial_subdomains )
+    : M_( max_subdivision )
     , S_lat_( lateral_subdomains_per_diamond )
     , S_rad_( radial_subdomains )
     {
-        const int base_span = 1 << D_;
         for ( int d = 0; d < kNumDiamonds; ++d )
             for ( int bx = 0; bx < S_lat_; ++bx )
                 for ( int by = 0; by < S_lat_; ++by )
                     for ( int br = 0; br < S_rad_; ++br )
-                        leaves_.push_back(
-                            ForestLeaf{ BrickId{ d, bx * base_span, by * base_span, br * base_span }, 0 } );
+                        leaves_.push_back( ForestLeaf{ SubdomainInfo{ d, bx, by, br }, 0 } );
         normalize();
     }
 
     // --- geometry / arithmetic ---------------------------------------------------------------------
 
-    [[nodiscard]] int finest_level() const { return D_; }
-    [[nodiscard]] int lateral_extent() const { return S_lat_ << D_; } // finest units, per diamond side
-    [[nodiscard]] int radial_extent() const { return S_rad_ << D_; }  // finest units
+    [[nodiscard]] int max_subdivision() const { return M_; }
+    [[nodiscard]] int lateral_extent() const { return S_lat_ << M_; } // finest-frame units, per diamond
+    [[nodiscard]] int radial_extent() const { return S_rad_ << M_; }  // finest-frame units
 
-    // Side length of a depth-`depth` leaf, in finest-index units.
-    [[nodiscard]] int span( int depth ) const { return 1 << ( D_ - depth ); }
-
-    [[nodiscard]] bool aligned( const ForestLeaf& l ) const
-    {
-        const int s = span( l.depth );
-        return l.anchor.x % s == 0 && l.anchor.y % s == 0 && l.anchor.r % s == 0;
-    }
+    // Side length of a subdivision-k leaf in finest-frame units.
+    [[nodiscard]] int finest_span( int subdivision ) const { return 1 << ( M_ - subdivision ); }
 
     [[nodiscard]] bool in_range( const ForestLeaf& l ) const
     {
-        const int s = span( l.depth );
-        return l.anchor.diamond >= 0 && l.anchor.diamond < kNumDiamonds && l.anchor.x >= 0 &&
-               l.anchor.x + s <= lateral_extent() && l.anchor.y >= 0 && l.anchor.y + s <= lateral_extent() &&
-               l.anchor.r >= 0 && l.anchor.r + s <= radial_extent();
+        const int nx = S_lat_ << l.subdivision;
+        const int nr = S_rad_ << l.subdivision;
+        return l.id.diamond_id() >= 0 && l.id.diamond_id() < kNumDiamonds && l.id.subdomain_x() >= 0 &&
+               l.id.subdomain_x() < nx && l.id.subdomain_y() >= 0 && l.id.subdomain_y() < nx &&
+               l.id.subdomain_r() >= 0 && l.id.subdomain_r() < nr && l.subdivision >= 0 &&
+               l.subdivision <= M_;
     }
 
-    // Parent: depth d -> d-1, anchor rounded down to the coarser alignment.
+    // Parent: subdivision k -> k-1, indices halved.
     [[nodiscard]] ForestLeaf parent( const ForestLeaf& l ) const
     {
-        const int ps = span( l.depth - 1 ); // = 2 * span(l.depth)
-        return ForestLeaf{ BrickId{ l.anchor.diamond, ( l.anchor.x / ps ) * ps, ( l.anchor.y / ps ) * ps,
-                                    ( l.anchor.r / ps ) * ps },
-                           l.depth - 1 };
+        return ForestLeaf{ SubdomainInfo{ l.id.diamond_id(), l.id.subdomain_x() / 2, l.id.subdomain_y() / 2,
+                                          l.id.subdomain_r() / 2 },
+                           l.subdivision - 1 };
     }
 
-    // The 8 children (2x2x2) at depth+1. octant bit 0 = x, bit 1 = y, bit 2 = r.
+    // The 8 children (2x2x2) at subdivision+1. octant bit 0 = x, bit 1 = y, bit 2 = r.
     [[nodiscard]] std::array< ForestLeaf, 8 > children( const ForestLeaf& l ) const
     {
-        const int cs = span( l.depth + 1 ); // half the parent span
+        const int x = l.id.subdomain_x() * 2, y = l.id.subdomain_y() * 2, r = l.id.subdomain_r() * 2;
         std::array< ForestLeaf, 8 > out{};
         for ( int oct = 0; oct < 8; ++oct )
-            out[oct] = ForestLeaf{ BrickId{ l.anchor.diamond, l.anchor.x + ( ( oct >> 0 ) & 1 ) * cs,
-                                            l.anchor.y + ( ( oct >> 1 ) & 1 ) * cs,
-                                            l.anchor.r + ( ( oct >> 2 ) & 1 ) * cs },
-                                   l.depth + 1 };
+            out[oct] = ForestLeaf{ SubdomainInfo{ l.id.diamond_id(), x + ( ( oct >> 0 ) & 1 ),
+                                                  y + ( ( oct >> 1 ) & 1 ), r + ( ( oct >> 2 ) & 1 ) },
+                                   l.subdivision + 1 };
         return out;
     }
 
@@ -195,7 +174,7 @@ class AdaptiveForest
 
     // Enforce the 2:1 rule: no leaf may have a face-neighbor more than one level finer. Repeatedly
     // split any offending (coarse) leaf until a fixed point. Splitting only ever makes the mesh finer
-    // and depth is capped at D, so this terminates. Idempotent on an already-balanced mesh.
+    // and subdivision is capped at M, so this terminates. Idempotent on an already-balanced mesh.
     void balance_2to1()
     {
         static constexpr Face kFaces[6] = { Face::XLOW, Face::XHIGH, Face::YLOW,
@@ -207,7 +186,7 @@ class AdaptiveForest
             std::vector< ForestLeaf > to_split;
             for ( const auto& L : leaves_ )
             {
-                if ( L.depth >= D_ )
+                if ( L.subdivision >= M_ )
                     continue;
                 bool flagged = false;
                 for ( int fi = 0; fi < 6 && !flagged; ++fi )
@@ -237,17 +216,14 @@ class AdaptiveForest
 
     [[nodiscard]] bool contains( const ForestLeaf& l ) const { return lookup_.count( key( l ) ) > 0; }
 
-    // Return the index (into leaves()) of the leaf covering the given finest-index point, if any.
-    // O(D): tries candidate depths finest->coarsest, aligning the point to each.
+    // Return the index (into leaves()) of the leaf covering a given finest-frame point, if any.
+    // O(M): tries candidate subdivisions finest->coarsest, mapping the point down to each.
     [[nodiscard]] std::optional< std::size_t > leaf_at( int diamond, int fx, int fy, int fr ) const
     {
-        for ( int cd = D_; cd >= 0; --cd )
+        for ( int cd = M_; cd >= 0; --cd )
         {
-            const int  shift = D_ - cd;
-            ForestLeaf cand{ BrickId{ diamond, ( fx >> shift ) << shift, ( fy >> shift ) << shift,
-                                      ( fr >> shift ) << shift },
-                             cd };
-            auto       it = lookup_.find( key( cand ) );
+            const int shift = M_ - cd;
+            const auto it = lookup_.find( key( diamond, fx >> shift, fy >> shift, fr >> shift, cd ) );
             if ( it != lookup_.end() )
                 return it->second;
         }
@@ -256,13 +232,16 @@ class AdaptiveForest
 
     // All neighbors across one face of `L`. Interior faces return 1 neighbor (same/coarser) or up to 4
     // (finer). Radial-boundary faces return DomainBoundary; lateral diamond-seam faces DiamondCrossing.
-    // Detection is by sampling the 2x2 finer sub-face centers just outside the face and looking up which
-    // leaf covers each -- one distinct hit => same/coarser, four distinct hits => finer.
+    // Detection: sample the 2x2 finer sub-face centers just outside the face (in the finest frame) and
+    // look up which leaf covers each -- one distinct hit => same/coarser, four => finer.
     [[nodiscard]] FaceNeighbors face_neighbors( const ForestLeaf& L, Face f ) const
     {
         FaceNeighbors res;
-        const int     s      = span( L.depth );
-        const int     base[3] = { L.anchor.x, L.anchor.y, L.anchor.r };
+        const int     s = finest_span( L.subdivision );
+        // leaf's min corner in the finest frame:
+        const int base[3] = { L.id.subdomain_x() << ( M_ - L.subdivision ),
+                              L.id.subdomain_y() << ( M_ - L.subdivision ),
+                              L.id.subdomain_r() << ( M_ - L.subdivision ) };
 
         int axis, side; // axis: 0=x,1=y,2=r ; side: +1 high, -1 low
         switch ( f )
@@ -283,8 +262,8 @@ class AdaptiveForest
             return res;
         }
 
-        const int a1 = ( axis == 0 ) ? 1 : 0;         // first in-face axis
-        const int a2 = ( axis == 2 ) ? 1 : 2;         // second in-face axis
+        const int a1    = ( axis == 0 ) ? 1 : 0; // first in-face axis
+        const int a2    = ( axis == 2 ) ? 1 : 2; // second in-face axis
         const int nsamp = ( s > 1 ) ? 2 : 1;
         auto      off   = [&]( int q ) { return s > 1 ? ( q == 0 ? s / 4 : 3 * s / 4 ) : 0; };
 
@@ -296,7 +275,7 @@ class AdaptiveForest
                 pt[axis] = out_coord;
                 pt[a1]   = base[a1] + off( qi );
                 pt[a2]   = base[a2] + off( qj );
-                auto hit = leaf_at( L.anchor.diamond, pt[0], pt[1], pt[2] );
+                auto hit = leaf_at( L.id.diamond_id(), pt[0], pt[1], pt[2] );
                 if ( hit )
                     found.emplace( *hit, qi + 2 * qj );
             }
@@ -306,7 +285,7 @@ class AdaptiveForest
         {
             const ForestLeaf& N = leaves_[idx];
             res.neighbors.push_back(
-                FaceNeighbor{ N, N.depth - L.depth, single ? 0 : quad, opposite( f ) } );
+                FaceNeighbor{ N, N.subdivision - L.subdivision, single ? 0 : quad, opposite( f ) } );
         }
         return res;
     }
@@ -315,27 +294,24 @@ class AdaptiveForest
     // forbids refining these so the hardcoded pole stitching stays valid at base level.
     [[nodiscard]] bool touches_diamond_corner( const ForestLeaf& L ) const
     {
-        const int sp   = span( L.depth );
-        const int bx   = L.anchor.x / sp;
-        const int by   = L.anchor.y / sp;
-        const int nblk = S_lat_ << L.depth;
-        const bool xext = ( bx == 0 || bx == nblk - 1 );
-        const bool yext = ( by == 0 || by == nblk - 1 );
+        const int nblk = S_lat_ << L.subdivision;
+        const bool xext = ( L.id.subdomain_x() == 0 || L.id.subdomain_x() == nblk - 1 );
+        const bool yext = ( L.id.subdomain_y() == 0 || L.id.subdomain_y() == nblk - 1 );
         return xext && yext;
     }
 
-    // Consistency check for tests: alignment, in-range, no duplicates, and a volume partition check.
+    // Consistency check for tests: in-range, no duplicates, and a volume partition check.
     [[nodiscard]] bool validate() const
     {
-        std::unordered_map< uint64_t, int > seen;
-        std::uint64_t                       vol = 0;
+        std::map< std::uint64_t, int > seen;
+        std::uint64_t                  vol = 0;
         for ( const auto& l : leaves_ )
         {
-            if ( !aligned( l ) || !in_range( l ) )
+            if ( !in_range( l ) )
                 return false;
             if ( ++seen[key( l )] > 1 )
                 return false;
-            const std::uint64_t s = static_cast< std::uint64_t >( span( l.depth ) );
+            const std::uint64_t s = static_cast< std::uint64_t >( finest_span( l.subdivision ) );
             vol += s * s * s;
         }
         const std::uint64_t total = static_cast< std::uint64_t >( kNumDiamonds ) * lateral_extent() *
@@ -344,19 +320,22 @@ class AdaptiveForest
     }
 
   private:
-    int D_, S_lat_, S_rad_;
+    int M_, S_lat_, S_rad_;
 
-    std::vector< ForestLeaf >                    leaves_; // kept sorted + unique
-    std::unordered_map< std::uint64_t, std::size_t > lookup_; // key(leaf) -> index into leaves_
+    std::vector< ForestLeaf >                        leaves_; // kept sorted + unique
+    std::map< std::uint64_t, std::size_t >           lookup_; // key -> index into leaves_
 
-    // Pack (diamond, depth, x, y, r) into 64 bits. x,y,r < 2^18, depth < 2^6, diamond < 2^4.
+    // Pack (subdivision, diamond, x, y, r) into 64 bits. x,y,r < 2^18, diamond < 2^4, subdivision < 2^6.
+    static std::uint64_t key( int diamond, int x, int y, int r, int subdivision )
+    {
+        return ( static_cast< std::uint64_t >( subdivision ) << 58 ) |
+               ( static_cast< std::uint64_t >( diamond ) << 54 ) | ( static_cast< std::uint64_t >( x ) << 36 ) |
+               ( static_cast< std::uint64_t >( y ) << 18 ) | ( static_cast< std::uint64_t >( r ) );
+    }
     static std::uint64_t key( const ForestLeaf& l )
     {
-        return ( static_cast< std::uint64_t >( l.anchor.diamond ) << 60 ) |
-               ( static_cast< std::uint64_t >( l.depth ) << 54 ) |
-               ( static_cast< std::uint64_t >( l.anchor.x ) << 36 ) |
-               ( static_cast< std::uint64_t >( l.anchor.y ) << 18 ) |
-               ( static_cast< std::uint64_t >( l.anchor.r ) );
+        return key( l.id.diamond_id(), l.id.subdomain_x(), l.id.subdomain_y(), l.id.subdomain_r(),
+                    l.subdivision );
     }
 
     void refine_one( const ForestLeaf& l )
@@ -364,8 +343,7 @@ class AdaptiveForest
         auto it = lookup_.find( key( l ) );
         if ( it == lookup_.end() )
             return; // not present; ignore
-        // Mark for removal by clearing depth; children appended. normalize() rebuilds.
-        leaves_[it->second].depth = -1;
+        leaves_[it->second].subdivision = -1; // mark removed; children appended, normalize() rebuilds
         for ( const auto& c : children( l ) )
             leaves_.push_back( c );
     }
@@ -378,15 +356,15 @@ class AdaptiveForest
             if ( !contains( c ) )
                 return; // not a complete sibling group; ignore
         for ( const auto& c : kids )
-            leaves_[lookup_.at( key( c ) )].depth = -1; // mark removed
+            leaves_[lookup_.at( key( c ) )].subdivision = -1; // mark removed
         leaves_.push_back( par );
     }
 
-    // Drop removed leaves (depth < 0), sort, dedupe, rebuild lookup.
+    // Drop removed leaves (subdivision < 0), sort, dedupe, rebuild lookup.
     void normalize()
     {
         leaves_.erase( std::remove_if( leaves_.begin(), leaves_.end(),
-                                       []( const ForestLeaf& l ) { return l.depth < 0; } ),
+                                       []( const ForestLeaf& l ) { return l.subdivision < 0; } ),
                        leaves_.end() );
         std::sort( leaves_.begin(), leaves_.end(),
                    []( const ForestLeaf& a, const ForestLeaf& b ) { return key( a ) < key( b ); } );

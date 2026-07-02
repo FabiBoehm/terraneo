@@ -1,15 +1,18 @@
-// Unit test for terra::grid::shell::amr::AdaptiveForest (Part 1, Step 1: core data model).
+// Unit test for terra::grid::shell::amr::AdaptiveForest.
 //
-// Dependency-free: compile standalone with
+// A leaf is a terra SubdomainInfo (diamond,x,y,r) at a `subdivision`. A uniform forest at subdivision 0
+// is exactly today's uniform mesh, using the identical subdomain indices.
+//
 //   g++ -std=c++17 -I src tests/test_adaptive_forest.cpp -o test_adaptive_forest && ./test_adaptive_forest
-// (also wired into CMake via add_terra_test, but does not require Kokkos/MPI to run.)
+// (also wired into CMake via add_terra_test.)
 
 #include "terra/grid/shell/adaptive_forest.hpp"
 
 #include <cstdio>
 #include <cstdlib>
 
-using namespace terra::grid::shell::amr;
+using namespace terra::grid::shell;      // SubdomainInfo
+using namespace terra::grid::shell::amr; // AdaptiveForest, ForestLeaf, Face, ...
 
 static int g_failures = 0;
 static int g_checks   = 0;
@@ -24,44 +27,49 @@ static int g_checks   = 0;
         }                                                                         \
     } while ( 0 )
 
+static ForestLeaf leaf( int d, int x, int y, int r, int subdiv )
+{
+    return ForestLeaf{ SubdomainInfo{ d, x, y, r }, subdiv };
+}
+
 int main()
 {
-    // D=3 -> base_span 8; S_lat=2 -> lateral extent 16; S_rad=1 -> radial extent 8.
-    const int D = 3, S_lat = 2, S_rad = 1;
+    // M=3 -> finest span 8; S_lat=2 -> finest lateral extent 16; S_rad=1 -> radial extent 8.
+    const int M = 3, S_lat = 2, S_rad = 1;
 
-    // --- construction: uniform base mesh -----------------------------------------------------------
+    // --- construction: uniform base mesh == today's uniform subdomain set --------------------------
     {
-        AdaptiveForest f( D, S_lat, S_rad );
+        AdaptiveForest f( M, S_lat, S_rad );
         CHECK( f.size() == 10u * S_lat * S_lat * S_rad ); // 40 base leaves
         for ( const auto& l : f.leaves() )
-            CHECK( l.depth == 0 );
+            CHECK( l.subdivision == 0 );
         CHECK( f.validate() );
         CHECK( f.lateral_extent() == 16 );
         CHECK( f.radial_extent() == 8 );
-        CHECK( f.span( 0 ) == 8 && f.span( 1 ) == 4 && f.span( 3 ) == 1 );
+        CHECK( f.finest_span( 0 ) == 8 && f.finest_span( 1 ) == 4 && f.finest_span( 3 ) == 1 );
+        CHECK( f.contains( leaf( 0, 0, 0, 0, 0 ) ) );   // terra-style index (0,0,0,0)
+        CHECK( f.contains( leaf( 0, 1, 0, 0, 0 ) ) );   // and its neighbor (1,0,0)
     }
 
-    // --- arithmetic: parent(child) round-trip, children aligned/in-range ---------------------------
+    // --- arithmetic: parent(child) round-trip ------------------------------------------------------
     {
-        AdaptiveForest f( D, S_lat, S_rad );
-        ForestLeaf     L{ BrickId{ 0, 0, 0, 0 }, 0 };
+        AdaptiveForest f( M, S_lat, S_rad );
+        ForestLeaf     L = leaf( 0, 0, 0, 0, 0 );
         auto           kids = f.children( L );
         for ( int oct = 0; oct < 8; ++oct )
         {
-            CHECK( kids[oct].depth == 1 );
-            CHECK( f.aligned( kids[oct] ) );
+            CHECK( kids[oct].subdivision == 1 );
             CHECK( f.in_range( kids[oct] ) );
             CHECK( f.parent( kids[oct] ) == L );
         }
-        // children occupy the 8 distinct octant corners
-        CHECK( kids[0].anchor == ( BrickId{ 0, 0, 0, 0 } ) );
-        CHECK( kids[7].anchor == ( BrickId{ 0, 4, 4, 4 } ) );
+        CHECK( kids[0].id == SubdomainInfo( 0, 0, 0, 0 ) ); // octant 0
+        CHECK( kids[7].id == SubdomainInfo( 0, 1, 1, 1 ) ); // octant 7 -> (2*0+1) in each axis
     }
 
     // --- refine one leaf: size +7, parent gone, children present, validate ------------------------
     {
-        AdaptiveForest f( D, S_lat, S_rad );
-        ForestLeaf     L{ BrickId{ 0, 0, 0, 0 }, 0 };
+        AdaptiveForest f( M, S_lat, S_rad );
+        ForestLeaf     L = leaf( 0, 0, 0, 0, 0 );
         CHECK( f.contains( L ) );
         f.refine( { L } );
         CHECK( f.size() == 47u ); // 40 - 1 + 8
@@ -71,82 +79,76 @@ int main()
         CHECK( f.validate() );
     }
 
-    // --- leaf_at: point inside a refined child vs an unrefined base block --------------------------
+    // --- leaf_at: finest-frame point in a refined child vs an unrefined base block -----------------
     {
-        AdaptiveForest f( D, S_lat, S_rad );
-        ForestLeaf     L{ BrickId{ 0, 0, 0, 0 }, 0 };
-        f.refine( { L } );
-        // point (5,1,1) sits in child anchored (4,0,0), depth 1
+        AdaptiveForest f( M, S_lat, S_rad );
+        f.refine( { leaf( 0, 0, 0, 0, 0 ) } );
+        // finest point (5,1,1) -> subdivision-1 own index (1,0,0)
         auto hit = f.leaf_at( 0, 5, 1, 1 );
         CHECK( hit.has_value() );
         if ( hit )
         {
             const auto& l = f.leaves()[*hit];
-            CHECK( l.depth == 1 );
-            CHECK( l.anchor == ( BrickId{ 0, 4, 0, 0 } ) );
+            CHECK( l.subdivision == 1 );
+            CHECK( l.id == SubdomainInfo( 0, 1, 0, 0 ) );
         }
-        // point in an untouched base block (diamond 1) resolves to a depth-0 leaf
+        // untouched base block in diamond 1
         auto hit2 = f.leaf_at( 1, 2, 2, 2 );
         CHECK( hit2.has_value() );
         if ( hit2 )
-            CHECK( f.leaves()[*hit2].depth == 0 );
+            CHECK( f.leaves()[*hit2].subdivision == 0 );
     }
 
     // --- coarsen inverts refine -------------------------------------------------------------------
     {
-        AdaptiveForest f( D, S_lat, S_rad );
-        ForestLeaf     L{ BrickId{ 0, 0, 0, 0 }, 0 };
+        AdaptiveForest f( M, S_lat, S_rad );
+        ForestLeaf     L = leaf( 0, 0, 0, 0, 0 );
         f.refine( { L } );
         CHECK( f.size() == 47u );
-        f.coarsen( { f.children( L )[0] } ); // any sibling as representative
+        f.coarsen( { f.children( L )[0] } );
         CHECK( f.size() == 40u );
         CHECK( f.contains( L ) );
         CHECK( f.validate() );
     }
 
-    // --- nested refine: depth 2 leaf, validate + leaf_at ------------------------------------------
+    // --- nested refine: subdivision-2 leaf ---------------------------------------------------------
     {
-        AdaptiveForest f( D, S_lat, S_rad );
-        ForestLeaf     L{ BrickId{ 0, 0, 0, 0 }, 0 };
-        f.refine( { L } );
-        ForestLeaf child{ BrickId{ 0, 4, 0, 0 }, 1 };
-        f.refine( { child } );
-        CHECK( f.size() == 54u ); // 47 - 1 + 8
+        AdaptiveForest f( M, S_lat, S_rad );
+        f.refine( { leaf( 0, 0, 0, 0, 0 ) } );
+        f.refine( { leaf( 0, 1, 0, 0, 1 ) } ); // a child of L
+        CHECK( f.size() == 54u );              // 47 - 1 + 8
         CHECK( f.validate() );
-        auto hit = f.leaf_at( 0, 7, 1, 1 ); // in grandchild anchored (6,0,0), depth 2
+        auto hit = f.leaf_at( 0, 7, 1, 1 ); // finest -> subdivision-2 own index (3,0,0)
         CHECK( hit.has_value() );
         if ( hit )
         {
             const auto& l = f.leaves()[*hit];
-            CHECK( l.depth == 2 );
-            CHECK( l.anchor == ( BrickId{ 0, 6, 0, 0 } ) );
+            CHECK( l.subdivision == 2 );
+            CHECK( l.id == SubdomainInfo( 0, 3, 0, 0 ) );
         }
     }
 
-    // === Step 2: face_neighbors + touches_diamond_corner =========================================
-    // Use S_lat=2 so interior lateral faces exist (base anchors at 0 and 8, extent 16).
+    // === face_neighbors + touches_diamond_corner =================================================
 
     // --- same-level neighbor -----------------------------------------------------------------------
     {
-        AdaptiveForest f( D, S_lat, S_rad );
-        ForestLeaf     L{ BrickId{ 0, 0, 0, 0 }, 0 };
-        auto           fn = f.face_neighbors( L, Face::XHIGH );
+        AdaptiveForest f( M, S_lat, S_rad );
+        auto fn = f.face_neighbors( leaf( 0, 0, 0, 0, 0 ), Face::XHIGH );
         CHECK( fn.kind == NeighborKind::Interior );
         CHECK( fn.neighbors.size() == 1 );
         if ( fn.neighbors.size() == 1 )
         {
             CHECK( fn.neighbors[0].rel_level == 0 );
-            CHECK( fn.neighbors[0].leaf.anchor == ( BrickId{ 0, 8, 0, 0 } ) );
+            CHECK( fn.neighbors[0].leaf.id == SubdomainInfo( 0, 1, 0, 0 ) );
             CHECK( fn.neighbors[0].neighbor_face == Face::XLOW );
         }
     }
 
-    // --- finer neighbor: refine the block across XHIGH, expect 4 finer neighbors -------------------
+    // --- finer neighbor (4) then coarser neighbor from a child's side ------------------------------
     {
-        AdaptiveForest f( D, S_lat, S_rad );
-        ForestLeaf     L{ BrickId{ 0, 0, 0, 0 }, 0 };
-        ForestLeaf     R{ BrickId{ 0, 8, 0, 0 }, 0 };
-        f.refine( { R } );
+        AdaptiveForest f( M, S_lat, S_rad );
+        ForestLeaf     L = leaf( 0, 0, 0, 0, 0 );
+        f.refine( { leaf( 0, 1, 0, 0, 0 ) } ); // refine the block across XHIGH
         auto fn = f.face_neighbors( L, Face::XHIGH );
         CHECK( fn.kind == NeighborKind::Interior );
         CHECK( fn.neighbors.size() == 4 );
@@ -154,14 +156,13 @@ int main()
         for ( const auto& nb : fn.neighbors )
         {
             CHECK( nb.rel_level == +1 );
-            CHECK( nb.leaf.depth == 1 );
+            CHECK( nb.leaf.subdivision == 1 );
             octmask |= ( 1 << nb.sub_octant );
         }
-        CHECK( octmask == 0b1111 ); // all four quadrants distinct
+        CHECK( octmask == 0b1111 );
 
-        // --- coarser neighbor: from a child's XLOW, the neighbor is L (one level coarser) ----------
-        ForestLeaf child{ BrickId{ 0, 8, 0, 0 }, 1 };
-        auto       fnc = f.face_neighbors( child, Face::XLOW );
+        ForestLeaf child = leaf( 0, 2, 0, 0, 1 ); // finest x in [8,12), adjacent to L
+        auto       fnc   = f.face_neighbors( child, Face::XLOW );
         CHECK( fnc.kind == NeighborKind::Interior );
         CHECK( fnc.neighbors.size() == 1 );
         if ( fnc.neighbors.size() == 1 )
@@ -171,34 +172,27 @@ int main()
         }
     }
 
-    // --- radial domain boundary (S_rad=1: both radial faces are CMB/surface) -----------------------
+    // --- radial domain boundary + lateral diamond seam --------------------------------------------
     {
-        AdaptiveForest f( D, S_lat, S_rad );
-        ForestLeaf     L{ BrickId{ 0, 0, 0, 0 }, 0 };
+        AdaptiveForest f( M, S_lat, S_rad );
+        ForestLeaf     L = leaf( 0, 0, 0, 0, 0 );
         CHECK( f.face_neighbors( L, Face::RLOW ).kind == NeighborKind::DomainBoundary );
         CHECK( f.face_neighbors( L, Face::RHIGH ).kind == NeighborKind::DomainBoundary );
-    }
-
-    // --- lateral diamond seam ----------------------------------------------------------------------
-    {
-        AdaptiveForest f( D, S_lat, S_rad );
-        ForestLeaf     L{ BrickId{ 0, 0, 0, 0 }, 0 };
         CHECK( f.face_neighbors( L, Face::XLOW ).kind == NeighborKind::DiamondCrossing );
         CHECK( f.face_neighbors( L, Face::YLOW ).kind == NeighborKind::DiamondCrossing );
     }
 
     // --- touches_diamond_corner (S_lat=4: interior base blocks are not corners) --------------------
     {
-        AdaptiveForest f4( D, 4, S_rad ); // base anchors at 0,8,16,24; extent 32
-        CHECK( f4.touches_diamond_corner( ForestLeaf{ BrickId{ 0, 0, 0, 0 }, 0 } ) );    // corner
-        CHECK( f4.touches_diamond_corner( ForestLeaf{ BrickId{ 0, 24, 24, 0 }, 0 } ) );  // corner
-        CHECK( !f4.touches_diamond_corner( ForestLeaf{ BrickId{ 0, 8, 8, 0 }, 0 } ) );   // interior
-        CHECK( !f4.touches_diamond_corner( ForestLeaf{ BrickId{ 0, 8, 0, 0 }, 0 } ) );   // edge, not corner
+        AdaptiveForest f4( M, 4, S_rad );
+        CHECK( f4.touches_diamond_corner( leaf( 0, 0, 0, 0, 0 ) ) );   // corner
+        CHECK( f4.touches_diamond_corner( leaf( 0, 3, 3, 0, 0 ) ) );   // corner (index 3 == max)
+        CHECK( !f4.touches_diamond_corner( leaf( 0, 1, 1, 0, 0 ) ) );  // interior
+        CHECK( !f4.touches_diamond_corner( leaf( 0, 1, 0, 0, 0 ) ) );  // edge, not corner
     }
 
-    // === Step 3: balance_2to1 ====================================================================
+    // === balance_2to1 ============================================================================
 
-    // Global 2:1 check: every interior face-neighbor is within one level.
     auto is_balanced = []( const AdaptiveForest& f ) {
         const Face faces[6] = { Face::XLOW, Face::XHIGH, Face::YLOW, Face::YHIGH, Face::RLOW, Face::RHIGH };
         for ( const auto& L : f.leaves() )
@@ -216,52 +210,46 @@ int main()
 
     // --- already-balanced mesh is untouched --------------------------------------------------------
     {
-        AdaptiveForest f( D, S_lat, S_rad );
+        AdaptiveForest f( M, S_lat, S_rad );
         CHECK( is_balanced( f ) );
         const std::size_t before = f.size();
         f.balance_2to1();
-        CHECK( f.size() == before ); // no spurious splits
+        CHECK( f.size() == before );
         CHECK( is_balanced( f ) );
     }
 
     // --- a 2-level jump forces the coarse neighbor to split ---------------------------------------
     {
-        AdaptiveForest f( D, S_lat, S_rad );
-        ForestLeaf     L{ BrickId{ 0, 0, 0, 0 }, 0 };     // stays coarse initially
-        ForestLeaf     R{ BrickId{ 0, 8, 0, 0 }, 0 };
-        f.refine( { R } );                                // depth 1 across L's XHIGH face
-        f.refine( { ForestLeaf{ BrickId{ 0, 8, 0, 0 }, 1 } } ); // depth 2 in the adjacent quadrant
+        AdaptiveForest f( M, S_lat, S_rad );
+        ForestLeaf     L = leaf( 0, 0, 0, 0, 0 );
+        f.refine( { leaf( 0, 1, 0, 0, 0 ) } ); // subdivision 1 across L's XHIGH face
+        f.refine( { leaf( 0, 2, 0, 0, 1 ) } ); // subdivision 2 in the adjacent quadrant
 
-        // Now L (depth 0) has a depth-2 neighbor across XHIGH: a 2-level jump.
         CHECK( !is_balanced( f ) );
-        auto pre = f.face_neighbors( L, Face::XHIGH );
         bool saw_rel2 = false;
-        for ( const auto& nb : pre.neighbors )
+        for ( const auto& nb : f.face_neighbors( L, Face::XHIGH ).neighbors )
             if ( nb.rel_level == 2 )
                 saw_rel2 = true;
         CHECK( saw_rel2 );
 
         f.balance_2to1();
-
-        CHECK( is_balanced( f ) );   // ripple resolved it
-        CHECK( f.validate() );       // still a clean partition
-        CHECK( !f.contains( L ) );   // L was split to depth 1
+        CHECK( is_balanced( f ) );
+        CHECK( f.validate() );
+        CHECK( !f.contains( L ) );
         for ( const auto& c : f.children( L ) )
             CHECK( f.contains( c ) );
 
-        // idempotent: balancing again changes nothing
         const std::size_t after = f.size();
         f.balance_2to1();
-        CHECK( f.size() == after );
+        CHECK( f.size() == after ); // idempotent
     }
 
-    // --- deeper cascade: a depth-3 pocket forces a multi-level ripple ------------------------------
+    // --- deeper cascade: a subdivision-3 pocket forces a multi-level ripple ------------------------
     {
-        AdaptiveForest f( D, S_lat, S_rad );
-        // Drive one corner region down to the finest level, step by step.
-        f.refine( { ForestLeaf{ BrickId{ 0, 8, 0, 0 }, 0 } } );
-        f.refine( { ForestLeaf{ BrickId{ 0, 8, 0, 0 }, 1 } } );
-        f.refine( { ForestLeaf{ BrickId{ 0, 8, 0, 0 }, 2 } } ); // depth 3 pocket
+        AdaptiveForest f( M, S_lat, S_rad );
+        f.refine( { leaf( 0, 1, 0, 0, 0 ) } );
+        f.refine( { leaf( 0, 2, 0, 0, 1 ) } );
+        f.refine( { leaf( 0, 4, 0, 0, 2 ) } ); // subdivision-3 pocket
         CHECK( !is_balanced( f ) );
         f.balance_2to1();
         CHECK( is_balanced( f ) );
