@@ -183,6 +183,31 @@ int main( int argc, char** argv )
             CHECK( std::fabs( total - (double) ncopies ) < 1e-8 );
         }
 
+        // ---- uniformly subdivided mesh: EVERY block refined once, pole/corner blocks included -----
+        // Conforming seams everywhere (same subdivision on both sides), so the corner guard must NOT
+        // throw; the k=1 pole corners still form 5-way classes.
+        {
+            AdaptiveForest f( M, S_lat, S_rad );
+            const auto     base = f.leaves(); // copy: refine() mutates the leaf set
+            f.refine( base );
+            CHECK( f.size() == 8u * base.size() );
+            CHECK( f.validate() );
+            auto dom = DistributedDomain::create_adaptive_on_comm(
+                MPI_COMM_WORLD, LDR, radii, f, subdomain_to_rank_all_root );
+            const int nx = dom.domain_info().subdomain_num_nodes_per_side_laterally();
+            const int nr = dom.domain_info().subdomain_num_nodes_radially();
+
+            const auto t = build_2to1_tables( dom, nx, nx, nr ); // must NOT throw
+            CHECK( t.con_np.empty() );                           // fully conforming: no hanging nodes
+
+            Field field( (int) dom.subdomains().size(), nx, nx, nr ); // all ones
+            apply_exchange_tables( t, field );
+
+            // north pole at subdivision 1: still exactly 5 diamonds
+            const int C1 = local_index( dom, SubdomainInfo{ 0, 0, 0, 0 } ); // corner child, k=1
+            CHECK( close( field( C1, 0, 0, 1 ), 5.0 ) );
+        }
+
         // ---- (2) refined domain: exact mass conservation into genuine DoFs ------------------------
         {
             AdaptiveForest f( M, S_lat, S_rad );
@@ -229,6 +254,54 @@ int main( int argc, char** argv )
                             total += field( s, x, y, r );
                         }
             CHECK( std::fabs( total - (double) ncopies ) < 1e-8 ); // every copy delivered exactly once
+        }
+
+        // ---- uniformly subdivided mesh: corner blocks refined CONFORMINGLY are allowed -------------
+        // (the corner guard only rejects 2:1 at pentagon corners; a fully subdivided sphere is fine)
+        {
+            AdaptiveForest f( M, S_lat, S_rad );
+            const auto     base = f.leaves(); // copy before mutating
+            f.refine( base );
+            CHECK( f.validate() );
+            CHECK( f.size() == 8u * 10 * S_lat * S_lat * S_rad );
+
+            auto dom = DistributedDomain::create_adaptive_on_comm(
+                MPI_COMM_WORLD, LDR, radii, f, subdomain_to_rank_all_root );
+            const int nsub = (int) dom.subdomains().size();
+            const int nx   = dom.domain_info().subdomain_num_nodes_per_side_laterally();
+            const int nr   = dom.domain_info().subdomain_num_nodes_radially();
+            const int ny   = nx;
+
+            const auto t = build_2to1_tables( dom, nx, ny, nr ); // must NOT throw
+            CHECK( t.con_np.empty() );                           // fully conforming: no hanging nodes
+
+            Field field( nsub, nx, ny, nr ); // all ones
+            apply_exchange_tables( t, field );
+
+            // the north pole is still a 5-way class at subdivision 1
+            const int C = local_index( dom, SubdomainInfo{ 0, 0, 0, 0 } ); // d0 pole-corner child
+            CHECK( close( field( C, 0, 0, 1 ), 5.0 ) );
+
+            std::set< std::array< int, 4 > > noncanon2;
+            for ( std::size_t c = 0; c + 1 < t.cls_offsets.size(); ++c )
+                for ( int m = t.cls_offsets[c] + 1; m < t.cls_offsets[c + 1]; ++m )
+                {
+                    const Idx4& i = t.cls_members[m];
+                    noncanon2.insert( { i.s, i.x, i.y, i.r } );
+                }
+            double total   = 0.0;
+            long   ncopies = 0;
+            for ( int s = 0; s < nsub; ++s )
+                for ( int x = 0; x < nx; ++x )
+                    for ( int y = 0; y < ny; ++y )
+                        for ( int r = 0; r < nr; ++r )
+                        {
+                            ++ncopies;
+                            if ( noncanon2.count( { s, x, y, r } ) )
+                                continue;
+                            total += field( s, x, y, r );
+                        }
+            CHECK( std::fabs( total - (double) ncopies ) < 1e-8 );
         }
     }
 

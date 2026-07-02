@@ -265,9 +265,11 @@ inline TwoToOneTables build_2to1_tables( const DistributedDomain& dom, int nx, i
 
         const bool xext = ( ox == 0 || ox == nblk - 1 );
         const bool yext = ( oy == 0 || oy == nblk - 1 );
-        if ( k > 0 && xext && yext )
-            throw std::runtime_error(
-                "AMR seam assembly: refining pole/corner-touching blocks is not supported." );
+        // A refined pole/corner-touching block is allowed only if its seams are CONFORMING (every
+        // seam-face node finds a coincident partner) -- e.g. in a uniformly subdivided mesh. A 2:1
+        // interface at a pentagon corner (missed nodes below) is not supported and throws.
+        const bool corner_guard = ( k > 0 && xext && yext );
+        int        corner_misses = 0;
 
         Face seam_faces[2];
         int  n_seam = 0;
@@ -308,10 +310,14 @@ inline TwoToOneTables build_2to1_tables( const DistributedDomain& dom, int nx, i
                     const auto it = gid.find( ng );
                     if ( it != gid.end() )
                         unite( class_of.at( key_of( mine ) ), it->second );
-                    // not found -> no coincident node on the other side (seam-hanging); constraint
-                    // handles it via pass 1.
+                    else
+                        ++corner_misses; // seam-hanging here; only fatal for corner blocks (below)
                 }
         }
+        if ( corner_guard && corner_misses > 0 )
+            throw std::runtime_error(
+                "AMR seam assembly: 2:1 interface at a pole/corner-touching refined block is not "
+                "supported (refine its seam neighbors to the same subdivision or keep it coarse)." );
     }
 
     // ---- pass 4: merged classes -> canonical map + CSR (genuine classes with >= 2 members) --------

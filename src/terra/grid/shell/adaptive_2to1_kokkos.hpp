@@ -104,7 +104,7 @@ inline void apply_exchange_device( const TwoToOneTablesDevice& t,
     const auto ad   = t.asm_dst;
     const auto as   = t.asm_src;
     const auto aw   = t.asm_w;
-    const int  ncls = static_cast< int >( co.extent( 0 ) ) - 1;
+    const int  ncls = std::max( 0, static_cast< int >( co.extent( 0 ) ) - 1 ); // 0 for empty tables
 
     Kokkos::View< ScalarT* > cls_tmp( "amr2to1_cls_tmp", ncls );
     Kokkos::View< ScalarT* > asm_tmp( "amr2to1_asm_tmp", ad.extent( 0 ) );
@@ -169,6 +169,40 @@ inline void apply_constraint_device( const TwoToOneTablesDevice& t,
             f( d( i, 0 ), d( i, 1 ), d( i, 2 ), d( i, 3 ) ) = tmp( i );
         } );
     Kokkos::fence();
+}
+
+// Vector-field (SoA Grid4DDataVec) variants: the tables are node-based, so each component is exchanged
+// / constrained independently with the same tables.
+template < typename ScalarT, int VecDim >
+inline void apply_exchange_device( const TwoToOneTablesDevice& t,
+                                   const grid::Grid4DDataVec< ScalarT, VecDim >& field )
+{
+    for ( int d = 0; d < VecDim; ++d )
+        apply_exchange_device( t, field.comp_[d] );
+}
+
+template < typename ScalarT, int VecDim >
+inline void apply_constraint_device( const TwoToOneTablesDevice& t,
+                                     const grid::Grid4DDataVec< ScalarT, VecDim >& field )
+{
+    for ( int d = 0; d < VecDim; ++d )
+        apply_constraint_device( t, field.comp_[d] );
+}
+
+// deep-copy helpers so solve-side code can treat scalar and SoA-vector grids uniformly
+template < typename ScalarT >
+inline void amr_deep_copy( const grid::Grid4DDataScalar< ScalarT >& dst,
+                           const grid::Grid4DDataScalar< ScalarT >& src )
+{
+    Kokkos::deep_copy( dst, src );
+}
+
+template < typename ScalarT, int VecDim >
+inline void amr_deep_copy( const grid::Grid4DDataVec< ScalarT, VecDim >& dst,
+                           const grid::Grid4DDataVec< ScalarT, VecDim >& src )
+{
+    for ( int d = 0; d < VecDim; ++d )
+        Kokkos::deep_copy( dst.comp_[d], src.comp_[d] );
 }
 
 } // namespace terra::grid::shell::amr
