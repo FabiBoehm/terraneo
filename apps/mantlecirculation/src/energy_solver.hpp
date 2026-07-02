@@ -42,7 +42,7 @@ class EnergySolver
     virtual ~EnergySolver() = default;
 
     /// CFL/stability-bound dt for the scheme at the current velocity field.
-    virtual ScalarType compute_dt() = 0;
+    virtual ScalarType compute_dt( const int timestep ) = 0;
 
     /// Take one timestep.  `print_convergence` controls whether per-step
     /// solver tables are printed (typically only on the final Picard pass).
@@ -81,6 +81,22 @@ class EnergySolver
     /// the scheme allocates it.
     virtual linalg::VectorQ1Scalar< ScalarType >* h_w_diag_view() { return nullptr; }
 };
+
+template < typename ScalarType >
+ScalarType ramp_dt( const ScalarType dt, const int timestep, const int ramp_steps )
+{
+    constexpr ScalarType ramp_scale_start = 1e-4;
+    constexpr ScalarType ramp_scale_end   = 0.5;
+
+    if ( timestep > ramp_steps )
+        return dt;
+
+    const ScalarType scale =
+        ramp_scale_start *
+        std::pow( ramp_scale_end / ramp_scale_start, static_cast< ScalarType >( timestep - 1 ) / ( ramp_steps - 1 ) );
+
+    return scale * dt;
+}
 
 /// Implicit Galerkin SUPG advection-diffusion energy solve.
 ///
@@ -191,13 +207,14 @@ class SUPGSolver : public EnergySolver< ScalarType >
         util::logroot << "SUPG energy solver ready." << std::endl;
     }
 
-    ScalarType compute_dt() override
+    ScalarType compute_dt( const int timestep ) override
     {
         // SUPG: implicit diffusion, dt only constrained by advection CFL.
         const auto max_vel      = kernels::common::max_vector_magnitude( velocity_.grid_data() );
         const auto dt_advection = h_ / max_vel;
+        const auto dt_cfl       = prm_.time_stepping_parameters.dt_scaling * dt_advection;
         const auto dt           = std::clamp(
-            prm_.time_stepping_parameters.dt_scaling * dt_advection,
+            ramp_dt( dt_cfl, timestep, prm_.time_stepping_parameters.initial_dt_ramp_steps ),
             prm_.time_stepping_parameters.dt_min,
             prm_.time_stepping_parameters.dt_max );
 
@@ -205,8 +222,26 @@ class SUPGSolver : public EnergySolver< ScalarType >
         util::logroot << "    max_vel (cm/a) :             " << max_vel * prm_.physics_parameters.calc_cm_per_year
                       << std::endl;
         util::logroot << "    h (m) :                      " << h_ * prm_.mesh_parameters.radius_surface_m << std::endl;
-        util::logroot << "=>  dt (= dt_scaling * h/v_max): " << dt * prm_.physics_parameters.calc_time_Ma << " Ma"
-                      << std::endl;
+        util::logroot << "    cfl timestep size (= dt_scaling * h/v_max): "
+                      << dt_cfl * prm_.physics_parameters.calc_time_Ma << " Ma" << std::endl;
+        if ( dt_cfl > prm_.time_stepping_parameters.dt_max )
+        {
+            util::logroot << "....limiting maximum timestep size to " << prm_.time_stepping_parameters.dt_max_Ma
+                          << " Ma....." << std::endl;
+        }
+        else if ( dt_cfl < prm_.time_stepping_parameters.dt_min )
+        {
+            util::logroot << "....limiting minimum timestep size to " << prm_.time_stepping_parameters.dt_min_Ma
+                          << " Ma....." << std::endl;
+        }
+        if ( timestep <= prm_.time_stepping_parameters.initial_dt_ramp_steps )
+        {
+            util::logroot << "....enforcing exponential ramp-up in first "
+                          << prm_.time_stepping_parameters.initial_dt_ramp_steps << " timesteps....." << std::endl;
+        }
+        util::logroot << "-------------------------------------------------" << std::endl;
+        util::logroot << "=>   dt: " << dt * prm_.physics_parameters.calc_time_Ma << " Ma.\n" << std::endl;
+
         return dt;
     }
 
@@ -485,12 +520,13 @@ class EVSolver : public EnergySolver< ScalarType >
     linalg::VectorQ1Scalar< ScalarType >* lap_diag_view() override { return lap_diag_.get(); }
     linalg::VectorQ1Scalar< ScalarType >* h_w_diag_view() override { return h_w_nodal_diag_.get(); }
 
-    ScalarType compute_dt() override
+    ScalarType compute_dt( const int timestep ) override
     {
         const auto max_vel      = kernels::common::max_vector_magnitude( velocity_.grid_data() );
         const auto dt_advection = h_ / max_vel;
+        const auto dt_cfl       = prm_.time_stepping_parameters.dt_scaling * dt_advection;
         const auto dt           = std::clamp(
-            prm_.time_stepping_parameters.dt_scaling * dt_advection,
+            ramp_dt( dt_cfl, timestep, prm_.time_stepping_parameters.initial_dt_ramp_steps ),
             prm_.time_stepping_parameters.dt_min,
             prm_.time_stepping_parameters.dt_max );
 
@@ -498,8 +534,26 @@ class EVSolver : public EnergySolver< ScalarType >
         util::logroot << "    max_vel (cm/a) :             " << max_vel * prm_.physics_parameters.calc_cm_per_year
                       << std::endl;
         util::logroot << "    h (m) :                      " << h_ * prm_.mesh_parameters.radius_surface_m << std::endl;
-        util::logroot << "=>  dt (= dt_scaling * h/v_max): " << dt * prm_.physics_parameters.calc_time_Ma << " Ma "
-                      << std::endl;
+        util::logroot << "    cfl timestep size (= dt_scaling * h/v_max): "
+                      << dt_cfl * prm_.physics_parameters.calc_time_Ma << " Ma " << std::endl;
+        if ( dt_cfl > prm_.time_stepping_parameters.dt_max )
+        {
+            util::logroot << "....limiting maximum timestep size to " << prm_.time_stepping_parameters.dt_max_Ma
+                          << " Ma....." << std::endl;
+        }
+        else if ( dt_cfl < prm_.time_stepping_parameters.dt_min )
+        {
+            util::logroot << "....limiting minimum timestep size to " << prm_.time_stepping_parameters.dt_min_Ma
+                          << " Ma....." << std::endl;
+        }
+        if ( timestep <= prm_.time_stepping_parameters.initial_dt_ramp_steps )
+        {
+            util::logroot << "....enforcing exponential ramp-up in first "
+                          << prm_.time_stepping_parameters.initial_dt_ramp_steps << " timesteps....." << std::endl;
+        }
+        util::logroot << "-------------------------------------------------" << std::endl;
+        util::logroot << "=>   dt: " << dt * prm_.physics_parameters.calc_time_Ma << " Ma.\n" << std::endl;
+
         return dt;
     }
 
@@ -1045,7 +1099,7 @@ class FCTSolver : public EnergySolver< ScalarType >
 
     void restore_for_picard() override { Kokkos::deep_copy( T_fct_.grid_data(), T_fct_backup_.grid_data() ); }
 
-    ScalarType compute_dt() override
+    ScalarType compute_dt( const int timestep ) override
     {
         const auto dt_stable = fv::hex::operators::compute_dt_stable(
             *domain_,

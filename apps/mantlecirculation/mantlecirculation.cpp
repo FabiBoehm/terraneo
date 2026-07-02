@@ -556,7 +556,7 @@ Result<> run( const Parameters& prm )
         energy->snapshot_for_picard();
 
         // Compute dt once from current velocity (before Picard loop).
-        const ScalarType dt = energy->compute_dt();
+        const ScalarType dt = energy->compute_dt( timestep );
 
         for ( int picard = 0; picard < num_picard; picard++ )
         {
