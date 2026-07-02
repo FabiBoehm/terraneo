@@ -196,6 +196,78 @@ int main()
         CHECK( !f4.touches_diamond_corner( ForestLeaf{ BrickId{ 0, 8, 0, 0 }, 0 } ) );   // edge, not corner
     }
 
+    // === Step 3: balance_2to1 ====================================================================
+
+    // Global 2:1 check: every interior face-neighbor is within one level.
+    auto is_balanced = []( const AdaptiveForest& f ) {
+        const Face faces[6] = { Face::XLOW, Face::XHIGH, Face::YLOW, Face::YHIGH, Face::RLOW, Face::RHIGH };
+        for ( const auto& L : f.leaves() )
+            for ( Face fc : faces )
+            {
+                auto fn = f.face_neighbors( L, fc );
+                if ( fn.kind != NeighborKind::Interior )
+                    continue;
+                for ( const auto& nb : fn.neighbors )
+                    if ( nb.rel_level > 1 || nb.rel_level < -1 )
+                        return false;
+            }
+        return true;
+    };
+
+    // --- already-balanced mesh is untouched --------------------------------------------------------
+    {
+        AdaptiveForest f( D, S_lat, S_rad );
+        CHECK( is_balanced( f ) );
+        const std::size_t before = f.size();
+        f.balance_2to1();
+        CHECK( f.size() == before ); // no spurious splits
+        CHECK( is_balanced( f ) );
+    }
+
+    // --- a 2-level jump forces the coarse neighbor to split ---------------------------------------
+    {
+        AdaptiveForest f( D, S_lat, S_rad );
+        ForestLeaf     L{ BrickId{ 0, 0, 0, 0 }, 0 };     // stays coarse initially
+        ForestLeaf     R{ BrickId{ 0, 8, 0, 0 }, 0 };
+        f.refine( { R } );                                // depth 1 across L's XHIGH face
+        f.refine( { ForestLeaf{ BrickId{ 0, 8, 0, 0 }, 1 } } ); // depth 2 in the adjacent quadrant
+
+        // Now L (depth 0) has a depth-2 neighbor across XHIGH: a 2-level jump.
+        CHECK( !is_balanced( f ) );
+        auto pre = f.face_neighbors( L, Face::XHIGH );
+        bool saw_rel2 = false;
+        for ( const auto& nb : pre.neighbors )
+            if ( nb.rel_level == 2 )
+                saw_rel2 = true;
+        CHECK( saw_rel2 );
+
+        f.balance_2to1();
+
+        CHECK( is_balanced( f ) );   // ripple resolved it
+        CHECK( f.validate() );       // still a clean partition
+        CHECK( !f.contains( L ) );   // L was split to depth 1
+        for ( const auto& c : f.children( L ) )
+            CHECK( f.contains( c ) );
+
+        // idempotent: balancing again changes nothing
+        const std::size_t after = f.size();
+        f.balance_2to1();
+        CHECK( f.size() == after );
+    }
+
+    // --- deeper cascade: a depth-3 pocket forces a multi-level ripple ------------------------------
+    {
+        AdaptiveForest f( D, S_lat, S_rad );
+        // Drive one corner region down to the finest level, step by step.
+        f.refine( { ForestLeaf{ BrickId{ 0, 8, 0, 0 }, 0 } } );
+        f.refine( { ForestLeaf{ BrickId{ 0, 8, 0, 0 }, 1 } } );
+        f.refine( { ForestLeaf{ BrickId{ 0, 8, 0, 0 }, 2 } } ); // depth 3 pocket
+        CHECK( !is_balanced( f ) );
+        f.balance_2to1();
+        CHECK( is_balanced( f ) );
+        CHECK( f.validate() );
+    }
+
     if ( g_failures == 0 )
         std::printf( "test_adaptive_forest: ALL PASS (%d checks)\n", g_checks );
     else

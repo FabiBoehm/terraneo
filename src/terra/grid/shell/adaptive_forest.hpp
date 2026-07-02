@@ -193,6 +193,43 @@ class AdaptiveForest
         normalize();
     }
 
+    // Enforce the 2:1 rule: no leaf may have a face-neighbor more than one level finer. Repeatedly
+    // split any offending (coarse) leaf until a fixed point. Splitting only ever makes the mesh finer
+    // and depth is capped at D, so this terminates. Idempotent on an already-balanced mesh.
+    void balance_2to1()
+    {
+        static constexpr Face kFaces[6] = { Face::XLOW, Face::XHIGH, Face::YLOW,
+                                            Face::YHIGH, Face::RLOW, Face::RHIGH };
+        bool changed = true;
+        while ( changed )
+        {
+            changed = false;
+            std::vector< ForestLeaf > to_split;
+            for ( const auto& L : leaves_ )
+            {
+                if ( L.depth >= D_ )
+                    continue;
+                bool flagged = false;
+                for ( int fi = 0; fi < 6 && !flagged; ++fi )
+                {
+                    const auto fn = face_neighbors( L, kFaces[fi] );
+                    for ( const auto& nb : fn.neighbors )
+                        if ( nb.rel_level >= 2 ) // a neighbor is 2+ levels finer -> must split L
+                        {
+                            to_split.push_back( L );
+                            flagged = true;
+                            break;
+                        }
+                }
+            }
+            if ( !to_split.empty() )
+            {
+                refine( to_split ); // re-normalizes; next pass re-checks the freshly created children
+                changed = true;
+            }
+        }
+    }
+
     // --- queries -----------------------------------------------------------------------------------
 
     [[nodiscard]] const std::vector< ForestLeaf >& leaves() const { return leaves_; }
