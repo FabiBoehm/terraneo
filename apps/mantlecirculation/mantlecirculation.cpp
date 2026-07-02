@@ -200,7 +200,7 @@ Result<> run( const Parameters& prm )
                "\nRayleigh number: "
             << prm.physics_parameters.rayleigh_number
             << "\nCharacteristic velocity: " << prm.physics_parameters.characteristic_velocity
-            << "\nThermal diffusivity: " << prm.physics_parameters.thermal_diffusivity
+            << "\nThermal diffusivity: " << prm.physics_parameters.thermal_diffusivity_dim
             << "\n------------------------------------------\n"
             << std::endl;
 

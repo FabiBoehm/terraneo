@@ -135,7 +135,7 @@ class SUPGSolver : public EnergySolver< ScalarType >
             coords_radii_,
             boundary_mask_,
             velocity_,
-            prm_.physics_parameters.thermal_diffusivity,
+            prm_.physics_parameters.thermal_diffusivity_nondim,
             ScalarType( 0 ),
             /*treat_boundary=*/true );
 
@@ -145,7 +145,7 @@ class SUPGSolver : public EnergySolver< ScalarType >
             coords_radii_,
             boundary_mask_,
             velocity_,
-            prm_.physics_parameters.thermal_diffusivity,
+            prm_.physics_parameters.thermal_diffusivity_nondim,
             ScalarType( 0 ),
             /*treat_boundary=*/false );
 
@@ -155,7 +155,7 @@ class SUPGSolver : public EnergySolver< ScalarType >
             coords_radii_,
             boundary_mask_,
             velocity_,
-            prm_.physics_parameters.thermal_diffusivity,
+            prm_.physics_parameters.thermal_diffusivity_nondim,
             ScalarType( 0 ),
             /*treat_boundary=*/false,
             /*diagonal=*/true );
@@ -377,7 +377,7 @@ class EVSolver : public EnergySolver< ScalarType >
             coords_radii_,
             boundary_mask_,
             velocity_,
-            prm_.physics_parameters.thermal_diffusivity,
+            prm_.physics_parameters.thermal_diffusivity_nondim,
             ScalarType( 0 ),
             /*treat_boundary=*/true );
         A_->set_supg_enabled( false );
@@ -388,7 +388,7 @@ class EVSolver : public EnergySolver< ScalarType >
             coords_radii_,
             boundary_mask_,
             velocity_,
-            prm_.physics_parameters.thermal_diffusivity,
+            prm_.physics_parameters.thermal_diffusivity_nondim,
             ScalarType( 0 ),
             /*treat_boundary=*/false );
         A_neumann_->set_supg_enabled( false );
@@ -399,7 +399,7 @@ class EVSolver : public EnergySolver< ScalarType >
             coords_radii_,
             boundary_mask_,
             velocity_,
-            prm_.physics_parameters.thermal_diffusivity,
+            prm_.physics_parameters.thermal_diffusivity_nondim,
             ScalarType( 0 ),
             /*treat_boundary=*/false,
             /*diagonal=*/true );
@@ -416,7 +416,7 @@ class EVSolver : public EnergySolver< ScalarType >
             *domain_,
             coords_shell_,
             coords_radii_,
-            static_cast< ScalarType >( prm_.physics_parameters.thermal_diffusivity ) );
+            static_cast< ScalarType >( prm_.physics_parameters.thermal_diffusivity_nondim ) );
 
         // Global lumped mass M_lumped = M · 1, used to invert the global
         // Galerkin K·T into a Q1-nodal lap field per timestep:
@@ -1053,7 +1053,7 @@ class FCTSolver : public EnergySolver< ScalarType >
             fv_cell_centers_.grid_data(),
             coords_shell_,
             coords_radii_,
-            prm_.physics_parameters.thermal_diffusivity );
+            prm_.physics_parameters.thermal_diffusivity_nondim );
         const auto dt =
             std::min( prm_.time_stepping_parameters.dt_scaling * dt_stable, prm_.time_stepping_parameters.dt_max );
 
@@ -1095,7 +1095,7 @@ class FCTSolver : public EnergySolver< ScalarType >
                         coords_radii_,
                         dt,
                         fv_fct_bufs_,
-                        prm_.physics_parameters.thermal_diffusivity,
+                        prm_.physics_parameters.thermal_diffusivity_nondim,
                         T_source_.grid_data(),
                         /*subtract_divergence=*/true,
                         boundary_mask_,
