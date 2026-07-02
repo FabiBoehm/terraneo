@@ -14,6 +14,7 @@
 #include "util/logging.hpp"
 #include "subdomain_info.hpp"
 #include "adaptive_forest.hpp"
+#include "adaptive_geometry.hpp"
 
 namespace terra::grid::shell {
 
@@ -2612,8 +2613,9 @@ class DistributedDomain
         domain.domain_info_ = DomainInfo(
             lateral_diamond_refinement_level, radii, forest.lateral_subdomains_per_diamond(),
             forest.radial_subdomains() );
-        domain.comm_     = comm;
-        domain.adaptive_ = true;
+        domain.comm_            = comm;
+        domain.adaptive_        = true;
+        domain.max_subdivision_ = forest.max_subdivision();
 
         if ( comm != MPI_COMM_NULL )
         {
@@ -2649,6 +2651,9 @@ class DistributedDomain
         return it == subdomain_subdivision_.end() ? 0 : it->second;
     }
 
+    /// @brief Maximum subdivision (AMR split budget) of this domain; 0 for uniform domains.
+    [[nodiscard]] int max_subdivision() const { return max_subdivision_; }
+
     [[nodiscard]] const std::map< SubdomainInfo, std::tuple< LocalSubdomainIdx, SubdomainNeighborhood > >&
         subdomains() const
     {
@@ -2666,9 +2671,10 @@ class DistributedDomain
     std::map< LocalSubdomainIdx, SubdomainInfo > local_subdomain_index_to_subdomain_info_;
     MPI_Comm                                     comm_ = MPI_COMM_WORLD;
 
-    // AMR only (empty / false for uniform domains -- the uniform path never touches these):
+    // AMR only (empty / false / 0 for uniform domains -- the uniform path never touches these):
     std::map< SubdomainInfo, int > subdomain_subdivision_; // finest-frame anchor -> subdivision
-    bool                           adaptive_ = false;
+    bool                           adaptive_        = false;
+    int                            max_subdivision_ = 0;
 };
 
 struct SubdomainDistribution
@@ -2799,14 +2805,31 @@ Grid3DDataVec< T, 3 > subdomain_unit_sphere_single_shell_coords( const Distribut
     {
         const auto& [subdomain_idx, neighborhood] = data;
 
-        unit_sphere_single_shell_subdomain_coords< T >(
-            subdomain_coords_host,
-            subdomain_idx,
-            subdomain_info.diamond_id(),
-            domain.domain_info().diamond_lateral_refinement_level(),
-            domain.domain_info().num_subdomains_per_diamond_side(),
-            subdomain_info.subdomain_x(),
-            subdomain_info.subdomain_y() );
+        if ( domain.adaptive() )
+        {
+            // A subdivision-k leaf = the same routine at effective refinement (LDR+k) with (S_lat<<k)
+            // subdomains per side, at its own-level block index (adaptive_geometry.hpp).
+            const auto p = amr::adaptive_lateral_coord_params(
+                domain.domain_info().diamond_lateral_refinement_level(),
+                domain.domain_info().num_subdomains_per_diamond_side(),
+                domain.max_subdivision(),
+                domain.subdivision_of( subdomain_info ),
+                subdomain_info );
+            unit_sphere_single_shell_subdomain_coords< T >(
+                subdomain_coords_host, subdomain_idx, subdomain_info.diamond_id(), p.global_refinements,
+                p.num_subdomains_per_side, p.subdomain_i, p.subdomain_j );
+        }
+        else
+        {
+            unit_sphere_single_shell_subdomain_coords< T >(
+                subdomain_coords_host,
+                subdomain_idx,
+                subdomain_info.diamond_id(),
+                domain.domain_info().diamond_lateral_refinement_level(),
+                domain.domain_info().num_subdomains_per_diamond_side(),
+                subdomain_info.subdomain_x(),
+                subdomain_info.subdomain_y() );
+        }
     }
 
     Kokkos::deep_copy( subdomain_coords, subdomain_coords_host );
@@ -2832,14 +2855,29 @@ Grid2DDataScalar< T > subdomain_shell_radii( const DistributedDomain& domain )
     {
         const auto& [subdomain_idx, neighborhood] = data;
 
-        const int subdomain_innermost_node_idx = subdomain_info.subdomain_r() * layers_per_subdomain;
-        const int subdomain_outermost_node_idx = subdomain_innermost_node_idx + layers_per_subdomain;
-
-        int j = 0;
-        for ( int node_idx = subdomain_innermost_node_idx; node_idx <= subdomain_outermost_node_idx; node_idx++ )
+        if ( domain.adaptive() )
         {
-            radii_host( subdomain_idx, j ) = domain.domain_info().radii()[node_idx];
-            j++;
+            // A subdivided leaf's shells fall between base shells: linear interpolation of the base
+            // radii (adaptive_geometry.hpp). Subdivision 0 reproduces the base radii exactly.
+            for ( int j = 0; j <= layers_per_subdomain; j++ )
+            {
+                radii_host( subdomain_idx, j ) = static_cast< T >( amr::adaptive_shell_radius(
+                    domain.domain_info().radii(), domain.domain_info().num_subdomains_in_radial_direction(),
+                    domain.max_subdivision(), domain.subdivision_of( subdomain_info ), subdomain_info, j ) );
+            }
+        }
+        else
+        {
+            const int subdomain_innermost_node_idx = subdomain_info.subdomain_r() * layers_per_subdomain;
+            const int subdomain_outermost_node_idx = subdomain_innermost_node_idx + layers_per_subdomain;
+
+            int j = 0;
+            for ( int node_idx = subdomain_innermost_node_idx; node_idx <= subdomain_outermost_node_idx;
+                  node_idx++ )
+            {
+                radii_host( subdomain_idx, j ) = domain.domain_info().radii()[node_idx];
+                j++;
+            }
         }
     }
 

@@ -38,6 +38,7 @@ endfunction()
 # Adding all the tests.
 add_terra_test(test_adaptive_forest)
 add_terra_test(test_adaptive_domain)
+add_terra_test(test_adaptive_geometry)
 add_terra_test(test_arg_parser)
 add_terra_test(test_basis_trafo_normal_tangential)
 add_terra_test(test_boundary_mass)
