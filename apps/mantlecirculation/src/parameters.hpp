@@ -296,8 +296,9 @@ struct TimeSteppingParameters
     double dt_max     = 1.0;
     double dt_min     = 1.0;
 
-    int max_timesteps    = 10;
-    int timestep_initial = 0;
+    int max_timesteps         = 10;
+    int timestep_initial      = 0;
+    int initial_dt_ramp_steps = 20;
 
     int energy_substeps   = 1;
     int picard_iterations = 1;
@@ -680,6 +681,9 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
             "Simulation aborts when this time step index is reached. "
             "If a checkpoint is loaded, the simulation will start at the next step after the loaded checkpoint. "
             "This means the number of time steps executed might be smaller than what is passed in here." );
+    add_option_with_default( app, "--initial-ramp-steps", parameters.time_stepping_parameters.initial_dt_ramp_steps )
+        ->group( "Time Discretization" )
+        ->description( "Amount of ramp-up timesteps at the beginning of the run." );
     add_option_with_default( app, "--energy-substeps", parameters.time_stepping_parameters.energy_substeps )
         ->group( "Time Discretization" );
     add_option_with_default( app, "--picard-iterations", parameters.time_stepping_parameters.picard_iterations )
