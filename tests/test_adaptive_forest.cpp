@@ -12,9 +12,11 @@
 using namespace terra::grid::shell::amr;
 
 static int g_failures = 0;
+static int g_checks   = 0;
 #define CHECK( cond )                                                             \
     do                                                                            \
     {                                                                             \
+        ++g_checks;                                                               \
         if ( !( cond ) )                                                          \
         {                                                                         \
             std::printf( "  FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond );       \
@@ -195,8 +197,8 @@ int main()
     }
 
     if ( g_failures == 0 )
-        std::printf( "test_adaptive_forest: ALL PASS\n" );
+        std::printf( "test_adaptive_forest: ALL PASS (%d checks)\n", g_checks );
     else
-        std::printf( "test_adaptive_forest: %d FAILURE(S)\n", g_failures );
+        std::printf( "test_adaptive_forest: %d/%d FAILURE(S)\n", g_failures, g_checks );
     return g_failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
