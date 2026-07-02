@@ -114,18 +114,19 @@ int main( int argc, char** argv )
         auto dom = DistributedDomain::create_adaptive_on_comm(
             MPI_COMM_WORLD, LDR, radii, f, subdomain_to_rank_all_root );
 
-        // coarse leaf (0,0,0,0) sees 4 finer across x-high + 1 same across y-high
+        // coarse leaf (0,0,0,0) sees 4 finer across x-high + same-level in-diamond (y-high) and
+        // across its two diamond seams (x-low -> d1, y-low -> d4)
         const SubdomainInfo Lanchor{ 0, 0, 0, 0 };
         CHECK( dom.subdomains().count( Lanchor ) == 1 );
         const auto& nbh = dom.adaptive_neighborhood( Lanchor );
-        CHECK( nbh.faces.size() == 5u );
+        CHECK( nbh.faces.size() == 7u );
         int finer = 0, same = 0;
         for ( const auto& fn : nbh.faces )
         {
             if ( fn.rel_level == +1 ) ++finer;
             if ( fn.rel_level == 0 ) ++same;
         }
-        CHECK( finer == 4 && same == 1 );
+        CHECK( finer == 4 && same == 3 );
 
         // closure: on a single rank, every referenced neighbor anchor is itself a local subdomain
         for ( const auto& [sub, tup] : dom.subdomains() )

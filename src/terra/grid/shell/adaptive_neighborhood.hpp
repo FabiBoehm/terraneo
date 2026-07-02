@@ -23,10 +23,12 @@ struct AdaptiveFaceNeighbor
 {
     SubdomainInfo anchor;        // finest-frame anchor of the neighbor leaf (unique global key)
     Face          my_face;       // which of my faces this neighbor sits across
-    Face          neighbor_face; // the neighbor's face touching me (opposite of my_face)
+    Face          neighbor_face; // the neighbor's face touching me (opposite for in-diamond neighbors)
     int           rel_level;     // neighbor.subdivision - my.subdivision: 0 same, -1 coarser, +1 finer
-    int           sub_octant;    // which quarter (0..3) of my face a finer neighbor covers; 0 otherwise
+    int           sub_octant;    // which quarter (0..3) of my face a finer neighbor covers (labeled in
+                                 // MY frame); 0 otherwise
     int           rank;          // MPI rank owning the neighbor
+    bool          seam_reversed; // cross-diamond only: neighbor's in-face lateral index runs backwards
 };
 
 // All face-neighbors of one leaf (across all 6 faces; boundary/diamond-seam faces contribute nothing).
@@ -52,9 +54,9 @@ inline AdaptiveNeighborhood face_neighborhood_of( const AdaptiveForest& forest, 
         for ( const auto& nb : fn.neighbors )
         {
             const SubdomainInfo nanchor = forest.finest_anchor( nb.leaf );
-            nbh.faces.push_back(
-                AdaptiveFaceNeighbor{ nanchor, f, nb.neighbor_face, nb.rel_level, nb.sub_octant,
-                                      rank_of( nanchor ) } );
+            nbh.faces.push_back( AdaptiveFaceNeighbor{ nanchor, f, nb.neighbor_face, nb.rel_level,
+                                                       nb.sub_octant, rank_of( nanchor ),
+                                                       nb.seam_reversed } );
         }
     }
     return nbh;

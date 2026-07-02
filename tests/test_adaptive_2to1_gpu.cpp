@@ -216,6 +216,137 @@ int main( int argc, char** argv )
         CHECK( max_mult == 5 ); // deepest sharing on this config (S_rad=1): the 5-way pole corners
     }
 
+    // ==== geometric oracle on a SEAM-REFINED mesh + parent bracketing ==============================
+    // Refine one block on a FORWARD seam (d0 y-low -> d4) and one on a REVERSED seam (d0 y-high ->
+    // d5), balance across the seams, and check on device:
+    //  (a) assembled constant-1 multiplicity == geometric coincidence-group size at every genuine
+    //      node (hanging positions excluded) -- a wrong seam flip would pair non-coincident nodes;
+    //  (b) every hanging node's position ~= the weighted average of its parents' positions (chord
+    //      tolerance) -- directly validates the flipped parent selection across the seam.
+    {
+        const int                   LDR = 4, S_lat = 4, S_rad = 1, M = 3;
+        const std::vector< double > radii = { 1.0, 1.25, 1.5, 1.75, 2.0 };
+
+        AdaptiveForest fst( M, S_lat, S_rad );
+        fst.refine( { ForestLeaf{ SubdomainInfo{ 0, 1, 0, 0 }, 0 },     // forward seam block
+                      ForestLeaf{ SubdomainInfo{ 0, 1, 3, 0 }, 0 } } ); // reversed seam block
+        fst.balance_2to1();
+        CHECK( fst.validate() );
+        auto dom = DistributedDomain::create_adaptive_on_comm(
+            MPI_COMM_WORLD, LDR, radii, fst, subdomain_to_rank_all_root );
+        const int nsub = (int) dom.subdomains().size();
+        const int nx   = dom.domain_info().subdomain_num_nodes_per_side_laterally();
+        const int nr   = dom.domain_info().subdomain_num_nodes_radially();
+        const int ny   = nx;
+
+        auto coords = grid::shell::subdomain_unit_sphere_single_shell_coords< double >( dom );
+        auto rads   = grid::shell::subdomain_shell_radii< double >( dom );
+        auto ch     = Kokkos::create_mirror_view( coords );
+        auto rh     = Kokkos::create_mirror_view( rads );
+        Kokkos::deep_copy( ch, coords );
+        Kokkos::deep_copy( rh, rads );
+
+        auto pos = [&]( int s, int x, int y, int r ) {
+            const double rad = rh( s, r );
+            return std::array< double, 3 >{ ch( s, x, y, 0 ) * rad, ch( s, x, y, 1 ) * rad,
+                                            ch( s, x, y, 2 ) * rad };
+        };
+        auto pos_key = [&]( int s, int x, int y, int r ) {
+            const auto p = pos( s, x, y, r );
+            return std::array< long long, 3 >{ llround( p[0] * 1e7 ), llround( p[1] * 1e7 ),
+                                               llround( p[2] * 1e7 ) };
+        };
+
+        const auto t = build_2to1_tables( dom, nx, ny, nr );
+        CHECK( !t.con_np.empty() );
+
+        // (b) parent bracketing for EVERY constraint row (seam rows included)
+        double worst_bracket = 0.0;
+        for ( std::size_t i = 0; i < t.con_np.size(); ++i )
+        {
+            const auto            d = t.con_dst[i];
+            const auto            pd = pos( d.s, d.x, d.y, d.r );
+            std::array< double, 3 > pi{ 0, 0, 0 };
+            for ( int p = 0; p < t.con_np[i]; ++p )
+            {
+                const auto s  = t.con_src[i][p];
+                const auto ps = pos( s.s, s.x, s.y, s.r );
+                for ( int c = 0; c < 3; ++c )
+                    pi[c] += t.con_w[i][p] * ps[c];
+            }
+            const double dist = std::sqrt( ( pd[0] - pi[0] ) * ( pd[0] - pi[0] ) +
+                                           ( pd[1] - pi[1] ) * ( pd[1] - pi[1] ) +
+                                           ( pd[2] - pi[2] ) * ( pd[2] - pi[2] ) );
+            worst_bracket = std::max( worst_bracket, dist );
+        }
+        CHECK( worst_bracket < 5e-3 ); // chord-vs-arc only; wrong parents would be ~0.04+
+
+        // every hanging copy's mass is scattered exactly once (weights of its row sum to 1)
+        double worst_mass = 0.0;
+        for ( std::size_t i = 0; i < t.con_np.size(); ++i )
+        {
+            double wsum = 0.0;
+            for ( int p = 0; p < t.con_np[i]; ++p )
+                wsum += t.con_w[i][p];
+            worst_mass = std::max( worst_mass, std::fabs( wsum - 1.0 ) );
+        }
+        CHECK( worst_mass < 1e-12 );
+
+        // (a) multiplicity oracle, hanging positions excluded. With field == 1, a genuine node's
+        // assembled value = its coincidence-group size PLUS the hanging weights P^T-scattered into it
+        // (the asm table's dst positions are themselves geometry-validated by the bracketing check).
+        std::map< std::array< long long, 3 >, int > group_size;
+        for ( int s = 0; s < nsub; ++s )
+            for ( int x = 0; x < nx; ++x )
+                for ( int y = 0; y < ny; ++y )
+                    for ( int r = 0; r < nr; ++r )
+                        group_size[pos_key( s, x, y, r )]++;
+        std::set< std::array< long long, 3 > > hang_pos;
+        for ( const auto& d : t.con_dst )
+            hang_pos.insert( pos_key( d.s, d.x, d.y, d.r ) );
+        std::map< std::array< long long, 3 >, double > hang_inflow;
+        for ( std::size_t i = 0; i < t.asm_w.size(); ++i )
+        {
+            const auto& d = t.asm_dst[i];
+            hang_inflow[pos_key( d.s, d.x, d.y, d.r )] += t.asm_w[i];
+        }
+
+        auto field = grid::shell::allocate_scalar_grid< double >( "amr_seam_oracle", dom );
+        auto hf    = Kokkos::create_mirror_view( field );
+        for ( int s = 0; s < nsub; ++s )
+            for ( int x = 0; x < nx; ++x )
+                for ( int y = 0; y < ny; ++y )
+                    for ( int r = 0; r < nr; ++r )
+                        hf( s, x, y, r ) = 1.0;
+        Kokkos::deep_copy( field, hf );
+        const auto dt = upload_2to1_tables( t );
+        apply_exchange_device( dt, field );
+        Kokkos::deep_copy( hf, field );
+
+        long seam_mismatches = 0;
+        for ( int s = 0; s < nsub; ++s )
+            for ( int x = 0; x < nx; ++x )
+                for ( int y = 0; y < ny; ++y )
+                    for ( int r = 0; r < nr; ++r )
+                    {
+                        const auto k3 = pos_key( s, x, y, r );
+                        if ( hang_pos.count( k3 ) )
+                            continue;
+                        const auto   fit      = hang_inflow.find( k3 );
+                        const double expected = group_size.at( k3 ) +
+                                                ( fit == hang_inflow.end() ? 0.0 : fit->second );
+                        if ( std::fabs( hf( s, x, y, r ) - expected ) > 1e-9 )
+                        {
+                            if ( seam_mismatches < 5 )
+                                std::printf(
+                                    "  seam-oracle (%d,%d,%d,%d): assembled %.15g vs expected %.15g\n",
+                                    s, x, y, r, hf( s, x, y, r ), expected );
+                            ++seam_mismatches;
+                        }
+                    }
+        CHECK( seam_mismatches == 0 );
+    }
+
     const int rc = g_failures;
     if ( g_failures == 0 )
         std::printf( "test_adaptive_2to1_gpu: ALL PASS (%d checks)\n", g_checks );

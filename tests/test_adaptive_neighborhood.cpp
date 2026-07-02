@@ -41,21 +41,36 @@ int main()
 {
     const int M = 3;
 
-    // --- corner base leaf (S_lat=2): 2 interior face-neighbors (x-high, y-high), all same level ----
+    // --- corner base leaf (S_lat=2): 2 in-diamond + 2 seam face-neighbors, all same level ----------
     {
         AdaptiveForest f( M, 2, 1 );
         auto           n = face_neighborhood_of( f, leaf( 0, 0, 0, 0, 0 ), rank0 );
-        CHECK( n.faces.size() == 2 );
-        CHECK( count_rel( n, 0 ) == 2 );
-        // neighbors are the finest anchors of base blocks (1,0,0) and (0,1,0): x/y = 1<<M = 8
-        bool saw_x = false, saw_y = false;
+        CHECK( n.faces.size() == 4 );
+        CHECK( count_rel( n, 0 ) == 4 );
+        // in-diamond: finest anchors of base blocks (1,0,0) and (0,1,0): x/y = 1<<M = 8.
+        // seams: d0 XLOW -> d1 block (0,0,0); d0 YLOW -> d4 block (0,0,0) (both forward).
+        bool saw_x = false, saw_y = false, saw_s1 = false, saw_s4 = false;
         for ( const auto& fn : n.faces )
         {
             CHECK( fn.rank == 0 );
             if ( fn.anchor == SubdomainInfo( 0, 8, 0, 0 ) ) { saw_x = true; CHECK( fn.my_face == Face::XHIGH ); }
             if ( fn.anchor == SubdomainInfo( 0, 0, 8, 0 ) ) { saw_y = true; CHECK( fn.my_face == Face::YHIGH ); }
+            if ( fn.anchor == SubdomainInfo( 1, 0, 0, 0 ) )
+            {
+                saw_s1 = true;
+                CHECK( fn.my_face == Face::XLOW );
+                CHECK( fn.neighbor_face == Face::YLOW );
+                CHECK( !fn.seam_reversed );
+            }
+            if ( fn.anchor == SubdomainInfo( 4, 0, 0, 0 ) )
+            {
+                saw_s4 = true;
+                CHECK( fn.my_face == Face::YLOW );
+                CHECK( fn.neighbor_face == Face::XLOW );
+                CHECK( !fn.seam_reversed );
+            }
         }
-        CHECK( saw_x && saw_y );
+        CHECK( saw_x && saw_y && saw_s1 && saw_s4 );
     }
 
     // --- interior base leaf (S_lat=4): 4 same-level face-neighbors -------------------------------
@@ -66,14 +81,14 @@ int main()
         CHECK( count_rel( n, 0 ) == 4 );   // radial faces are domain boundary (S_rad=1)
     }
 
-    // --- refined neighbor: coarse leaf sees 4 finer across x-high, 1 same across y-high ----------
+    // --- refined neighbor: coarse leaf sees 4 finer across x-high, same-level elsewhere -----------
     {
         AdaptiveForest f( M, 2, 1 );
         f.refine( { leaf( 0, 1, 0, 0, 0 ) } );
         auto n = face_neighborhood_of( f, leaf( 0, 0, 0, 0, 0 ), rank0 );
-        CHECK( n.faces.size() == 5 );    // 4 finer (x-high) + 1 same (y-high)
+        CHECK( n.faces.size() == 7 );      // 4 finer (x-high) + 1 same (y-high) + 2 same (seams)
         CHECK( count_rel( n, +1 ) == 4 );
-        CHECK( count_rel( n, 0 ) == 1 );
+        CHECK( count_rel( n, 0 ) == 3 );
         int octmask = 0;
         for ( const auto& fn : n.faces )
             if ( fn.rel_level == +1 )
@@ -86,9 +101,11 @@ int main()
         // a fine child sees the coarse leaf across x-low (rel_level -1)
         auto nc = face_neighborhood_of( f, leaf( 0, 2, 0, 0, 1 ), rank0 );
         CHECK( count_rel( nc, -1 ) >= 1 );
+        bool saw_indiamond_coarse = false;
         for ( const auto& fn : nc.faces )
-            if ( fn.rel_level == -1 )
-                CHECK( fn.anchor == SubdomainInfo( 0, 0, 0, 0 ) ); // the coarse base leaf L
+            if ( fn.rel_level == -1 && fn.anchor == SubdomainInfo( 0, 0, 0, 0 ) )
+                saw_indiamond_coarse = true; // (a seam face may add another coarse neighbor)
+        CHECK( saw_indiamond_coarse );
     }
 
     // --- rank is taken from the NEIGHBOR's anchor (not mine) -------------------------------------

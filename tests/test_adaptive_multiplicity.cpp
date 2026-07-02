@@ -103,10 +103,10 @@ int main( int argc, char** argv )
             CHECK( close( field( S, 0, 0, 1 ), 5.0 ) );
         }
 
-        // ---- Milestone A guard: refining a diamond-boundary block must throw -----------------------
+        // ---- guard: refining a pole/corner-touching block must throw ------------------------------
         {
             AdaptiveForest f( M, S_lat, S_rad );
-            f.refine( { ForestLeaf{ SubdomainInfo{ 0, 1, 0, 0 }, 0 } } ); // block at y-low seam
+            f.refine( { ForestLeaf{ SubdomainInfo{ 0, 0, 0, 0 }, 0 } } ); // pole-corner block
             auto dom = DistributedDomain::create_adaptive_on_comm(
                 MPI_COMM_WORLD, LDR, radii, f, subdomain_to_rank_all_root );
             const int nx = dom.domain_info().subdomain_num_nodes_per_side_laterally();
@@ -121,6 +121,66 @@ int main( int argc, char** argv )
                 threw = true;
             }
             CHECK( threw );
+        }
+
+        // ---- 2:1 seam: refining NON-corner diamond-boundary blocks is now supported ----------------
+        // d0 block (1,0,0) sits on d0's y-low seam (d4's x-low, FORWARD); d0 block (1,3,0) sits on
+        // d0's y-high seam (d5's x-high, REVERSED). Refine both, balance (ripples into d4 and d5),
+        // assemble a constant-1 field: exact mass conservation must hold across both seam kinds,
+        // covering the flipped and unflipped node identification and the seam-hanging P^T scatters.
+        {
+            AdaptiveForest f( M, S_lat, S_rad );
+            f.refine( { ForestLeaf{ SubdomainInfo{ 0, 1, 0, 0 }, 0 },
+                        ForestLeaf{ SubdomainInfo{ 0, 1, 3, 0 }, 0 } } );
+            f.balance_2to1();
+            CHECK( f.validate() );
+            auto dom = DistributedDomain::create_adaptive_on_comm(
+                MPI_COMM_WORLD, LDR, radii, f, subdomain_to_rank_all_root );
+            const int nsub = (int) dom.subdomains().size();
+            const int nx   = dom.domain_info().subdomain_num_nodes_per_side_laterally();
+            const int nr   = dom.domain_info().subdomain_num_nodes_radially();
+            const int ny   = nx;
+
+            const auto t = build_2to1_tables( dom, nx, ny, nr ); // must NOT throw
+            CHECK( !t.con_np.empty() );                          // seam-hanging nodes exist
+
+            // at least one constraint row must span diamonds (fine copy in d0, parents in d4 or v.v.)
+            auto diamond_of_sub = [&]( int s ) {
+                return dom.subdomain_info_from_local_idx( s ).diamond_id();
+            };
+            bool cross_diamond_row = false;
+            for ( std::size_t i = 0; i < t.con_np.size(); ++i )
+                for ( int p = 0; p < t.con_np[i]; ++p )
+                    if ( diamond_of_sub( t.con_dst[i].s ) != diamond_of_sub( t.con_src[i][p].s ) )
+                        cross_diamond_row = true;
+            CHECK( cross_diamond_row );
+
+            Field field( nsub, nx, ny, nr ); // all ones
+            apply_exchange_tables( t, field );
+
+            std::set< std::array< int, 4 > > hang, noncanon;
+            for ( const auto& d : t.con_dst )
+                hang.insert( { d.s, d.x, d.y, d.r } );
+            for ( std::size_t c = 0; c + 1 < t.cls_offsets.size(); ++c )
+                for ( int m = t.cls_offsets[c] + 1; m < t.cls_offsets[c + 1]; ++m )
+                {
+                    const Idx4& i = t.cls_members[m];
+                    noncanon.insert( { i.s, i.x, i.y, i.r } );
+                }
+            double total   = 0.0;
+            long   ncopies = 0;
+            for ( int s = 0; s < nsub; ++s )
+                for ( int x = 0; x < nx; ++x )
+                    for ( int y = 0; y < ny; ++y )
+                        for ( int r = 0; r < nr; ++r )
+                        {
+                            ++ncopies;
+                            const std::array< int, 4 > k4{ s, x, y, r };
+                            if ( hang.count( k4 ) || noncanon.count( k4 ) )
+                                continue;
+                            total += field( s, x, y, r );
+                        }
+            CHECK( std::fabs( total - (double) ncopies ) < 1e-8 );
         }
 
         // ---- (2) refined domain: exact mass conservation into genuine DoFs ------------------------

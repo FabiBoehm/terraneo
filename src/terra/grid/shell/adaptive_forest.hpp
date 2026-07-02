@@ -70,14 +70,42 @@ struct ForestLeaf
     bool operator==( const ForestLeaf& o ) const { return id == o.id && subdivision == o.subdivision; }
 };
 
+// Which diamond lies across a lateral face of diamond `d`, which of ITS faces touches us, and whether
+// the in-face lateral coordinate reverses (the radial coordinate never does). Transcribed from the
+// uniform pole wiring in spherical_shell.hpp (setup_neighborhood_faces): same-pole neighbors iterate
+// forward, cross-pole neighbors backward. Cross-checked against SubdomainNeighborhood by the tests.
+struct DiamondSeam
+{
+    int  nb_diamond;
+    Face nb_face;
+    bool reversed;
+};
+
+inline DiamondSeam diamond_seam( int d, Face f )
+{
+    const bool north = d < 5;
+    const int  j     = d % 5;
+    switch ( f )
+    {
+    case Face::XLOW:  return { north ? ( j + 1 ) % 5 : ( j + 1 ) % 5 + 5, Face::YLOW, false };
+    case Face::YLOW:  return { north ? ( j + 4 ) % 5 : ( j + 4 ) % 5 + 5, Face::XLOW, false };
+    case Face::YHIGH: return { north ? j + 5 : ( j + 1 ) % 5, Face::XHIGH, true };
+    case Face::XHIGH: return { north ? ( j + 4 ) % 5 + 5 : j, Face::YHIGH, true };
+    default:          return { -1, f, false }; // radial faces never cross a seam
+    }
+}
+
 // One neighbor across a face. rel_level = neighbor.subdivision - my.subdivision (0 same, -1 coarser,
-// +1 finer). sub_octant (0..3) identifies which quarter of my face a finer neighbor covers; 0 else.
+// +1 finer). sub_octant (0..3) identifies which quarter of my face a finer neighbor covers (always
+// labeled in MY frame; 0 otherwise). For cross-diamond neighbors, seam_reversed says the neighbor's
+// in-face lateral index runs backwards relative to mine.
 struct FaceNeighbor
 {
     ForestLeaf leaf;
     int        rel_level;
     int        sub_octant;
-    Face       neighbor_face; // the face of `leaf` that touches me (opposite of the queried face)
+    Face       neighbor_face;         // the face of `leaf` that touches me
+    bool       seam_reversed = false; // cross-diamond only; lateral in-face reversal
 };
 
 // What lies across a face: interior neighbor(s), the CMB/surface radial boundary, or a diamond seam.
@@ -268,13 +296,19 @@ class AdaptiveForest
 
         const int out_coord = side > 0 ? base[axis] + s : base[axis] - 1;
         const int extent     = ( axis == 2 ) ? radial_extent() : lateral_extent();
-        if ( out_coord < 0 || out_coord >= extent )
+
+        // radial out-of-range: CMB/surface, no neighbor. Lateral out-of-range: a diamond seam --
+        // resolved below by transforming the probe points into the neighbor diamond's frame.
+        const bool crosses_seam = ( axis != 2 ) && ( out_coord < 0 || out_coord >= extent );
+        if ( axis == 2 && ( out_coord < 0 || out_coord >= extent ) )
         {
-            res.kind = ( axis == 2 ) ? NeighborKind::DomainBoundary : NeighborKind::DiamondCrossing;
+            res.kind = NeighborKind::DomainBoundary;
             return res;
         }
+        const DiamondSeam seam =
+            crosses_seam ? diamond_seam( L.id.diamond_id(), f ) : DiamondSeam{ L.id.diamond_id(), opposite( f ), false };
 
-        const int a1    = ( axis == 0 ) ? 1 : 0; // first in-face axis
+        const int a1    = ( axis == 0 ) ? 1 : 0; // first in-face axis (the other lateral)
         const int a2    = ( axis == 2 ) ? 1 : 2; // second in-face axis
         const int nsamp = ( s > 1 ) ? 2 : 1;
         auto      off   = [&]( int q ) { return s > 1 ? ( q == 0 ? s / 4 : 3 * s / 4 ) : 0; };
@@ -287,7 +321,29 @@ class AdaptiveForest
                 pt[axis] = out_coord;
                 pt[a1]   = base[a1] + off( qi );
                 pt[a2]   = base[a2] + off( qj );
-                auto hit = leaf_at( L.id.diamond_id(), pt[0], pt[1], pt[2] );
+
+                std::optional< std::size_t > hit;
+                if ( !crosses_seam )
+                {
+                    hit = leaf_at( L.id.diamond_id(), pt[0], pt[1], pt[2] );
+                }
+                else
+                {
+                    // my in-face lateral coordinate, possibly reversed on the other side
+                    int u = pt[a1];
+                    if ( seam.reversed )
+                        u = lateral_extent() - 1 - u;
+                    // the neighbor's fixed lateral axis and its boundary layer
+                    const int nb_axis  = ( seam.nb_face == Face::XLOW || seam.nb_face == Face::XHIGH ) ? 0 : 1;
+                    const int nb_fixed = ( seam.nb_face == Face::XLOW || seam.nb_face == Face::YLOW )
+                                             ? 0
+                                             : lateral_extent() - 1;
+                    int tpt[3];
+                    tpt[nb_axis]     = nb_fixed;
+                    tpt[1 - nb_axis] = u;      // the neighbor's in-face lateral axis
+                    tpt[2]           = pt[2];  // radial coordinates align across diamonds
+                    hit              = leaf_at( seam.nb_diamond, tpt[0], tpt[1], tpt[2] );
+                }
                 if ( hit )
                     found.emplace( *hit, qi + 2 * qj );
             }
@@ -296,8 +352,8 @@ class AdaptiveForest
         for ( const auto& [idx, quad] : found )
         {
             const ForestLeaf& N = leaves_[idx];
-            res.neighbors.push_back(
-                FaceNeighbor{ N, N.subdivision - L.subdivision, single ? 0 : quad, opposite( f ) } );
+            res.neighbors.push_back( FaceNeighbor{ N, N.subdivision - L.subdivision, single ? 0 : quad,
+                                                   seam.nb_face, crosses_seam && seam.reversed } );
         }
         return res;
     }

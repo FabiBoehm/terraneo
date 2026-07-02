@@ -172,14 +172,80 @@ int main()
         }
     }
 
-    // --- radial domain boundary + lateral diamond seam --------------------------------------------
+    // --- radial domain boundary --------------------------------------------------------------------
     {
         AdaptiveForest f( M, S_lat, S_rad );
         ForestLeaf     L = leaf( 0, 0, 0, 0, 0 );
         CHECK( f.face_neighbors( L, Face::RLOW ).kind == NeighborKind::DomainBoundary );
         CHECK( f.face_neighbors( L, Face::RHIGH ).kind == NeighborKind::DomainBoundary );
-        CHECK( f.face_neighbors( L, Face::XLOW ).kind == NeighborKind::DiamondCrossing );
-        CHECK( f.face_neighbors( L, Face::YLOW ).kind == NeighborKind::DiamondCrossing );
+    }
+
+    // --- diamond seams: same-pole forward, cross-pole reversed -------------------------------------
+    {
+        AdaptiveForest f( M, S_lat, S_rad );
+
+        // d0 XLOW <-> d1 YLOW, forward: my block (0, b) -> their (b, 0)
+        auto fn = f.face_neighbors( leaf( 0, 0, 1, 0, 0 ), Face::XLOW );
+        CHECK( fn.kind == NeighborKind::Interior );
+        CHECK( fn.neighbors.size() == 1 );
+        if ( fn.neighbors.size() == 1 )
+        {
+            CHECK( fn.neighbors[0].leaf == leaf( 1, 1, 0, 0, 0 ) );
+            CHECK( fn.neighbors[0].neighbor_face == Face::YLOW );
+            CHECK( fn.neighbors[0].rel_level == 0 );
+            CHECK( !fn.neighbors[0].seam_reversed );
+        }
+
+        // d0 YLOW <-> d4 XLOW, forward: my block (b, 0) -> their (0, b)
+        auto fn2 = f.face_neighbors( leaf( 0, 1, 0, 0, 0 ), Face::YLOW );
+        CHECK( fn2.neighbors.size() == 1 );
+        if ( fn2.neighbors.size() == 1 )
+        {
+            CHECK( fn2.neighbors[0].leaf == leaf( 4, 0, 1, 0, 0 ) );
+            CHECK( fn2.neighbors[0].neighbor_face == Face::XLOW );
+            CHECK( !fn2.neighbors[0].seam_reversed );
+        }
+
+        // d0 XHIGH <-> d9 YHIGH, REVERSED: my block (end, b) -> their (end - b, end)
+        auto fn3 = f.face_neighbors( leaf( 0, 1, 0, 0, 0 ), Face::XHIGH );
+        CHECK( fn3.neighbors.size() == 1 );
+        if ( fn3.neighbors.size() == 1 )
+        {
+            CHECK( fn3.neighbors[0].leaf == leaf( 9, 1, 1, 0, 0 ) ); // (S_lat-1-0, S_lat-1)
+            CHECK( fn3.neighbors[0].neighbor_face == Face::YHIGH );
+            CHECK( fn3.neighbors[0].seam_reversed );
+        }
+
+        // seam adjacency is an involution: crossing back lands on me
+        for ( int d = 0; d < 10; ++d )
+            for ( Face fc : { Face::XLOW, Face::XHIGH, Face::YLOW, Face::YHIGH } )
+            {
+                const auto s1 = diamond_seam( d, fc );
+                const auto s2 = diamond_seam( s1.nb_diamond, s1.nb_face );
+                CHECK( s2.nb_diamond == d );
+                CHECK( s2.nb_face == fc );
+                CHECK( s1.reversed == s2.reversed );
+            }
+    }
+
+    // --- 2:1 balance ripples across a seam ---------------------------------------------------------
+    {
+        AdaptiveForest f( M, 4, S_rad ); // S_lat=4 so a non-corner seam block exists
+        // d1 block (1,0,0) is on d1's YLOW seam (faces d0's XLOW blocks, forward: their (0, b=1)).
+        f.refine( { leaf( 1, 1, 0, 0, 0 ) } );
+        f.refine( { leaf( 1, 2, 0, 0, 1 ) } ); // a seam-facing child -> subdivision 2 at the seam
+        f.balance_2to1();
+        CHECK( f.validate() );
+        CHECK( !f.contains( leaf( 0, 0, 1, 0, 0 ) ) ); // d0's seam partner was forced to split
+        // and the balanced mesh has no >1 jumps anywhere, seams included
+        const Face faces[6] = { Face::XLOW, Face::XHIGH, Face::YLOW, Face::YHIGH, Face::RLOW, Face::RHIGH };
+        bool       balanced = true;
+        for ( const auto& L : f.leaves() )
+            for ( Face fc : faces )
+                for ( const auto& nb : f.face_neighbors( L, fc ).neighbors )
+                    if ( nb.rel_level > 1 || nb.rel_level < -1 )
+                        balanced = false;
+        CHECK( balanced );
     }
 
     // --- touches_diamond_corner (S_lat=4: interior base blocks are not corners) --------------------

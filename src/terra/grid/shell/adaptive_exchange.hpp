@@ -21,15 +21,19 @@
 // SAME tables, so host and device semantics are identical by construction. All appliers are two-phase
 // (gather then scatter) -> results independent of entry order.
 //
-// Diamond seams ARE handled: cross-diamond node identifications are derived from terra's uniform
-// SubdomainNeighborhood (whose hardcoded pole wiring applies verbatim to the subdivision-0 blocks that
-// Milestone A requires at diamond boundaries) and merged into the classes with a union-find; pole
-// corners group transitively around the face-adjacency cycle. A refined block at a diamond lateral
-// boundary throws (2:1 seams are not supported). Deferred: MPI transport (all neighbors local).
+// Diamond seams ARE handled, including 2:1 seams (refined blocks at diamond boundaries): coincident
+// seam nodes are identified node-by-node in global coordinates via the diamond adjacency
+// (diamond_seam: same-pole forward, cross-pole reversed) and merged into the classes with a
+// union-find; pole corners group transitively around the face-adjacency cycle. Hanging nodes across a
+// reversed seam get their fine-side lateral index flipped into the fine block's own frame. The only
+// remaining restriction: refining a pole/corner-touching block throws (the 5-way corner cycle is
+// untested at 2:1). Deferred: MPI transport (all neighbors local).
 
+#include <algorithm>
 #include <array>
 #include <map>
 #include <set>
+#include <tuple>
 #include <vector>
 
 #include "adaptive_face_ops.hpp"
@@ -167,7 +171,10 @@ inline TwoToOneTables build_2to1_tables( const DistributedDomain& dom, int nx, i
                 {
                     if ( nd.coincident )
                         continue;
-                    const Idx4 fine = face_node( fsub, nfa, nd.a1, nd.a2 );
+                    // for reversed seams the fine block's in-face LATERAL index runs backwards
+                    // relative to my frame (nd.a1 is in my frame; a2 is radial, never reversed)
+                    const int  fa1  = nb.seam_reversed ? nfa.n1 - 1 - nd.a1 : nd.a1;
+                    const Idx4 fine = face_node( fsub, nfa, fa1, nd.a2 );
                     if ( !hanging.insert( key_of( fine ) ).second )
                         continue; // a face-edge hanging copy seen via a second coarse face: same row
                     std::array< Idx4, 4 >   srcs{};
@@ -211,22 +218,24 @@ inline TwoToOneTables build_2to1_tables( const DistributedDomain& dom, int nx, i
     // provisional class id per copy (all copies, singletons included)
     std::vector< std::vector< Idx4 > > cls;
     std::map< Key4, int >              class_of;
+    std::map< std::array< long, 4 >, int > gid; // gcoord -> class id (for seam lookups)
     cls.reserve( classes.size() );
     for ( const auto& [g, members] : classes )
     {
         const int id = static_cast< int >( cls.size() );
         for ( const auto& m : members )
             class_of[key_of( m )] = id;
+        gid[g] = id;
         cls.push_back( members );
     }
 
     // ---- pass 3: diamond-seam identifications ------------------------------------------------------
-    // Milestone A keeps diamond-boundary blocks at subdivision 0, so terra's UNIFORM neighborhood
-    // machinery (incl. the hardcoded pole wiring and FORWARD/BACKWARD index inversion) applies to them
-    // verbatim. For each cross-diamond face we pair node-for-node (receiver convention from
-    // buffer_copy_kernels.hpp: my (a1,a2) <-> neighbor (flip_d0(a1), flip_d1(a2))) and merge the
-    // classes with a union-find. Pole corners (5 diamonds) merge transitively around the cycle of
-    // face-adjacent diamond pairs -- no separate edge/vertex wiring needed.
+    // Node-level pairing in GLOBAL coordinates, valid at ANY subdivision mix: a seam-face node's
+    // in-face lateral global coordinate u maps to the neighbor diamond as (reversed ? G - u : u),
+    // radial unchanged (adjacency + orientation from diamond_seam, transcribed from the uniform pole
+    // wiring). If the mapped position holds a node on the other side, the two classes merge
+    // (union-find); if not, the node is seam-hanging and pass 1 has already given it a constraint row.
+    // Only pole/corner-touching blocks are still forbidden to refine.
     std::vector< int > uf( cls.size() );
     for ( std::size_t i = 0; i < uf.size(); ++i )
         uf[i] = static_cast< int >( i );
@@ -241,19 +250,10 @@ inline TwoToOneTables build_2to1_tables( const DistributedDomain& dom, int nx, i
         if ( a != b )
             uf[b] = a;
     };
-    auto to_amr_face = []( BoundaryFace bf ) {
-        switch ( bf )
-        {
-        case BoundaryFace::F_0YR: return Face::XLOW;
-        case BoundaryFace::F_1YR: return Face::XHIGH;
-        case BoundaryFace::F_X0R: return Face::YLOW;
-        case BoundaryFace::F_X1R: return Face::YHIGH;
-        case BoundaryFace::F_XY0: return Face::RLOW;
-        default:                  return Face::RHIGH;
-        }
-    };
 
-    const int S_lat = dom.domain_info().num_subdomains_per_diamond_side();
+    const int  S_lat = dom.domain_info().num_subdomains_per_diamond_side();
+    const long G_lat = static_cast< long >( S_lat << M ) * ( nx - 1 ); // lateral node-coordinate range
+
     for ( const auto& [anchor, tup] : dom.subdomains() )
     {
         const int sub = std::get< 0 >( tup );
@@ -261,39 +261,55 @@ inline TwoToOneTables build_2to1_tables( const DistributedDomain& dom, int nx, i
         const int sh  = M - k;
         const int ox  = anchor.subdomain_x() >> sh;
         const int oy  = anchor.subdomain_y() >> sh;
-        const int orr = anchor.subdomain_r() >> sh;
         const int nblk = S_lat << k;
-        if ( ox != 0 && ox != nblk - 1 && oy != 0 && oy != nblk - 1 )
-            continue; // not at a lateral diamond boundary
-        if ( k != 0 )
-            throw std::runtime_error(
-                "AMR seam assembly: diamond-boundary blocks must stay at subdivision 0 (Milestone A)." );
 
-        const SubdomainInfo         own( anchor.diamond_id(), ox, oy, orr );
-        const SubdomainNeighborhood unbh( dom.domain_info(), own, subdomain_to_rank_all_root );
-        for ( const auto& [bf, nbt] : unbh.neighborhood_face() )
+        const bool xext = ( ox == 0 || ox == nblk - 1 );
+        const bool yext = ( oy == 0 || oy == nblk - 1 );
+        if ( k > 0 && xext && yext )
+            throw std::runtime_error(
+                "AMR seam assembly: refining pole/corner-touching blocks is not supported." );
+
+        Face seam_faces[2];
+        int  n_seam = 0;
+        if ( ox == 0 )
+            seam_faces[n_seam++] = Face::XLOW;
+        else if ( ox == nblk - 1 )
+            seam_faces[n_seam++] = Face::XHIGH;
+        if ( oy == 0 )
+            seam_faces[n_seam++] = Face::YLOW;
+        else if ( oy == nblk - 1 )
+            seam_faces[n_seam++] = Face::YHIGH;
+
+        const long span = 1L << sh;
+        for ( int sf = 0; sf < n_seam; ++sf )
         {
-            const auto& [nb_own, nb_bf, ordering, nb_rank] = nbt;
-            if ( nb_own.diamond_id() == anchor.diamond_id() )
-                continue; // same-diamond faces are covered by the coordinate classes
-            const SubdomainInfo nb_anchor( nb_own.diamond_id(), nb_own.subdomain_x() << M,
-                                           nb_own.subdomain_y() << M, nb_own.subdomain_r() << M );
-            const auto it = dom.subdomains().find( nb_anchor );
-            if ( it == dom.subdomains().end() )
-                throw std::runtime_error(
-                    "AMR seam assembly: cross-diamond neighbor missing or refined (Milestone A)." );
-            const int      nsub = std::get< 0 >( it->second );
-            const FaceAxes fa   = face_axes( to_amr_face( bf ), nx, ny, nr );
-            const FaceAxes nfa  = face_axes( to_amr_face( nb_bf ), nx, ny, nr );
-            const auto     d0   = std::get< 0 >( ordering );
-            const auto     d1   = std::get< 1 >( ordering );
+            const Face        f    = seam_faces[sf];
+            const DiamondSeam seam = diamond_seam( anchor.diamond_id(), f );
+            const FaceAxes    fa   = face_axes( f, nx, ny, nr );
             for ( int a1 = 0; a1 < fa.n1; ++a1 )
                 for ( int a2 = 0; a2 < fa.n2; ++a2 )
                 {
-                    const int i = ( d0 == BoundaryDirection::BACKWARD ) ? fa.n1 - 1 - a1 : a1;
-                    const int j = ( d1 == BoundaryDirection::BACKWARD ) ? fa.n2 - 1 - a2 : a2;
-                    unite( class_of.at( key_of( face_node( sub, fa, a1, a2 ) ) ),
-                           class_of.at( key_of( face_node( nsub, nfa, i, j ) ) ) );
+                    const Idx4 mine = face_node( sub, fa, a1, a2 );
+                    const long gx   = anchor.subdomain_x() * ( long ) ( nx - 1 ) + mine.x * span;
+                    const long gy   = anchor.subdomain_y() * ( long ) ( ny - 1 ) + mine.y * span;
+                    const long gr   = anchor.subdomain_r() * ( long ) ( nr - 1 ) + mine.r * span;
+
+                    // my in-face lateral global coordinate, reversed if the seam flips
+                    long u = ( fa.a1axis == 0 ) ? gx : gy;
+                    if ( seam.reversed )
+                        u = G_lat - u;
+                    const int  nb_axis  = ( seam.nb_face == Face::XLOW || seam.nb_face == Face::XHIGH ) ? 0 : 1;
+                    const long nb_fixed = ( seam.nb_face == Face::XLOW || seam.nb_face == Face::YLOW ) ? 0 : G_lat;
+
+                    std::array< long, 4 > ng{ seam.nb_diamond, 0, 0, gr };
+                    ng[1 + nb_axis]       = nb_fixed;
+                    ng[1 + ( 1 - nb_axis )] = u;
+
+                    const auto it = gid.find( ng );
+                    if ( it != gid.end() )
+                        unite( class_of.at( key_of( mine ) ), it->second );
+                    // not found -> no coincident node on the other side (seam-hanging); constraint
+                    // handles it via pass 1.
                 }
         }
     }
