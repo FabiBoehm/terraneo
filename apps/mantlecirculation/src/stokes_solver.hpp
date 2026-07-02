@@ -719,7 +719,8 @@ class StokesContext
         log_hbm( "stokes: ctor end (delta = MG hierarchy + operators + coarse + preconditioner)" );
 
         // Helper objects for TALA rhs grid transfer
-        R_scalar_ = std::make_unique< RestrictionScalar >( *domains_[pressure_level_], linalg::OperatorApplyMode::Add );
+        R_scalar_ =
+            std::make_unique< RestrictionScalar >( *domains_[pressure_level_], linalg::OperatorApplyMode::Replace );
         tala_rhs_tmp_ = linalg::VectorQ1Scalar< ScalarType >(
             "tala_rhs_tmp", *domains_[velocity_level_], ownership_mask_[velocity_level_] );
     }
