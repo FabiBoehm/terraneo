@@ -1,27 +1,29 @@
 #pragma once
 
-// Domain-level 2:1 face exchange (additive assembly) for AMR, single communicator / all-local neighbors.
+// Domain-level assembly exchange + hanging-node constraint for AMR (single communicator, all-local).
 //
-// Drives the per-interface kernels in adaptive_face_ops.hpp across a whole adaptive DistributedDomain:
-// for every subdomain and face it pulls the shared face slab(s) out of the field, runs the matching
-// kernel, and writes the assembled values back. Templated on a field accessor with Grid4D's exact
-// (subdomain, x, y, r) indexing, so it is faithful to the real storage yet runs on the host (no Kokkos)
-// for testing; a device version applies the same logic to Grid4D slices.
+// After a local FE operator apply, every subdomain holds PARTIAL values on shared DoFs. This header
+// makes them consistent, for faces, block edges and block vertices alike, via GLOBAL NODE CLASSES:
+// every node gets a global coordinate (per axis, in units of 1/(nodes-1) of a finest cell), and all
+// coincident copies -- shared by 2 (face), 4 (edge) or 8 (vertex) subdomains, same-level or 2:1 --
+// fall into one class. Assembly is then uniform, with correct multiplicity by construction:
 //
-// Handles the interior cases only (Milestone A keeps 2:1 interfaces off diamond seams, so no index
-// inversion). Face-interior assembly; edge/vertex DoFs need the separate edge/vertex exchange.
+//   1. asm     : each HANGING fine copy's partial is P^T-scattered to its coarse parents (weights from
+//                the 2:1 face correspondence) -- hanging DoFs carry no genuine value of their own.
+//   2. classes : each genuine class is summed into a canonical copy (its first member), which then
+//                also receives the asm contributions.
+//   3. broadcast: every class member is overwritten with the canonical (assembled) value.
+//   4. constraint (separate call): every hanging copy = interpolation of its (assembled) parents,
+//                making the 2:1 interface conforming.
 //
-//   rel_level 0  : matched same-level faces -> node-wise sum on face-INTERIOR nodes (edge/vertex DoFs
-//                  are shared by >2 subdomains and belong to the separate edge/vertex exchange)
-//   rel_level +1 : this (coarse) subdomain gathers its up-to-4 finer neighbours (P^T assembly +
-//                  broadcast of the assembled values to the fine coincident nodes)
-//   rel_level -1 : this (fine) subdomain's coarse-facing face is handled by the coarse side; skipped
+// Templated on a field accessor with Grid4D's exact (subdomain, x, y, r) indexing, so it is faithful
+// to the real storage yet host-testable; the Kokkos kernels in adaptive_2to1_kokkos.hpp consume the
+// SAME tables, so host and device semantics are identical by construction. All appliers are two-phase
+// (gather then scatter) -> results independent of entry order.
 //
-// The operations are materialized as FLAT TABLES (build_2to1_tables): plain (subdomain,x,y,r) index
-// tuples + weights, built once per mesh. The same tables drive the host appliers here and the Kokkos
-// device kernels in adaptive_2to1_kokkos.hpp, so host and device semantics are identical by
-// construction. All appliers are two-phase (gather then scatter), so results do not depend on entry
-// order even when a node is source in one interface and destination in another.
+// Deferred: diamond seams (classes are keyed within a diamond; seam nodes stay partial -- Milestone A
+// keeps diamond-boundary blocks at subdivision 0, and their cross-diamond assembly will reuse the
+// uniform pole logic) and MPI transport (all neighbors local for now).
 
 #include <array>
 #include <map>
@@ -68,8 +70,8 @@ inline std::vector< double > extract_slab( const FieldT& field, int sub, const F
     for ( int a1 = 0; a1 < fa.n1; ++a1 )
         for ( int a2 = 0; a2 < fa.n2; ++a2 )
         {
-            c[fa.a1axis]         = a1;
-            c[fa.a2axis]         = a2;
+            c[fa.a1axis]          = a1;
+            c[fa.a2axis]          = a2;
             slab[a1 * fa.n2 + a2] = field( sub, c[0], c[1], c[2] );
         }
     return slab;
@@ -84,8 +86,8 @@ inline void insert_slab( FieldT& field, int sub, const FaceAxes& fa, const std::
     for ( int a1 = 0; a1 < fa.n1; ++a1 )
         for ( int a2 = 0; a2 < fa.n2; ++a2 )
         {
-            c[fa.a1axis]                  = a1;
-            c[fa.a2axis]                  = a2;
+            c[fa.a1axis]                   = a1;
+            c[fa.a2axis]                   = a2;
             field( sub, c[0], c[1], c[2] ) = slab[a1 * fa.n2 + a2];
         }
 }
@@ -112,139 +114,193 @@ inline Idx4 face_node( int sub, const FaceAxes& fa, int a1, int a2 )
     return Idx4{ sub, c[0], c[1], c[2] };
 }
 
-// Flat 2:1 operation tables. Built once per mesh (cache and reuse; rebuilding per call is test-only).
+// Flat assembly/constraint tables. Built once per mesh (cache and reuse; rebuilding per call is
+// test-only convenience).
 struct TwoToOneTables
 {
-    // 2:1 additive assembly: dst(coarse) += w * src(fine). Several entries may share a dst (atomic on
-    // device); sources are read before any write (two-phase).
+    // P^T scatter of hanging partials: dst(canonical genuine copy) += w * src(hanging copy). Several
+    // entries may share a dst (atomic on device); sources are read before any write (two-phase).
     std::vector< Idx4 >   asm_dst, asm_src;
     std::vector< double > asm_w;
 
-    // post-assembly broadcast: dst(fine coincident) = src(coarse assembled). Unique dst per entry.
-    std::vector< Idx4 > bc_dst, bc_src;
+    // coincident-copy classes (CSR): members of class c are cls_members[cls_offsets[c] ..
+    // cls_offsets[c+1]). Canonical copy = first member. Only genuine classes with >= 2 members are
+    // stored (hanging locations and unshared nodes need no summation).
+    std::vector< int >  cls_offsets; // size = n_classes + 1
+    std::vector< Idx4 > cls_members;
 
-    // same-level matched sum over face-interior nodes: a and b both become a+b. Disjoint pairs.
-    std::vector< Idx4 > pair_a, pair_b;
-
-    // hanging-node constraint: dst(fine hanging) = sum_p w[p] * src[p](coarse). Unique dst per entry
-    // (a fine face-edge node hanging on two coarse faces keeps its first entry; the interpolations
-    // agree once the edge exchange has made the coarse edges consistent).
-    std::vector< Idx4 >                con_dst;
-    std::vector< std::array< Idx4, 4 > >  con_src;
+    // hanging-node constraint: dst(hanging copy) = sum_p w[p] * src[p](canonical parents). One entry
+    // per hanging copy.
+    std::vector< Idx4 >                    con_dst;
+    std::vector< std::array< Idx4, 4 > >   con_src;
     std::vector< std::array< double, 4 > > con_w;
-    std::vector< int >                 con_np;
+    std::vector< int >                     con_np;
 };
 
 inline TwoToOneTables build_2to1_tables( const DistributedDomain& dom, int nx, int ny, int nr )
 {
     static constexpr Face kFaces[6] = { Face::XLOW, Face::XHIGH, Face::YLOW,
                                         Face::YHIGH, Face::RLOW, Face::RHIGH };
-    TwoToOneTables                   t;
-    std::set< std::array< int, 4 > > seen_bc, seen_con;
+    TwoToOneTables t;
 
+    using Key4 = std::array< int, 4 >; // copy identity (s,x,y,r)
+    auto key_of = []( const Idx4& i ) { return Key4{ i.s, i.x, i.y, i.r }; };
+
+    // ---- pass 1: hanging copies + raw constraint rows (from the 2:1 face correspondence) ----------
+    std::set< Key4 > hanging; // all hanging copies (constraint destinations)
     for ( const auto& [anchor, tup] : dom.subdomains() )
     {
         const int   sub = std::get< 0 >( tup );
         const auto& nbh = dom.adaptive_neighborhood( anchor );
-
         for ( Face fc : kFaces )
         {
             const FaceAxes fa = face_axes( fc, nx, ny, nr );
             for ( const auto& nb : nbh.faces )
             {
-                if ( nb.my_face != fc )
+                if ( nb.my_face != fc || nb.rel_level != +1 )
                     continue;
-
-                if ( nb.rel_level == +1 )
+                const int      fsub = local_index( dom, nb.anchor );
+                const FaceAxes nfa  = face_axes( nb.neighbor_face, nx, ny, nr );
+                for ( const auto& nd : face_correspondence( fa.n1, fa.n2, nb.sub_octant ) )
                 {
-                    const int      fsub = local_index( dom, nb.anchor );
-                    const FaceAxes nfa  = face_axes( nb.neighbor_face, nx, ny, nr );
-                    for ( const auto& nd : face_correspondence( fa.n1, fa.n2, nb.sub_octant ) )
+                    if ( nd.coincident )
+                        continue;
+                    const Idx4 fine = face_node( fsub, nfa, nd.a1, nd.a2 );
+                    if ( !hanging.insert( key_of( fine ) ).second )
+                        continue; // a face-edge hanging copy seen via a second coarse face: same row
+                    std::array< Idx4, 4 >   srcs{};
+                    std::array< double, 4 > ws{};
+                    for ( int p = 0; p < nd.n_parents; ++p )
                     {
-                        const Idx4                 fine = face_node( fsub, nfa, nd.a1, nd.a2 );
-                        const std::array< int, 4 > key{ fine.s, fine.x, fine.y, fine.r };
-
-                        for ( int p = 0; p < nd.n_parents; ++p )
-                        {
-                            t.asm_dst.push_back( face_node( sub, fa, nd.pa1[p], nd.pa2[p] ) );
-                            t.asm_src.push_back( fine );
-                            t.asm_w.push_back( nd.w[p] );
-                        }
-                        if ( nd.coincident )
-                        {
-                            if ( seen_bc.insert( key ).second )
-                            {
-                                t.bc_dst.push_back( fine );
-                                t.bc_src.push_back( face_node( sub, fa, nd.pa1[0], nd.pa2[0] ) );
-                            }
-                        }
-                        else if ( seen_con.insert( key ).second )
-                        {
-                            std::array< Idx4, 4 >   srcs{};
-                            std::array< double, 4 > ws{};
-                            for ( int p = 0; p < nd.n_parents; ++p )
-                            {
-                                srcs[p] = face_node( sub, fa, nd.pa1[p], nd.pa2[p] );
-                                ws[p]   = nd.w[p];
-                            }
-                            t.con_dst.push_back( fine );
-                            t.con_src.push_back( srcs );
-                            t.con_w.push_back( ws );
-                            t.con_np.push_back( nd.n_parents );
-                        }
+                        srcs[p] = face_node( sub, fa, nd.pa1[p], nd.pa2[p] );
+                        ws[p]   = nd.w[p];
                     }
-                }
-                else if ( nb.rel_level == 0 && anchor < nb.anchor ) // each pair processed once
-                {
-                    const int      osub = local_index( dom, nb.anchor );
-                    const FaceAxes ofa  = face_axes( nb.neighbor_face, nx, ny, nr );
-                    for ( int a1 = 1; a1 < fa.n1 - 1; ++a1 )
-                        for ( int a2 = 1; a2 < fa.n2 - 1; ++a2 )
-                        {
-                            t.pair_a.push_back( face_node( sub, fa, a1, a2 ) );
-                            t.pair_b.push_back( face_node( osub, ofa, a1, a2 ) );
-                        }
+                    t.con_dst.push_back( fine );
+                    t.con_src.push_back( srcs );
+                    t.con_w.push_back( ws );
+                    t.con_np.push_back( nd.n_parents );
                 }
             }
         }
     }
+
+    // ---- pass 2: global node classes (within-diamond) --------------------------------------------
+    // global coordinate per axis in units of 1/(nodes-1) of a finest cell:
+    //   g = anchor_finest * (nodes-1) + node_idx * finest_span(subdivision)
+    const int M = dom.max_subdivision();
+    std::map< std::array< long, 4 >, std::vector< Idx4 > > classes; // (diamond,gx,gy,gr) -> copies
+    for ( const auto& [anchor, tup] : dom.subdomains() )
+    {
+        const int  sub  = std::get< 0 >( tup );
+        const int  k    = dom.subdivision_of( anchor );
+        const long span = 1L << ( M - k );
+        for ( int x = 0; x < nx; ++x )
+            for ( int y = 0; y < ny; ++y )
+                for ( int r = 0; r < nr; ++r )
+                {
+                    const std::array< long, 4 > g{ anchor.diamond_id(),
+                                                   anchor.subdomain_x() * ( nx - 1 ) + x * span,
+                                                   anchor.subdomain_y() * ( ny - 1 ) + y * span,
+                                                   anchor.subdomain_r() * ( nr - 1 ) + r * span };
+                    classes[g].push_back( Idx4{ sub, x, y, r } );
+                }
+    }
+
+    // canonical copy per physical node (identity for unshared nodes); genuine classes -> CSR
+    std::map< Key4, Idx4 > canonical;
+    t.cls_offsets.push_back( 0 );
+    for ( const auto& [g, members] : classes )
+    {
+        bool is_hanging = false;
+        for ( const auto& m : members )
+            if ( hanging.count( key_of( m ) ) )
+                is_hanging = true;
+        if ( is_hanging )
+            continue; // hanging locations get values from the constraint, not from summation
+        for ( const auto& m : members )
+            canonical[key_of( m )] = members.front();
+        if ( members.size() >= 2 )
+        {
+            for ( const auto& m : members )
+                t.cls_members.push_back( m );
+            t.cls_offsets.push_back( static_cast< int >( t.cls_members.size() ) );
+        }
+    }
+
+    auto canon = [&]( const Idx4& i ) {
+        const auto it = canonical.find( key_of( i ) );
+        return it == canonical.end() ? i : it->second;
+    };
+
+    // ---- pass 3: derive the P^T assembly from the constraint rows (parents canonicalized) --------
+    for ( std::size_t i = 0; i < t.con_np.size(); ++i )
+        for ( int p = 0; p < t.con_np[i]; ++p )
+        {
+            t.asm_dst.push_back( canon( t.con_src[i][p] ) );
+            t.asm_src.push_back( t.con_dst[i] );
+            t.asm_w.push_back( t.con_w[i][p] );
+        }
+
+    // NOTE: con_src deliberately reads the owning coarse face's OWN copies (not canonicalized): after
+    // the exchange all class copies are equal anyway, and this keeps the constraint correct even when
+    // applied in isolation (e.g. after a plain interpolation instead of an assembly).
+
     return t;
 }
 
-// Host application of the exchange tables (assembly -> broadcast -> same-level sums).
+// Host application of the assembly exchange: class sums -> hanging P^T -> broadcast.
 template < typename FieldT >
 inline void apply_exchange_tables( const TwoToOneTables& t, FieldT& field )
 {
-    std::vector< double > tmp( t.asm_w.size() );
+    // gather hanging scatters (reads hanging copies -- untouched by every later phase)
+    std::vector< double > asm_tmp( t.asm_w.size() );
     for ( std::size_t i = 0; i < t.asm_w.size(); ++i )
     {
         const Idx4& s = t.asm_src[i];
-        tmp[i]        = t.asm_w[i] * field( s.s, s.x, s.y, s.r );
+        asm_tmp[i]    = t.asm_w[i] * field( s.s, s.x, s.y, s.r );
+    }
+
+    // gather class sums (reads coincident copies before any write)
+    const std::size_t     ncls = t.cls_offsets.size() - 1;
+    std::vector< double > cls_tmp( ncls );
+    for ( std::size_t c = 0; c < ncls; ++c )
+    {
+        double v = 0.0;
+        for ( int m = t.cls_offsets[c]; m < t.cls_offsets[c + 1]; ++m )
+        {
+            const Idx4& i = t.cls_members[m];
+            v += field( i.s, i.x, i.y, i.r );
+        }
+        cls_tmp[c] = v;
+    }
+
+    // scatter: canonical = class sum, then += hanging contributions
+    for ( std::size_t c = 0; c < ncls; ++c )
+    {
+        const Idx4& i = t.cls_members[t.cls_offsets[c]];
+        field( i.s, i.x, i.y, i.r ) = cls_tmp[c];
     }
     for ( std::size_t i = 0; i < t.asm_w.size(); ++i )
     {
         const Idx4& d = t.asm_dst[i];
-        field( d.s, d.x, d.y, d.r ) += tmp[i];
+        field( d.s, d.x, d.y, d.r ) += asm_tmp[i];
     }
-    for ( std::size_t i = 0; i < t.bc_dst.size(); ++i )
+
+    // broadcast the assembled canonical value to all other copies
+    for ( std::size_t c = 0; c < ncls; ++c )
     {
-        const Idx4& d = t.bc_dst[i];
-        const Idx4& s = t.bc_src[i];
-        field( d.s, d.x, d.y, d.r ) = field( s.s, s.x, s.y, s.r );
-    }
-    for ( std::size_t i = 0; i < t.pair_a.size(); ++i )
-    {
-        const Idx4&  a   = t.pair_a[i];
-        const Idx4&  b   = t.pair_b[i];
-        const double sum = field( a.s, a.x, a.y, a.r ) + field( b.s, b.x, b.y, b.r );
-        field( a.s, a.x, a.y, a.r ) = sum;
-        field( b.s, b.x, b.y, b.r ) = sum;
+        const Idx4&  can = t.cls_members[t.cls_offsets[c]];
+        const double v   = field( can.s, can.x, can.y, can.r );
+        for ( int m = t.cls_offsets[c] + 1; m < t.cls_offsets[c + 1]; ++m )
+        {
+            const Idx4& i = t.cls_members[m];
+            field( i.s, i.x, i.y, i.r ) = v;
+        }
     }
 }
 
-// Host application of the hanging-node constraint: overwrite each hanging fine DoF with the
-// interpolation of its coarse parents. Idempotent (destinations are never sources of other entries in
-// a 2:1-balanced mesh without staircases; two-phase makes it order-independent regardless).
+// Host application of the hanging-node constraint: overwrite each hanging copy with the interpolation
+// of its (assembled) coarse parents. Idempotent; two-phase makes it order-independent.
 template < typename FieldT >
 inline void apply_constraint_tables( const TwoToOneTables& t, FieldT& field )
 {
@@ -266,9 +322,9 @@ inline void apply_constraint_tables( const TwoToOneTables& t, FieldT& field )
     }
 }
 
-// Perform the additive 2:1 face exchange over all local subdomains of an adaptive domain.
-// Convenience wrapper: builds the tables and applies them. For repeated use (every operator apply),
-// build the tables once with build_2to1_tables and call apply_exchange_tables directly.
+// Perform the additive assembly exchange (faces, edges, vertices; same-level and 2:1) over all local
+// subdomains. Convenience wrapper: builds the tables and applies them. For repeated use (every
+// operator apply), build the tables once with build_2to1_tables and call apply_exchange_tables.
 template < typename FieldT >
 inline void exchange_faces_2to1( const DistributedDomain& dom, FieldT& field, int nx, int ny, int nr )
 {

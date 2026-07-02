@@ -75,9 +75,9 @@ int main( int argc, char** argv )
         // build tables once; they drive host golden AND device kernels
         const auto t = build_2to1_tables( dom, nx, ny, nr );
         CHECK( !t.asm_w.empty() );
-        CHECK( !t.bc_dst.empty() );
+        CHECK( !t.cls_members.empty() );
         CHECK( !t.con_np.empty() );
-        CHECK( !t.pair_a.empty() );
+        CHECK( t.cls_offsets.size() >= 2 );
 
         // deterministic per-node pattern
         auto pattern = []( int s, int x, int y, int r ) {
