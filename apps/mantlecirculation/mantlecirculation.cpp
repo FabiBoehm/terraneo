@@ -177,9 +177,6 @@ Result<> run( const Parameters& prm )
     fv::hex::initialize_cell_centers(
         fv_cell_centers, ( *domains[velocity_level] ), coords_shell[velocity_level], coords_radii[velocity_level] );
 
-    // Initialise and fill density -- time-independent for now
-    VectorQ1Scalar< ScalarType > rho( "rho", ( *domains[velocity_level] ), ownership_mask_data[velocity_level] );
-
     // Counting DoFs.
     int world_size = mpi::num_processes();
 
@@ -351,6 +348,12 @@ Result<> run( const Parameters& prm )
                 .size() );
         xdmf_output_pressure->set_is_dimensional( prm.devel_parameters.output_dimensional );
     }
+
+    // ----- Initial Stokes solve -----
+    logroot << "\n--------- Initial Stokes solve -----------------\n" << std::endl;
+    stokes.solve( dT, prm.physics_parameters.compressible, /*log_convergence=*/true );
+
+    log_hbm( "after first Stokes solve (peak)" );
 
     ScalarType simulated_time    = ScalarType( 0 );
     ScalarType simulated_time_Ma = ScalarType( 0 );
@@ -570,17 +573,14 @@ Result<> run( const Parameters& prm )
                 energy->restore_for_picard();
             }
 
-            // --- Stokes solve ---
-            stokes.solve( T, prm.physics_parameters.compressible, /*log_convergence=*/( picard == num_picard - 1 ) );
-
-            if ( timestep == timestep_initial + 1 && picard == 0 )
-                log_hbm( "after first Stokes solve (peak)" );
-
             // --- Energy solve (polymorphic dispatch) ---
             energy->step( dt, /*print_convergence=*/( picard == num_picard - 1 ) );
 
             // Update viscosity from the new temperature field.
             stokes.update_viscosity( T );
+
+            // --- Stokes solve ---
+            stokes.solve( dT, prm.physics_parameters.compressible, /*log_convergence=*/( picard == num_picard - 1 ) );
 
         } // end Picard loop
 
