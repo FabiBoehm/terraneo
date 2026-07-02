@@ -118,11 +118,23 @@ class AdaptiveForest
     // --- geometry / arithmetic ---------------------------------------------------------------------
 
     [[nodiscard]] int max_subdivision() const { return M_; }
+    [[nodiscard]] int lateral_subdomains_per_diamond() const { return S_lat_; } // base count per diamond side
+    [[nodiscard]] int radial_subdomains() const { return S_rad_; }             // base radial count
     [[nodiscard]] int lateral_extent() const { return S_lat_ << M_; } // finest-frame units, per diamond
     [[nodiscard]] int radial_extent() const { return S_rad_ << M_; }  // finest-frame units
 
     // Side length of a subdivision-k leaf in finest-frame units.
     [[nodiscard]] int finest_span( int subdivision ) const { return 1 << ( M_ - subdivision ); }
+
+    // A leaf's min-corner in the finest frame, as a SubdomainInfo. Unique per leaf across the whole
+    // mesh (a partition has no two cells sharing a min corner), so it is a safe global key even though
+    // the leaf's own-level id is not (a coarse and a fine leaf can share own-level indices).
+    [[nodiscard]] SubdomainInfo finest_anchor( const ForestLeaf& l ) const
+    {
+        const int sh = M_ - l.subdivision;
+        return SubdomainInfo{ l.id.diamond_id(), l.id.subdomain_x() << sh, l.id.subdomain_y() << sh,
+                              l.id.subdomain_r() << sh };
+    }
 
     [[nodiscard]] bool in_range( const ForestLeaf& l ) const
     {

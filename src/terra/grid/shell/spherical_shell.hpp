@@ -13,6 +13,7 @@
 #include "mpi/mpi.hpp"
 #include "util/logging.hpp"
 #include "subdomain_info.hpp"
+#include "adaptive_forest.hpp"
 
 namespace terra::grid::shell {
 
@@ -2586,8 +2587,67 @@ class DistributedDomain
         return domain;
     }
 
+    /// @brief Build a DistributedDomain from an adaptive forest (AMR).
+    ///
+    /// Each leaf becomes one subdomain, keyed by its finest-frame anchor (unique across the mesh even
+    /// though a coarse and a fine leaf may share own-level indices). Every block keeps the SAME node
+    /// count -- the base-subdomain resolution set by (lateral_diamond_refinement_level, forest base
+    /// counts); a leaf's `subdivision` changes its physical size/position, not its node count, which is
+    /// why it fits the single rectangular Kokkos::View storage. The per-leaf subdivision is recorded in
+    /// a side map, retrievable via subdivision_of().
+    ///
+    /// The uniform create_* factories are untouched: this path is only taken when explicitly called, so
+    /// existing (non-AMR) runs are byte-for-byte unchanged.
+    ///
+    /// NOTE: subdomain neighborhoods are left empty here -- adaptive (2:1) neighbor tables are built in
+    /// a separate step. Consumers that need halo exchange must populate them first.
+    static DistributedDomain create_adaptive_on_comm(
+        MPI_Comm                                   comm,
+        const int                                  lateral_diamond_refinement_level,
+        const std::vector< double >&               radii,
+        const amr::AdaptiveForest&                 forest,
+        const SubdomainToRankDistributionFunction& subdomain_to_rank )
+    {
+        DistributedDomain domain;
+        domain.domain_info_ = DomainInfo(
+            lateral_diamond_refinement_level, radii, forest.lateral_subdomains_per_diamond(),
+            forest.radial_subdomains() );
+        domain.comm_     = comm;
+        domain.adaptive_ = true;
+
+        if ( comm != MPI_COMM_NULL )
+        {
+            const auto my_rank = mpi::rank( comm );
+            int        idx     = 0;
+            for ( const auto& leaf : forest.leaves() )
+            {
+                const SubdomainInfo anchor = forest.finest_anchor( leaf );
+                if ( subdomain_to_rank( anchor, forest.lateral_subdomains_per_diamond(),
+                                        forest.radial_subdomains() ) != my_rank )
+                {
+                    continue;
+                }
+                domain.subdomains_[anchor]                           = { idx, SubdomainNeighborhood() };
+                domain.local_subdomain_index_to_subdomain_info_[idx] = anchor;
+                domain.subdomain_subdivision_[anchor]                = leaf.subdivision;
+                idx++;
+            }
+        }
+        return domain;
+    }
+
     /// @brief Returns a const reference
     [[nodiscard]] const DomainInfo& domain_info() const { return domain_info_; }
+
+    /// @brief Whether this domain was built from an adaptive forest (AMR) rather than a uniform mesh.
+    [[nodiscard]] bool adaptive() const { return adaptive_; }
+
+    /// @brief Subdivision (AMR split count) of a subdomain; 0 for uniform domains or unknown keys.
+    [[nodiscard]] int subdivision_of( const SubdomainInfo& subdomain ) const
+    {
+        const auto it = subdomain_subdivision_.find( subdomain );
+        return it == subdomain_subdivision_.end() ? 0 : it->second;
+    }
 
     [[nodiscard]] const std::map< SubdomainInfo, std::tuple< LocalSubdomainIdx, SubdomainNeighborhood > >&
         subdomains() const
@@ -2605,6 +2665,10 @@ class DistributedDomain
     std::map< SubdomainInfo, std::tuple< LocalSubdomainIdx, SubdomainNeighborhood > > subdomains_;
     std::map< LocalSubdomainIdx, SubdomainInfo > local_subdomain_index_to_subdomain_info_;
     MPI_Comm                                     comm_ = MPI_COMM_WORLD;
+
+    // AMR only (empty / false for uniform domains -- the uniform path never touches these):
+    std::map< SubdomainInfo, int > subdomain_subdivision_; // finest-frame anchor -> subdivision
+    bool                           adaptive_ = false;
 };
 
 struct SubdomainDistribution
