@@ -89,6 +89,38 @@ int main( int argc, char** argv )
             // consistency: all copies of the vertex class hold the same assembled value
             const int B2 = local_index( dom, SubdomainInfo{ 1, 0, 0, 0 } ); // block (0,0,0)
             CHECK( close( field( B2, nx - 1, ny - 1, nr - 1 ), 8.0 ) );     // same vertex from (0,0,0)
+
+            // ---- diamond seams --------------------------------------------------------------------
+            // block (diamond 0, own (0,0,0)): its x-low and y-low faces are diamond seams; its (0,0)
+            // corner is the north pole (5 diamonds meet).
+            const int C = local_index( dom, SubdomainInfo{ 0, 0, 0, 0 } );
+            CHECK( close( field( C, 0, 2, 1 ), 2.0 ) );  // seam face interior: mine + 1 cross-diamond
+            CHECK( close( field( C, 0, 4, 1 ), 4.0 ) );  // seam + within-diamond block edge: 2 + 2
+            CHECK( close( field( C, 0, 0, 1 ), 5.0 ) );  // north pole, r block-interior: 5 diamonds
+            CHECK( close( field( C, 0, 0, 2 ), 10.0 ) ); // north pole at radial interface: 5 x 2
+            // south pole via a southern diamond
+            const int S = local_index( dom, SubdomainInfo{ 5, 0, 0, 0 } );
+            CHECK( close( field( S, 0, 0, 1 ), 5.0 ) );
+        }
+
+        // ---- Milestone A guard: refining a diamond-boundary block must throw -----------------------
+        {
+            AdaptiveForest f( M, S_lat, S_rad );
+            f.refine( { ForestLeaf{ SubdomainInfo{ 0, 1, 0, 0 }, 0 } } ); // block at y-low seam
+            auto dom = DistributedDomain::create_adaptive_on_comm(
+                MPI_COMM_WORLD, LDR, radii, f, subdomain_to_rank_all_root );
+            const int nx = dom.domain_info().subdomain_num_nodes_per_side_laterally();
+            const int nr = dom.domain_info().subdomain_num_nodes_radially();
+            bool threw = false;
+            try
+            {
+                (void) build_2to1_tables( dom, nx, nx, nr );
+            }
+            catch ( const std::runtime_error& )
+            {
+                threw = true;
+            }
+            CHECK( threw );
         }
 
         // ---- (2) refined domain: exact mass conservation into genuine DoFs ------------------------

@@ -21,9 +21,11 @@
 // SAME tables, so host and device semantics are identical by construction. All appliers are two-phase
 // (gather then scatter) -> results independent of entry order.
 //
-// Deferred: diamond seams (classes are keyed within a diamond; seam nodes stay partial -- Milestone A
-// keeps diamond-boundary blocks at subdivision 0, and their cross-diamond assembly will reuse the
-// uniform pole logic) and MPI transport (all neighbors local for now).
+// Diamond seams ARE handled: cross-diamond node identifications are derived from terra's uniform
+// SubdomainNeighborhood (whose hardcoded pole wiring applies verbatim to the subdivision-0 blocks that
+// Milestone A requires at diamond boundaries) and merged into the classes with a union-find; pole
+// corners group transitively around the face-adjacency cycle. A refined block at a diamond lateral
+// boundary throws (2:1 seams are not supported). Deferred: MPI transport (all neighbors local).
 
 #include <array>
 #include <map>
@@ -184,7 +186,7 @@ inline TwoToOneTables build_2to1_tables( const DistributedDomain& dom, int nx, i
         }
     }
 
-    // ---- pass 2: global node classes (within-diamond) --------------------------------------------
+    // ---- pass 2: global node classes (within-diamond coincidence) ---------------------------------
     // global coordinate per axis in units of 1/(nodes-1) of a finest cell:
     //   g = anchor_finest * (nodes-1) + node_idx * finest_span(subdivision)
     const int M = dom.max_subdivision();
@@ -206,11 +208,111 @@ inline TwoToOneTables build_2to1_tables( const DistributedDomain& dom, int nx, i
                 }
     }
 
-    // canonical copy per physical node (identity for unshared nodes); genuine classes -> CSR
-    std::map< Key4, Idx4 > canonical;
-    t.cls_offsets.push_back( 0 );
+    // provisional class id per copy (all copies, singletons included)
+    std::vector< std::vector< Idx4 > > cls;
+    std::map< Key4, int >              class_of;
+    cls.reserve( classes.size() );
     for ( const auto& [g, members] : classes )
     {
+        const int id = static_cast< int >( cls.size() );
+        for ( const auto& m : members )
+            class_of[key_of( m )] = id;
+        cls.push_back( members );
+    }
+
+    // ---- pass 3: diamond-seam identifications ------------------------------------------------------
+    // Milestone A keeps diamond-boundary blocks at subdivision 0, so terra's UNIFORM neighborhood
+    // machinery (incl. the hardcoded pole wiring and FORWARD/BACKWARD index inversion) applies to them
+    // verbatim. For each cross-diamond face we pair node-for-node (receiver convention from
+    // buffer_copy_kernels.hpp: my (a1,a2) <-> neighbor (flip_d0(a1), flip_d1(a2))) and merge the
+    // classes with a union-find. Pole corners (5 diamonds) merge transitively around the cycle of
+    // face-adjacent diamond pairs -- no separate edge/vertex wiring needed.
+    std::vector< int > uf( cls.size() );
+    for ( std::size_t i = 0; i < uf.size(); ++i )
+        uf[i] = static_cast< int >( i );
+    auto find = [&]( int a ) {
+        while ( uf[a] != a )
+            a = uf[a] = uf[uf[a]];
+        return a;
+    };
+    auto unite = [&]( int a, int b ) {
+        a = find( a );
+        b = find( b );
+        if ( a != b )
+            uf[b] = a;
+    };
+    auto to_amr_face = []( BoundaryFace bf ) {
+        switch ( bf )
+        {
+        case BoundaryFace::F_0YR: return Face::XLOW;
+        case BoundaryFace::F_1YR: return Face::XHIGH;
+        case BoundaryFace::F_X0R: return Face::YLOW;
+        case BoundaryFace::F_X1R: return Face::YHIGH;
+        case BoundaryFace::F_XY0: return Face::RLOW;
+        default:                  return Face::RHIGH;
+        }
+    };
+
+    const int S_lat = dom.domain_info().num_subdomains_per_diamond_side();
+    for ( const auto& [anchor, tup] : dom.subdomains() )
+    {
+        const int sub = std::get< 0 >( tup );
+        const int k   = dom.subdivision_of( anchor );
+        const int sh  = M - k;
+        const int ox  = anchor.subdomain_x() >> sh;
+        const int oy  = anchor.subdomain_y() >> sh;
+        const int orr = anchor.subdomain_r() >> sh;
+        const int nblk = S_lat << k;
+        if ( ox != 0 && ox != nblk - 1 && oy != 0 && oy != nblk - 1 )
+            continue; // not at a lateral diamond boundary
+        if ( k != 0 )
+            throw std::runtime_error(
+                "AMR seam assembly: diamond-boundary blocks must stay at subdivision 0 (Milestone A)." );
+
+        const SubdomainInfo         own( anchor.diamond_id(), ox, oy, orr );
+        const SubdomainNeighborhood unbh( dom.domain_info(), own, subdomain_to_rank_all_root );
+        for ( const auto& [bf, nbt] : unbh.neighborhood_face() )
+        {
+            const auto& [nb_own, nb_bf, ordering, nb_rank] = nbt;
+            if ( nb_own.diamond_id() == anchor.diamond_id() )
+                continue; // same-diamond faces are covered by the coordinate classes
+            const SubdomainInfo nb_anchor( nb_own.diamond_id(), nb_own.subdomain_x() << M,
+                                           nb_own.subdomain_y() << M, nb_own.subdomain_r() << M );
+            const auto it = dom.subdomains().find( nb_anchor );
+            if ( it == dom.subdomains().end() )
+                throw std::runtime_error(
+                    "AMR seam assembly: cross-diamond neighbor missing or refined (Milestone A)." );
+            const int      nsub = std::get< 0 >( it->second );
+            const FaceAxes fa   = face_axes( to_amr_face( bf ), nx, ny, nr );
+            const FaceAxes nfa  = face_axes( to_amr_face( nb_bf ), nx, ny, nr );
+            const auto     d0   = std::get< 0 >( ordering );
+            const auto     d1   = std::get< 1 >( ordering );
+            for ( int a1 = 0; a1 < fa.n1; ++a1 )
+                for ( int a2 = 0; a2 < fa.n2; ++a2 )
+                {
+                    const int i = ( d0 == BoundaryDirection::BACKWARD ) ? fa.n1 - 1 - a1 : a1;
+                    const int j = ( d1 == BoundaryDirection::BACKWARD ) ? fa.n2 - 1 - a2 : a2;
+                    unite( class_of.at( key_of( face_node( sub, fa, a1, a2 ) ) ),
+                           class_of.at( key_of( face_node( nsub, nfa, i, j ) ) ) );
+                }
+        }
+    }
+
+    // ---- pass 4: merged classes -> canonical map + CSR (genuine classes with >= 2 members) --------
+    std::map< int, std::vector< Idx4 > > merged;
+    for ( std::size_t c = 0; c < cls.size(); ++c )
+    {
+        auto& v = merged[find( static_cast< int >( c ) )];
+        v.insert( v.end(), cls[c].begin(), cls[c].end() );
+    }
+
+    std::map< Key4, Idx4 > canonical;
+    t.cls_offsets.push_back( 0 );
+    for ( auto& [root, members] : merged )
+    {
+        std::sort( members.begin(), members.end(), []( const Idx4& a, const Idx4& b ) {
+            return std::tie( a.s, a.x, a.y, a.r ) < std::tie( b.s, b.x, b.y, b.r );
+        } );
         bool is_hanging = false;
         for ( const auto& m : members )
             if ( hanging.count( key_of( m ) ) )
@@ -232,7 +334,7 @@ inline TwoToOneTables build_2to1_tables( const DistributedDomain& dom, int nx, i
         return it == canonical.end() ? i : it->second;
     };
 
-    // ---- pass 3: derive the P^T assembly from the constraint rows (parents canonicalized) --------
+    // ---- pass 5: derive the P^T assembly from the constraint rows (parents canonicalized) --------
     for ( std::size_t i = 0; i < t.con_np.size(); ++i )
         for ( int p = 0; p < t.con_np[i]; ++p )
         {
