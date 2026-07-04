@@ -129,11 +129,30 @@ radial *face* hanging coincident with the jump that is unique.)
   goes 9→21 only *under the MG*, the ~2× penalty is confirmed to live in the **MG coarse-grid
   correction**, not the operator. (Confirms §4.)
 - **537788 — mild-k control** (`test_adaptive_mg_gpu` now with **S_rad=2** radial hanging but the
-  *mild* `2+sin z` coefficient): isolates radial-face hanging *from* the jump. If it stays 7/8 →
-  radial-face hanging alone is fine and the jump is required (⇒ §4). If it shows a penalty at mild k
-  → radial-face hanging itself is the problem (redirect the hunt there).
+  *mild* `2+sin z` coefficient): isolates radial-face hanging *from* the jump. **RESULT (DONE):**
+  4-level MG FGMRES = uniform flat **12**; adaptive **12 / 13 / 12 / 13** at 7168→**64512** hanging
+  nodes. Adaptive ≈ uniform (+1 iter at most, even at 64512 hanging). **⇒ radial-face hanging alone
+  is harmless; the viscosity jump on the interface is required to trigger the penalty.** (The
+  absolute 12 vs the S_rad=1 benchmark's 7 is just the S_rad=2 mesh baseline; what matters is the
+  flat adaptive-vs-uniform.) Confirms §4.
 
-Both were pending on the project-wide GPU association cap (`AssocGrpGRES`) at last check.
+### Both experiments done — the penalty is a three-way coincidence
+
+The ~2× penalty appears **only** when all three hold; remove any one and it vanishes:
+
+| regime | result | penalty? |
+|---|---|---|
+| hanging + **mild k** (537788) | 12 → 13 | no |
+| **uniform** + contrast-10 (visckink) | 9 | no |
+| hanging + contrast-10, **naked CG** (537750) | 630 → 648 | no |
+| hanging + contrast-10, **MG** (visckink) | 9 → 21 | **yes** |
+
+Conclusion: **2:1 hanging interface × viscosity jump on it × MG coarse correction.** Operator is
+well-conditioned (naked CG), hanging machinery is correct (4 clean audits, §3.5), hanging without
+the jump is fine (537788). The failure is the coefficient-blind hanging constraint annihilating the
+coefficient-induced kink in the coarse correction (§4) — a numerical limitation of geometric
+hanging-node MG at high contrast, **not a code bug**. Fix direction: coefficient-aware (harmonic/
+k-weighted) constraint at hanging nodes (§6.3).
 
 ---
 
