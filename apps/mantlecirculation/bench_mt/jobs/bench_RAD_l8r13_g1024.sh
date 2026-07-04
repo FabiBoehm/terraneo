@@ -1,0 +1,34 @@
+#!/bin/bash -l
+#SBATCH --job-name=bench_RAD_l8r13_g1024
+#SBATCH --output=bench_RAD_l8r13_g1024.o%j
+#SBATCH --error=bench_RAD_l8r13_g1024.e%j
+#SBATCH -D /home/hpc/iwia/iwia054h/terraneo/apps/mantlecirculation/bench_mt/jobs
+#SBATCH --partition=standard-g
+#SBATCH --account=project_465002367
+#SBATCH --nodes=128
+#SBATCH --ntasks-per-node=8
+#SBATCH --gpus-per-node=8
+#SBATCH --time=00:30:00
+
+echo "Cell: RAD_l8r13_g1024  lat_level=8  rad_level=13  lat_sdr=1  rad_sdr=8  subdomains=10240  n_gpus=1024  nodes=128x8  partition=standard-g"
+
+export MPICH_GPU_SUPPORT_ENABLED=1
+export OMP_NUM_THREADS=1
+ulimit -c 0
+
+# Per-GCD GPU binding wrapper (maps SLURM_LOCALID -> ROCR_VISIBLE_DEVICES).
+SELECT_GPU=${SLURM_SUBMIT_DIR}/select_gpu_${SLURM_JOB_ID}.sh
+cat > ${SELECT_GPU} << 'INNER'
+#!/bin/bash
+export ROCR_VISIBLE_DEVICES=$SLURM_LOCALID
+exec "$@"
+INNER
+chmod +x ${SELECT_GPU}
+
+# benchmark_operators writes csv/ and tts/ relative to CWD.
+mkdir -p /home/hpc/iwia/iwia054h/terraneo/apps/mantlecirculation/bench_mt/outputs/RAD_l8r13_g1024/csv /home/hpc/iwia/iwia054h/terraneo/apps/mantlecirculation/bench_mt/outputs/RAD_l8r13_g1024/tts
+cd /home/hpc/iwia/iwia054h/terraneo/apps/mantlecirculation/bench_mt/outputs/RAD_l8r13_g1024
+
+srun --cpu-bind=map_cpu:49,57,17,25,1,9,33,41 ${SELECT_GPU} /pfs/lustrep3/users/bohmfabi/terraneo-build/apps/benchmarks/performance/benchmark_operators --min-level 8 --max-level 8 --radial-extra-levels 5 --lat-sdr 1 --rad-sdr 8 --executions 5 --warmup 5
+
+rm -f ${SELECT_GPU}

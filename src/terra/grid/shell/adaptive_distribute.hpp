@@ -153,7 +153,7 @@ struct DistributedAdaptiveMesh
     int                  nx = 0, ny = 0, nr = 0;
 };
 
-inline DistributedAdaptiveMesh build_distributed_mesh( MPI_Comm comm, int lateral_diamond_refinement_level,
+inline DistributedAdaptiveMesh build_distributed_adaptive_mesh( MPI_Comm comm, int lateral_diamond_refinement_level,
                                                        const std::vector< double >&               radii,
                                                        const amr::AdaptiveForest&                 forest,
                                                        const SubdomainToRankDistributionFunction& part )
@@ -282,7 +282,7 @@ inline void assemble_distributed( const DistributedAdaptiveMesh& mesh,
 // hanging DoFs (slaves). Genuine block-interior singletons stay owned. So masked dot products count
 // each node once across the whole communicator.
 inline Grid4DDataScalar< grid::NodeOwnershipFlag >
-    distributed_ownership_mask( const DistributedAdaptiveMesh& mesh )
+    adaptive_ownership_mask( const DistributedAdaptiveMesh& mesh )
 {
     auto mask = allocate_scalar_grid< grid::NodeOwnershipFlag >( "amr_dist_ownership", mesh.domain );
     auto h    = Kokkos::create_mirror_view( mask );
@@ -338,7 +338,14 @@ class AdaptiveDistributedConstrainedOperator
                                                           boundary_mask_, dirichlet_flag_ );
         apply_constraint_device( mesh_->t_local_d, tmp_.grid_data() ); // local (Stage 0)
         linalg::apply( op_, tmp_, dst );                               // local element apply
-        assemble_distributed( *mesh_, dst.grid_data() );              // cross-rank additive halo
+        // Assembly. Single-rank: stay ON-DEVICE (apply_exchange_device) -- the host-staged
+        // assemble_distributed (deep_copy GPU->CPU, serial CPU assemble, copy back) is pure overhead when
+        // there is no cross-rank halo, and it dominates wall time in the MG hot loop. Multi-rank: the
+        // additive halo needs the host-staged path (device MPI transport is not wired yet).
+        if ( mpi::num_processes( mesh_->comm ) == 1 )
+            apply_exchange_device( mesh_->t_local_d, dst.grid_data() );
+        else
+            assemble_distributed( *mesh_, dst.grid_data() );          // cross-rank additive halo
         if ( eliminate_dirichlet_ )
             kernels::common::assign_masked_else_keep_old( dst.grid_data(), src.grid_data(),
                                                           boundary_mask_, dirichlet_flag_ );

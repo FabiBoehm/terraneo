@@ -1,0 +1,124 @@
+### Starting TaskPrologue of job 488638 on h14-16 at Sat Jun  6 09:31:54 PM CEST 2026
+Running on cores 0-127 with governor ondemand
+Sat Jun  6 21:31:54 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 595.71.05              Driver Version: 595.71.05      CUDA Version: 13.2     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA H100                    On  |   00000000:06:00.0 Off |                    0 |
+| N/A   34C    P0             68W /  500W |       0MiB /  95830MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   1  NVIDIA H100                    On  |   00000000:26:00.0 Off |                    0 |
+| N/A   34C    P0             67W /  500W |       0MiB /  95830MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   2  NVIDIA H100                    On  |   00000000:A6:00.0 Off |                    0 |
+| N/A   34C    P0             71W /  500W |       0MiB /  95830MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   3  NVIDIA H100                    On  |   00000000:C6:00.0 Off |                    0 |
+| N/A   34C    P0             69W /  500W |       0MiB /  95830MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+### Finished TaskPrologue
+
+Loading openmpi/5.0.5-nvhpc24.11-cuda
+  Loading requirement: nvhpc/24.11
+###### 0) WHY is GPUDirect declined? (UCX debug, GDR reasons) ######
+[1780774320.013227] [h14-23:844827:0]          module.c:162  UCX  DEBUG ignoring 'ucs_module_global_init' (0x14fae5768190) from libuct_cuda.so.0 (0x14fae5760000), expected in libuct_cuda_gdrcopy.so.0 (14fae56d8000)
+[1780774320.014544] [h14-23:844826:0]          module.c:162  UCX  DEBUG ignoring 'ucs_module_global_init' (0x147476062190) from libuct_cuda.so.0 (0x14747605a000), expected in libuct_cuda_gdrcopy.so.0 (147475fd0000)
+[1780774320.016094] [h14-16:897529:0]          module.c:162  UCX  DEBUG ignoring 'ucs_module_global_init' (0x1533b3412190) from libuct_cuda.so.0 (0x1533b340a000), expected in libuct_cuda_gdrcopy.so.0 (1533b3381000)
+[1780774320.016626] [h14-16:897530:0]          module.c:162  UCX  DEBUG ignoring 'ucs_module_global_init' (0x14f2dafc7190) from libuct_cuda.so.0 (0x14f2dafbf000), expected in libuct_cuda_gdrcopy.so.0 (14f2daf34000)
+[1780774320.018779] [h14-23:844828:0]          module.c:162  UCX  DEBUG ignoring 'ucs_module_global_init' (0x1465f90f2190) from libuct_cuda.so.0 (0x1465f90ea000), expected in libuct_cuda_gdrcopy.so.0 (1465f8386000)
+[1780774320.019017] [h14-16:897528:0]          module.c:162  UCX  DEBUG ignoring 'ucs_module_global_init' (0x14c356501190) from libuct_cuda.so.0 (0x14c3564f9000), expected in libuct_cuda_gdrcopy.so.0 (14c355997000)
+[1780774320.021395] [h14-23:844825:0]          module.c:162  UCX  DEBUG ignoring 'ucs_module_global_init' (0x1536e3b7d190) from libuct_cuda.so.0 (0x1536e3b75000), expected in libuct_cuda_gdrcopy.so.0 (1536e3aed000)
+[1780774320.023722] [h14-16:897527:0]          module.c:162  UCX  DEBUG ignoring 'ucs_module_global_init' (0x14f49694d190) from libuct_cuda.so.0 (0x14f496945000), expected in libuct_cuda_gdrcopy.so.0 (14f495de7000)
+[1780774320.027043] [h14-23:844826:0]     gdr_copy_md.c:229  UCX  DEBUG could not open gdr copy. disabling gdr copy resource
+[1780774320.027073] [h14-23:844828:0]     gdr_copy_md.c:229  UCX  DEBUG could not open gdr copy. disabling gdr copy resource
+[1780774320.027081] [h14-23:844827:0]     gdr_copy_md.c:229  UCX  DEBUG could not open gdr copy. disabling gdr copy resource
+[1780774320.027407] [h14-23:844825:0]     gdr_copy_md.c:229  UCX  DEBUG could not open gdr copy. disabling gdr copy resource
+[1780774320.029241] [h14-16:897528:0]     gdr_copy_md.c:229  UCX  DEBUG could not open gdr copy. disabling gdr copy resource
+[1780774320.029241] [h14-16:897529:0]     gdr_copy_md.c:229  UCX  DEBUG could not open gdr copy. disabling gdr copy resource
+[1780774320.029241] [h14-16:897530:0]     gdr_copy_md.c:229  UCX  DEBUG could not open gdr copy. disabling gdr copy resource
+[1780774320.029244] [h14-16:897527:0]     gdr_copy_md.c:229  UCX  DEBUG could not open gdr copy. disabling gdr copy resource
+[1780774320.032973] [h14-23:844827:0]     gdr_copy_md.c:229  UCX  DEBUG could not open gdr copy. disabling gdr copy resource
+[1780774320.033236] [h14-23:844825:0]     gdr_copy_md.c:229  UCX  DEBUG could not open gdr copy. disabling gdr copy resource
+[1780774320.033237] [h14-23:844826:0]     gdr_copy_md.c:229  UCX  DEBUG could not open gdr copy. disabling gdr copy resource
+[1780774320.033237] [h14-23:844828:0]     gdr_copy_md.c:229  UCX  DEBUG could not open gdr copy. disabling gdr copy resource
+[1780774320.035141] [h14-16:897527:0]     gdr_copy_md.c:229  UCX  DEBUG could not open gdr copy. disabling gdr copy resource
+[1780774320.035141] [h14-16:897528:0]     gdr_copy_md.c:229  UCX  DEBUG could not open gdr copy. disabling gdr copy resource
+[1780774320.035141] [h14-16:897529:0]     gdr_copy_md.c:229  UCX  DEBUG could not open gdr copy. disabling gdr copy resource
+[1780774320.035141] [h14-16:897530:0]     gdr_copy_md.c:229  UCX  DEBUG could not open gdr copy. disabling gdr copy resource
+[1780774320.042637] [h14-23:844826:0]           ib_md.c:1186 UCX  DEBUG mlx5_0: cuda GPUDirect RDMA is disabled
+###### A) get_zcopy (force RDMA zero-copy on GPU mem) ######
+[LOG | rank 0 | 2026-06-06 21:32:05] 
+[LOG | rank 0 | 2026-06-06 21:32:05] 
+###### B) RNDV_FRAG_MEM_TYPE=cuda (keep staging frags on GPU) ######
+[LOG | rank 0 | 2026-06-06 21:32:25] 
+[LOG | rank 0 | 2026-06-06 21:32:25] 
+###### A') transport check for get_zcopy ######
+[1780774357.109780] [h14-23:845269:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send* from host memory                                                 |
+[1780774357.109858] [h14-23:845269:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(fast-completion) from host memory                                |
+[1780774357.110019] [h14-23:845269:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(multi) from host memory                                          |
+[1780774357.110163] [h14-23:845266:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send* from host memory                                                 |
+[1780774357.110243] [h14-23:845266:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(fast-completion) from host memory                                |
+[1780774357.110396] [h14-23:845266:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(multi) from host memory                                          |
+[1780774357.110654] [h14-23:845267:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send* from host memory                                                 |
+[1780774357.110702] [h14-23:845268:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send* from host memory                                                 |
+[1780774357.110734] [h14-23:845267:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(fast-completion) from host memory                                |
+[1780774357.110786] [h14-16:897860:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send* from host memory                                                 |
+[1780774357.110786] [h14-16:897861:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send* from host memory                                                 |
+[1780774357.110792] [h14-23:845268:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(fast-completion) from host memory                                |
+[1780774357.110807] [h14-16:897862:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send* from host memory                                                 |
+[1780774357.110862] [h14-16:897860:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(fast-completion) from host memory                                |
+[1780774357.110863] [h14-16:897861:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(fast-completion) from host memory                                |
+###### END ######
+=== JOB_STATISTICS ===
+=== current date     : Sat Jun  6 21:32:39 CEST 2026
+= Job-ID             : 488638 on helma
+= Job-Name           : force_gpucomm
+= Job-Command        : /home/hpc/iwia/iwia054h/terraneo/apps/mantlecirculation/bench_mt/jobs/run_force_gpu_comm.sh
+= Initial workdir    : /home/hpc/iwia/iwia054h/terraneo/apps/mantlecirculation/bench_mt/jobs
+= Queue/Partition    : h100
+= Slurm account      : iwia with QOS=normal
+= Requested resources: cpu=256,mem=1400G,node=2,billing=256,gres/gpu=8,gres/gpu:h100=8 for 00:20:00
+= Elapsed runtime    : 00:01:11
+= Total RAM usage    : 1.4 GiB of assigned 1400 GiB (0.1%)
+= Node list          : h14-[16,23]
+= Subm/Elig/Start/End: 2026-06-06T21:31:28 / 2026-06-06T21:31:28 / 2026-06-06T21:31:28 / 2026-06-06T21:32:39
+======================
+=== Quota infos ======
+    Path                 Used     SoftQ    HardQ    Gracetime  Filec    FileQ    FiHaQ    FileGrace    
+    /home/hpc              92.7G   104.9G   209.7G        N/A     280K     500K   1,000K        N/A    
+    /hnvme               2306.9G     0.0K     0.0K        N/A  24,856       61K      81K        N/A    
+======================
+=== GPU utilization ==
+gpu_name, gpu_bus_id, pid, gpu_utilization [%], mem_utilization [%], max_memory_usage [MiB], time [ms]
+NVIDIA H100, 00000000:06:00.0, 897527, 0 %, 0 %, 8310 MiB, 2371 ms
+NVIDIA H100, 00000000:06:00.0, 897615, 0 %, 0 %, 8310 MiB, 2613 ms
+NVIDIA H100, 00000000:06:00.0, 897746, 10 %, 2 %, 8308 MiB, 3344 ms
+NVIDIA H100, 00000000:06:00.0, 897860, 0 %, 0 %, 8310 MiB, 2368 ms
+NVIDIA H100, 00000000:26:00.0, 897528, 0 %, 0 %, 8322 MiB, 2338 ms
+NVIDIA H100, 00000000:26:00.0, 897616, 11 %, 3 %, 8322 MiB, 2668 ms
+NVIDIA H100, 00000000:26:00.0, 897747, 9 %, 2 %, 8320 MiB, 3377 ms
+NVIDIA H100, 00000000:26:00.0, 897861, 0 %, 0 %, 8322 MiB, 2313 ms
+NVIDIA H100, 00000000:A6:00.0, 897529, 0 %, 0 %, 8322 MiB, 2387 ms
+NVIDIA H100, 00000000:A6:00.0, 897617, 12 %, 3 %, 8322 MiB, 2580 ms
+NVIDIA H100, 00000000:A6:00.0, 897748, 9 %, 2 %, 8320 MiB, 3288 ms
+NVIDIA H100, 00000000:A6:00.0, 897862, 0 %, 0 %, 8322 MiB, 2278 ms
+NVIDIA H100, 00000000:C6:00.0, 897530, 0 %, 0 %, 8318 MiB, 2310 ms
+NVIDIA H100, 00000000:C6:00.0, 897618, 0 %, 0 %, 8318 MiB, 2633 ms
+NVIDIA H100, 00000000:C6:00.0, 897749, 12 %, 2 %, 8316 MiB, 3319 ms
+NVIDIA H100, 00000000:C6:00.0, 897863, 0 %, 0 %, 8318 MiB, 2330 ms

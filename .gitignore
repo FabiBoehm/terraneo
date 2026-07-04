@@ -1,3 +1,8 @@
 build/
 .idea/
 doc/doxygen_and_pages/html/apps/benchmarks/performance/scaling_scripts/
+
+# security / external deps (never commit)
+helma2_key
+helma2_key.pub
+extern/kokkos-5.1.0/

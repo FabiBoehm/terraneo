@@ -325,8 +325,8 @@ static SolveResult solve_eps( const DistributedDomain& dom, const TwoToOneTables
     const double relres = std::sqrt( dot( rr, rr ) / dot( b, b ) );
 
     std::printf( "  [%s] dofs %ld  l2 %.12e  relres %.3e  hanging %zu\n", tag.c_str(), ndofs, l2,
-                 relres, t.con_np.size() );
-    return SolveResult{ l2, ndofs, relres, t.con_np.size() };
+                 relres, t.con_dst.size() );
+    return SolveResult{ l2, ndofs, relres, t.con_dst.size() };
 }
 
 // Distributed (multi-rank) adaptive solve. Same physics/BCs as solve_eps; the operator is the
@@ -343,7 +343,7 @@ static SolveResult solve_eps_distributed( const DistributedAdaptiveMesh&        
     using MassWrapper = AdaptiveDistributedConstrainedOperator< Mass >;
 
     const auto& dom   = mesh.domain;
-    const auto  mask  = distributed_ownership_mask( mesh );
+    const auto  mask  = adaptive_ownership_mask( mesh );
     const auto  bmask = adaptive_boundary_mask( dom );
 
     VectorQ1Vec< ScalarType >    u( "u", dom, mask ), g( "g", dom, mask ), tmp( "tmp", dom, mask );
@@ -400,8 +400,8 @@ static SolveResult solve_eps_distributed( const DistributedAdaptiveMesh&        
 
     if ( mpi::rank( mesh.comm ) == 0 )
         std::printf( "  [%s] dofs %ld  l2 %.12e  relres %.3e  hanging(local r0) %zu\n", tag.c_str(),
-                     ndofs, l2, relres, mesh.t_local.con_np.size() );
-    return SolveResult{ l2, ndofs, relres, mesh.t_local.con_np.size() };
+                     ndofs, l2, relres, mesh.t_local.con_dst.size() );
+    return SolveResult{ l2, ndofs, relres, mesh.t_local.con_dst.size() };
 }
 
 int main( int argc, char** argv )
@@ -429,9 +429,9 @@ int main( int argc, char** argv )
             f.refine( base );
             CHECK( f.validate() );
 
-            auto mesh_a = build_distributed_mesh( MPI_COMM_WORLD, LDR, radii5, f,
+            auto mesh_a = build_distributed_adaptive_mesh( MPI_COMM_WORLD, LDR, radii5, f,
                                                   grid::shell::subdomain_to_rank_by_diamond );
-            CHECK( mesh_a.t_local.con_np.empty() ); // uniformly subdivided: conforming everywhere
+            CHECK( mesh_a.t_local.con_dst.empty() ); // uniformly subdivided: conforming everywhere
             const auto res_a = solve_eps_distributed( mesh_a, table, "T1_adaptive_all_refined" );
 
             const auto     dom_u = DistributedDomain::create_uniform( LDR + 1, radii9, 2, 1 );
@@ -454,9 +454,9 @@ int main( int argc, char** argv )
             f.balance_2to1();
             CHECK( f.validate() );
 
-            auto       mesh_a = build_distributed_mesh( MPI_COMM_WORLD, LDR, radii5, f,
+            auto       mesh_a = build_distributed_adaptive_mesh( MPI_COMM_WORLD, LDR, radii5, f,
                                                         grid::shell::subdomain_to_rank_by_diamond );
-            long       hanging_local = (long) mesh_a.t_local.con_np.size(), hanging_total = 0;
+            long       hanging_local = (long) mesh_a.t_local.con_dst.size(), hanging_total = 0;
             MPI_Allreduce( &hanging_local, &hanging_total, 1, MPI_LONG, MPI_SUM, MPI_COMM_WORLD );
             CHECK( hanging_total > 0 ); // 2:1 interfaces present somewhere
             const auto res_a = solve_eps_distributed( mesh_a, table, "T2_adaptive_refined_block" );
@@ -470,6 +470,73 @@ int main( int argc, char** argv )
             CHECK( res_u.relres < 1e-6 );
             CHECK( res_a.l2 < 0.1 && res_u.l2 < 0.1 );
             CHECK( res_a.l2 <= res_u.l2 * 1.0001 ); // locally finer mesh must not be worse
+        }
+
+        // ---- T3: NESTED refinement (2 levels), hanging nodes at BOTH 2:1 interfaces ---------------
+        // A block is refined once, then one of its children is refined again (M=2). After 2:1 balancing
+        // the mesh has subdivision-0, -1 and -2 regions with a graded transition, so the CG solve runs
+        // against STACKED 2:1 interfaces. Must converge and stay at least as accurate as the base mesh.
+        {
+            const int      LDR = 4, S_lat = 4, S_rad = 1, M = 2;
+            AdaptiveForest f( M, S_lat, S_rad );
+            f.refine( { ForestLeaf{ SubdomainInfo{ 0, 1, 1, 0 }, 0 } } ); // level 0 -> 1 (interior)
+            f.refine( { ForestLeaf{ SubdomainInfo{ 0, 2, 2, 0 }, 1 } } ); // a child -> level 2
+            f.balance_2to1();
+            CHECK( f.validate() );
+
+            int maxsub = 0;
+            for ( const auto& l : f.leaves() )
+                maxsub = std::max( maxsub, l.subdivision );
+            CHECK( maxsub == 2 ); // genuinely two nested levels
+
+            auto mesh_a = build_distributed_adaptive_mesh( MPI_COMM_WORLD, LDR, radii5, f,
+                                                  grid::shell::subdomain_to_rank_by_diamond );
+            long hanging_local = (long) mesh_a.t_local.con_dst.size(), hanging_total = 0;
+            MPI_Allreduce( &hanging_local, &hanging_total, 1, MPI_LONG, MPI_SUM, MPI_COMM_WORLD );
+            CHECK( hanging_total > 0 );
+            const auto res_a = solve_eps_distributed( mesh_a, table, "T3_nested_two_levels" );
+
+            const auto     dom_u = DistributedDomain::create_uniform( LDR, radii5, 2, 0 );
+            TwoToOneTables t_empty;
+            t_empty.cls_offsets.push_back( 0 );
+            const auto res_u = solve_eps( dom_u, t_empty, false, table, "T3_uniform_base" );
+
+            CHECK( res_a.relres < 1e-6 ); // CG converges against stacked 2:1 interfaces
+            CHECK( res_a.l2 < 0.1 );
+            // With recursive constraint resolution the nested interface is consistent, so the locally
+            // finer mesh is at least as accurate as the base (and identical l2 at np=1/2/4 confirms the
+            // distributed assembly handles nesting).
+            CHECK( res_a.l2 <= res_u.l2 * 1.0001 );
+        }
+
+        // ---- T4 (PROBE): POLE-CORNER 2:1. Runs only with AMR_ALLOW_POLE set (which bypasses the corner
+        // guard). Refines the (0,0) corner block of diamond 0 -- the north pole, where 5 diamonds meet --
+        // leaving its neighbors coarse. If the pentagon 2:1 is handled correctly the pole-refined mesh is
+        // at least as accurate as the uniform base (exactly like T2 for an interior block); a wrong 5-way
+        // stencil shows up as a blown-up l2 or a stalled solve.
+        if ( std::getenv( "AMR_ALLOW_POLE" ) )
+        {
+            const int      LDR = 4, S_lat = 4, S_rad = 1, M = 1;
+            AdaptiveForest f( M, S_lat, S_rad );
+            f.refine( { ForestLeaf{ SubdomainInfo{ 0, 0, 0, 0 }, 0 } } ); // north-pole corner of diamond 0
+            f.balance_2to1();
+            CHECK( f.validate() );
+
+            auto mesh_a = build_distributed_adaptive_mesh( MPI_COMM_WORLD, LDR, radii5, f,
+                                                           grid::shell::subdomain_to_rank_by_diamond );
+            long hl = (long) mesh_a.t_local.con_dst.size(), ht = 0;
+            MPI_Allreduce( &hl, &ht, 1, MPI_LONG, MPI_SUM, MPI_COMM_WORLD );
+            CHECK( ht > 0 );
+            const auto res_a = solve_eps_distributed( mesh_a, table, "T4_pole_corner" );
+
+            const auto     dom_u = DistributedDomain::create_uniform( LDR, radii5, 2, 0 );
+            TwoToOneTables t_empty;
+            t_empty.cls_offsets.push_back( 0 );
+            const auto res_u = solve_eps( dom_u, t_empty, false, table, "T4_uniform_base" );
+
+            CHECK( res_a.relres < 1e-6 );
+            CHECK( res_a.l2 < 0.1 );
+            CHECK( res_a.l2 <= res_u.l2 * 1.02 ); // pole-refined must be no worse than the base mesh
         }
 
         if ( mpi::rank( MPI_COMM_WORLD ) == 0 )

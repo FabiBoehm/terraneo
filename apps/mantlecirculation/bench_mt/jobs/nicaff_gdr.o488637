@@ -1,0 +1,93 @@
+### Starting TaskPrologue of job 488637 on h14-15 at Sat Jun  6 09:17:36 PM CEST 2026
+Running on cores 0-127 with governor performance
+Sat Jun  6 21:17:36 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 595.71.05              Driver Version: 595.71.05      CUDA Version: 13.2     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA H100                    On  |   00000000:06:00.0 Off |                    0 |
+| N/A   34C    P0             65W /  500W |       0MiB /  95830MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   1  NVIDIA H100                    On  |   00000000:26:00.0 Off |                    0 |
+| N/A   34C    P0             68W /  500W |       0MiB /  95830MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   2  NVIDIA H100                    On  |   00000000:A6:00.0 Off |                    0 |
+| N/A   33C    P0             67W /  500W |       0MiB /  95830MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   3  NVIDIA H100                    On  |   00000000:C6:00.0 Off |                    0 |
+| N/A   34C    P0             67W /  500W |       0MiB /  95830MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+### Finished TaskPrologue
+
+Loading openmpi/5.0.5-nvhpc24.11-cuda
+  Loading requirement: nvhpc/24.11
+########## NIC-affinity + GPUDirect (timed, 30 exec) ##########
+[LOG | rank 0 | 2026-06-06 21:17:40] 1008602118,9.768e-03,0,8,2026-06-06 21:17:40,1.033e+11
+[LOG | rank 0 | 2026-06-06 21:17:40] 
+[LOG | rank 0 | 2026-06-06 21:17:40] 
+########## transport check (proto info, NIC-affinity + GDR) ##########
+[1780773463.108368] [h14-16:894192:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780773463.108380] [h14-16:894192:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_3:1/path0 |
+[1780773463.108474] [h14-15:62643:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780773463.108475] [h14-15:62645:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780773463.108479] [h14-15:62642:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780773463.108479] [h14-16:894192:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780773463.108484] [h14-15:62643:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780773463.108484] [h14-15:62645:0]   |             3891666..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_4:1/path0 |
+[1780773463.108488] [h14-15:62642:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_3:1/path0 |
+[1780773463.108494] [h14-16:894192:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_3:1/path0 |
+[1780773463.108561] [h14-15:62643:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780773463.108561] [h14-15:62645:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780773463.108563] [h14-15:62642:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780773463.108572] [h14-15:62643:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780773463.108572] [h14-15:62645:0]   |             3891666..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_4:1/path0 |
+[1780773463.108573] [h14-15:62642:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_3:1/path0 |
+[1780773463.108602] [h14-15:62644:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780773463.108613] [h14-15:62644:0]   |             3891666..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_5:1/path0 |
+[1780773463.108671] [h14-16:894192:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(multi) from host memory                                              |
+[1780773463.108679] [h14-16:894192:0]   |               16444..inf | (?) rendezvous zero-copy read from remote     | 71% on knem/memory and 29% on rc_mlx5/mlx5_3:1/path0 |
+########## END ##########
+=== JOB_STATISTICS ===
+=== current date     : Sat Jun  6 21:17:48 CEST 2026
+= Job-ID             : 488637 on helma
+= Job-Name           : nicaff_gdr
+= Job-Command        : /home/hpc/iwia/iwia054h/terraneo/apps/mantlecirculation/bench_mt/jobs/run_nicaff_gdr.sh
+= Initial workdir    : /home/hpc/iwia/iwia054h/terraneo/apps/mantlecirculation/bench_mt/jobs
+= Queue/Partition    : h100
+= Slurm account      : iwia with QOS=normal
+= Requested resources: cpu=256,mem=1400G,node=2,billing=256,gres/gpu=8,gres/gpu:h100=8 for 00:15:00
+= Elapsed runtime    : 00:00:12
+= Total RAM usage    : 1.4 GiB of assigned 1400 GiB (0.1%)
+= Node list          : h14-[15-16]
+= Subm/Elig/Start/End: 2026-06-06T21:17:32 / 2026-06-06T21:17:32 / 2026-06-06T21:17:33 / 2026-06-06T21:17:45
+======================
+=== Quota infos ======
+    Path                 Used     SoftQ    HardQ    Gracetime  Filec    FileQ    FiHaQ    FileGrace    
+    /home/hpc              92.7G   104.9G   209.7G        N/A     280K     500K   1,000K        N/A    
+    /hnvme               2306.9G     0.0K     0.0K        N/A  24,841       61K      81K        N/A    
+======================
+=== GPU utilization ==
+gpu_name, gpu_bus_id, pid, gpu_utilization [%], mem_utilization [%], max_memory_usage [MiB], time [ms]
+NVIDIA H100, 00000000:06:00.0, 62565, 6 %, 1 %, 8310 MiB, 2671 ms
+NVIDIA H100, 00000000:06:00.0, 62642, 0 %, 0 %, 8310 MiB, 2183 ms
+NVIDIA H100, 00000000:26:00.0, 62566, 6 %, 1 %, 8322 MiB, 2739 ms
+NVIDIA H100, 00000000:26:00.0, 62643, 0 %, 0 %, 8322 MiB, 2295 ms
+NVIDIA H100, 00000000:A6:00.0, 62567, 1 %, 0 %, 8322 MiB, 2708 ms
+NVIDIA H100, 00000000:A6:00.0, 62644, 2 %, 0 %, 8322 MiB, 2242 ms
+NVIDIA H100, 00000000:C6:00.0, 62568, 12 %, 3 %, 8318 MiB, 2690 ms
+NVIDIA H100, 00000000:C6:00.0, 62645, 0 %, 0 %, 8318 MiB, 2269 ms

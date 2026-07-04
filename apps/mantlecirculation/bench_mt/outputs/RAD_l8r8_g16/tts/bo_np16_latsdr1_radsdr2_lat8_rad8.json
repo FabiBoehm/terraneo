@@ -1,0 +1,176 @@
+{
+  "name": "root",
+  "root_time": 0,
+  "sum_time": 0,
+  "min_time": 0,
+  "avg_time": 0,
+  "max_time": 0,
+  "count": 0,
+  "children": [
+    {
+      "name": "ShellBoundaryCommPlan::allocate_rank_buffers",
+      "root_time": 0.00130406,
+      "sum_time": 0.0262081,
+      "min_time": 0.00128957,
+      "avg_time": 0.00163801,
+      "max_time": 0.00228669,
+      "count": 1,
+      "children": [
+      ]
+    },
+    {
+      "name": "ShellBoundaryCommPlan::build_plan",
+      "root_time": 0.000551148,
+      "sum_time": 0.0119838,
+      "min_time": 0.000499847,
+      "avg_time": 0.000748987,
+      "max_time": 0.0015704,
+      "count": 1,
+      "children": [
+      ]
+    },
+    {
+      "name": "epsilon_divdiv_apply",
+      "root_time": 0.164804,
+      "sum_time": 2.60298,
+      "min_time": 0.159378,
+      "avg_time": 0.162686,
+      "max_time": 0.16526,
+      "count": 35,
+      "children": [
+        {
+          "name": "epsilon_divdiv_comm",
+          "root_time": 0.0837998,
+          "sum_time": 1.31641,
+          "min_time": 0.0796786,
+          "avg_time": 0.0822755,
+          "max_time": 0.0850492,
+          "count": 35,
+          "children": [
+            {
+              "name": "shell_boundary_exchange_and_reduce",
+              "root_time": 0.0837771,
+              "sum_time": 1.31604,
+              "min_time": 0.0796565,
+              "avg_time": 0.0822525,
+              "max_time": 0.0850258,
+              "count": 35,
+              "children": [
+                {
+                  "name": "ShellBoundaryCommPlan::local_comm",
+                  "root_time": 0.0131235,
+                  "sum_time": 0.163839,
+                  "min_time": 0.0057995,
+                  "avg_time": 0.0102399,
+                  "max_time": 0.0136475,
+                  "count": 35,
+                  "children": [
+                  ]
+                },
+                {
+                  "name": "ShellBoundaryCommPlan::pack_remote",
+                  "root_time": 0.0203619,
+                  "sum_time": 0.344572,
+                  "min_time": 0.0186707,
+                  "avg_time": 0.0215357,
+                  "max_time": 0.0257101,
+                  "count": 35,
+                  "children": [
+                  ]
+                },
+                {
+                  "name": "ShellBoundaryCommPlan::post_irecvs",
+                  "root_time": 0.00012681,
+                  "sum_time": 0.00185999,
+                  "min_time": 9.4189e-05,
+                  "avg_time": 0.000116249,
+                  "max_time": 0.000134429,
+                  "count": 35,
+                  "children": [
+                  ]
+                },
+                {
+                  "name": "ShellBoundaryCommPlan::post_isends",
+                  "root_time": 0.00259276,
+                  "sum_time": 0.0321912,
+                  "min_time": 0.000663062,
+                  "avg_time": 0.00201195,
+                  "max_time": 0.00301176,
+                  "count": 35,
+                  "children": [
+                  ]
+                },
+                {
+                  "name": "ShellBoundaryCommPlan::unpack_local",
+                  "root_time": 0.0111162,
+                  "sum_time": 0.139145,
+                  "min_time": 0.00485019,
+                  "avg_time": 0.00869659,
+                  "max_time": 0.0116803,
+                  "count": 35,
+                  "children": [
+                  ]
+                },
+                {
+                  "name": "ShellBoundaryCommPlan::waitall",
+                  "root_time": 0.036104,
+                  "sum_time": 0.628642,
+                  "min_time": 0.0346162,
+                  "avg_time": 0.0392902,
+                  "max_time": 0.045056,
+                  "count": 35,
+                  "children": [
+                    {
+                      "name": "ShellBoundaryCommPlan::mpi_waitall_sends",
+                      "root_time": 0.000372168,
+                      "sum_time": 0.00172758,
+                      "min_time": 1.771e-05,
+                      "avg_time": 0.000107974,
+                      "max_time": 0.000497428,
+                      "count": 35,
+                      "children": [
+                      ]
+                    },
+                    {
+                      "name": "ShellBoundaryCommPlan::mpi_waitany_first",
+                      "root_time": 0.00116337,
+                      "sum_time": 0.0215484,
+                      "min_time": 0.000924706,
+                      "avg_time": 0.00134678,
+                      "max_time": 0.00183477,
+                      "count": 35,
+                      "children": [
+                      ]
+                    },
+                    {
+                      "name": "ShellBoundaryCommPlan::mpi_waitany_rest",
+                      "root_time": 0.0130028,
+                      "sum_time": 0.243959,
+                      "min_time": 0.0104849,
+                      "avg_time": 0.0152474,
+                      "max_time": 0.0211681,
+                      "count": 350,
+                      "children": [
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "epsilon_divdiv_kernel",
+          "root_time": 0.0758393,
+          "sum_time": 1.2044,
+          "min_time": 0.0743668,
+          "avg_time": 0.0752747,
+          "max_time": 0.0764852,
+          "count": 35,
+          "children": [
+          ]
+        }
+      ]
+    }
+  ]
+}

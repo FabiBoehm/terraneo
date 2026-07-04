@@ -1,0 +1,96 @@
+### Starting TaskPrologue of job 488636 on h14-15 at Sat Jun  6 09:13:34 PM CEST 2026
+Running on cores 0-127 with governor performance
+Sat Jun  6 21:13:34 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 595.71.05              Driver Version: 595.71.05      CUDA Version: 13.2     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA H100                    On  |   00000000:06:00.0 Off |                    0 |
+| N/A   34C    P0             65W /  500W |       0MiB /  95830MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   1  NVIDIA H100                    On  |   00000000:26:00.0 Off |                    0 |
+| N/A   34C    P0             68W /  500W |       0MiB /  95830MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   2  NVIDIA H100                    On  |   00000000:A6:00.0 Off |                    0 |
+| N/A   33C    P0             67W /  500W |       0MiB /  95830MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   3  NVIDIA H100                    On  |   00000000:C6:00.0 Off |                    0 |
+| N/A   34C    P0             67W /  500W |       0MiB /  95830MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+### Finished TaskPrologue
+
+===== nvidia-smi (brief) =====
+index, name, pci.bus_id
+0, NVIDIA H100, 00000000:06:00.0
+1, NVIDIA H100, 00000000:26:00.0
+2, NVIDIA H100, 00000000:A6:00.0
+3, NVIDIA H100, 00000000:C6:00.0
+===== nvidia-smi topo -m (GPU <-> NIC connectivity) =====
+	[4mGPU0	GPU1	GPU2	GPU3	NIC0	NIC1	NIC2	NIC3	NIC4	NIC5	CPU Affinity	NUMA Affinity	GPU NUMA ID[0m
+GPU0	 X 	NV6	NV6	NV6	SYS	SYS	SYS	PXB	SYS	SYS	48-63	3		N/A
+GPU1	NV6	 X 	NV6	NV6	SYS	SYS	PXB	SYS	SYS	SYS	32-47	2		N/A
+GPU2	NV6	NV6	 X 	NV6	SYS	SYS	SYS	SYS	SYS	PXB	96-111	6		N/A
+GPU3	NV6	NV6	NV6	 X 	SYS	SYS	SYS	SYS	PXB	SYS	64-79	4		N/A
+NIC0	SYS	SYS	SYS	SYS	 X 	PIX	SYS	SYS	SYS	SYS				
+NIC1	SYS	SYS	SYS	SYS	PIX	 X 	SYS	SYS	SYS	SYS				
+NIC2	SYS	PXB	SYS	SYS	SYS	SYS	 X 	SYS	SYS	SYS				
+NIC3	PXB	SYS	SYS	SYS	SYS	SYS	SYS	 X 	SYS	SYS				
+NIC4	SYS	SYS	SYS	PXB	SYS	SYS	SYS	SYS	 X 	SYS				
+NIC5	SYS	SYS	PXB	SYS	SYS	SYS	SYS	SYS	SYS	 X 				
+
+Legend:
+
+  X    = Self
+  SYS  = Connection traversing PCIe as well as the SMP interconnect between NUMA nodes (e.g., QPI/UPI)
+  NODE = Connection traversing PCIe as well as the interconnect between PCIe Host Bridges within a NUMA node
+  PHB  = Connection traversing PCIe as well as a PCIe Host Bridge (typically the CPU)
+  PXB  = Connection traversing multiple PCIe bridges (without traversing the PCIe Host Bridge)
+  PIX  = Connection traversing at most a single PCIe bridge
+  NV#  = Connection traversing a bonded set of # NVLinks
+
+NIC Legend:
+
+  NIC0: mlx5_0
+  NIC1: mlx5_1
+  NIC2: mlx5_2
+  NIC3: mlx5_3
+  NIC4: mlx5_4
+  NIC5: mlx5_5
+
+===== END =====
+=== JOB_STATISTICS ===
+=== current date     : Sat Jun  6 21:13:35 CEST 2026
+= Job-ID             : 488636 on helma
+= Job-Name           : nvsmi_topo
+= Job-Command        : /home/hpc/iwia/iwia054h/terraneo/apps/mantlecirculation/bench_mt/jobs/run_nvsmi_topo.sh
+= Initial workdir    : /home/hpc/iwia/iwia054h/terraneo/apps/mantlecirculation/bench_mt/jobs
+= Queue/Partition    : h100
+= Slurm account      : iwia with QOS=normal
+= Requested resources: cpu=128,mem=700G,node=1,billing=128,gres/gpu=4,gres/gpu:h100=4 for 00:05:00
+= Elapsed runtime    : 00:00:02
+= Total RAM usage    : 0.0 GiB of assigned 700 GiB (0.0%)
+= Node list          : h14-15
+= Subm/Elig/Start/End: 2026-06-06T21:13:33 / 2026-06-06T21:13:33 / 2026-06-06T21:13:33 / 2026-06-06T21:13:35
+======================
+=== Quota infos ======
+    Path                 Used     SoftQ    HardQ    Gracetime  Filec    FileQ    FiHaQ    FileGrace    
+    /home/hpc              92.7G   104.9G   209.7G        N/A     280K     500K   1,000K        N/A    
+    /hnvme               2306.9G     0.0K     0.0K        N/A  24,836       61K      81K        N/A    
+======================
+=== GPU utilization ==
+gpu_name, gpu_bus_id, pid, gpu_utilization [%], mem_utilization [%], max_memory_usage [MiB], time [ms]

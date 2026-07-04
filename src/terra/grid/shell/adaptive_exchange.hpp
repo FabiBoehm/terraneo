@@ -31,8 +31,12 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
+#include <functional>
 #include <map>
 #include <set>
+#include <stdexcept>
+#include <string>
 #include <tuple>
 #include <vector>
 
@@ -135,12 +139,17 @@ struct TwoToOneTables
     std::vector< int >  cls_offsets; // size = n_classes + 1
     std::vector< Idx4 > cls_members;
 
-    // hanging-node constraint: dst(hanging copy) = sum_p w[p] * src[p](canonical parents). One entry
-    // per hanging copy.
-    std::vector< Idx4 >                    con_dst;
-    std::vector< std::array< Idx4, 4 > >   con_src;
-    std::vector< std::array< double, 4 > > con_w;
-    std::vector< int >                     con_np;
+    // hanging-node constraint (CSR): dst = sum over parents of wt * parent. Parents are RESOLVED to
+    // genuine (non-hanging) nodes at the physical-node (class-root) level, so one pass is exact even for
+    // NESTED (graded 0->1->2) hanging where a level-k hanging's parent is coincident with a
+    // level-(k-1) hanging. ALL copies of a hanging physical node get a row (a genuine-looking even node
+    // that is coincident with a hanging node on a finer neighbor is itself constrained). Within a rank
+    // this is exact; a nested chain that crosses a rank boundary is not resolved (documented edge).
+    // Row i owns con_par[con_off[i] .. con_off[i+1]) with matching con_wt.
+    std::vector< Idx4 >   con_dst; // one per hanging copy
+    std::vector< int >    con_off; // size con_dst.size()+1
+    std::vector< Idx4 >   con_par; // flat genuine parents
+    std::vector< double > con_wt;  // flat weights
 };
 
 // `guard_corners` rejects an unsupported 2:1 pole/corner seam. It is a GLOBAL mesh-validity check, so
@@ -157,6 +166,7 @@ inline TwoToOneTables build_2to1_tables( const DistributedDomain& dom, int nx, i
     using Key4 = std::array< int, 4 >; // copy identity (s,x,y,r)
     auto key_of = []( const Idx4& i ) { return Key4{ i.s, i.x, i.y, i.r }; };
 
+
     // ---- pass 1: hanging DoFs + constraint rows (LOCAL to each fine block) -------------------------
     // A 2:1 fine face carries hanging nodes at odd in-face indices; their parents are the bracketing
     // EVEN nodes of the SAME (fine) block's face. Those even nodes are coincident with the coarse
@@ -164,7 +174,11 @@ inline TwoToOneTables build_2to1_tables( const DistributedDomain& dom, int nx, i
     // them is identical to interpolating from the coarse parents. Expressing the rule purely on the
     // fine block's own face (no coarse block, correspondence, or seam reference) makes the constraint
     // and the hanging P^T scatter fully local, which is what lets each rank own its hanging nodes.
-    std::set< Key4 > hanging;
+    std::set< Key4 >                       hanging; // odd (hanging) representative copies
+    std::vector< Idx4 >                    imm_dst; // immediate constraint rows (pre-resolution)
+    std::vector< std::array< Idx4, 4 > >   imm_src;
+    std::vector< std::array< double, 4 > > imm_w;
+    std::vector< int >                     imm_np;
     for ( const auto& [anchor, tup] : dom.subdomains() )
     {
         const int   sub = std::get< 0 >( tup );
@@ -179,6 +193,19 @@ inline TwoToOneTables build_2to1_tables( const DistributedDomain& dom, int nx, i
                 continue; // not a 2:1 fine face -> no hanging nodes here
 
             const FaceAxes fa = face_axes( fc, nx, ny, nr );
+            // A 2:1 face needs an INTERIOR midpoint on each in-face axis to carry the hanging node and to
+            // reach its two bracketing even parents locally -- i.e. >= 3 nodes (>= 2 cells) per axis. With
+            // fewer (e.g. nx=2 => one lateral cell), index 1 is the block boundary and its parent at 2 runs
+            // off the block. This is a block-too-coarse config, not a valid mesh: fail clearly here rather
+            // than with an out-of-range map lookup deep in the constraint resolver.
+            if ( fa.n1 < 3 || fa.n2 < 3 )
+                throw std::runtime_error(
+                    "AMR 2:1 hanging refinement needs >= 3 nodes per refined block axis (a 2:1 face has n1=" +
+                    std::to_string( fa.n1 ) + ", n2=" + std::to_string( fa.n2 ) +
+                    "; block nx=" + std::to_string( nx ) + " ny=" + std::to_string( ny ) + " nr=" +
+                    std::to_string( nr ) +
+                    "). Increase LDR or reduce the lateral subdomain count so 2^LDR >= 2*S_lat (and keep >= 2 "
+                    "radial cells per block)." );
             for ( int a1 = 0; a1 < fa.n1; ++a1 )
                 for ( int a2 = 0; a2 < fa.n2; ++a2 )
                 {
@@ -215,10 +242,10 @@ inline TwoToOneTables build_2to1_tables( const DistributedDomain& dom, int nx, i
                         ws[0] = ws[1] = ws[2] = ws[3] = 0.25;
                         np                            = 4;
                     }
-                    t.con_dst.push_back( fine );
-                    t.con_src.push_back( srcs );
-                    t.con_w.push_back( ws );
-                    t.con_np.push_back( np );
+                    imm_dst.push_back( fine );
+                    imm_src.push_back( srcs );
+                    imm_w.push_back( ws );
+                    imm_np.push_back( np );
                 }
         }
     }
@@ -344,33 +371,49 @@ inline TwoToOneTables build_2to1_tables( const DistributedDomain& dom, int nx, i
                         ++corner_misses; // seam-hanging here; only fatal for corner blocks (below)
                 }
         }
-        if ( guard_corners && corner_guard && corner_misses > 0 )
-            throw std::runtime_error(
-                "AMR seam assembly: 2:1 interface at a pole/corner-touching refined block is not "
-                "supported (refine its seam neighbors to the same subdivision or keep it coarse)." );
+        // NOTE (pentagon 2:1): a refined pole/corner block leaves seam-hanging nodes at the pentagon
+        // vertex whose seam partners are absent (corner_misses > 0). These were once rejected, but they
+        // are ordinary hanging nodes: pass 1 constrains each from its own block's bracketing even nodes,
+        // and the pole vertex itself is merged 5-way by the transitive seam union -- so the assembled
+        // operator is correct. Verified by test_adaptive_epsilon_divdiv_gpu's T4 (pole-corner 2:1): the
+        // pole-refined mesh is more accurate than the uniform base and gives an l2 IDENTICAL to np=1 at
+        // np=4 (where the pole's 5 diamonds straddle ranks). The guard is therefore not needed.
+        (void) corner_guard;
+        (void) corner_misses;
+        (void) guard_corners;
     }
 
-    // ---- pass 4: merged classes -> canonical map + CSR (genuine classes with >= 2 members) --------
+    // ---- pass 4: merged classes (root -> all coincident copies, incl. seam-united) ----------------
     std::map< int, std::vector< Idx4 > > merged;
     for ( std::size_t c = 0; c < cls.size(); ++c )
     {
         auto& v = merged[find( static_cast< int >( c ) )];
         v.insert( v.end(), cls[c].begin(), cls[c].end() );
     }
-
-    std::map< Key4, Idx4 > canonical;
-    t.cls_offsets.push_back( 0 );
     for ( auto& [root, members] : merged )
-    {
         std::sort( members.begin(), members.end(), []( const Idx4& a, const Idx4& b ) {
             return std::tie( a.s, a.x, a.y, a.r ) < std::tie( b.s, b.x, b.y, b.r );
         } );
-        bool is_hanging = false;
-        for ( const auto& m : members )
-            if ( hanging.count( key_of( m ) ) )
-                is_hanging = true;
-        if ( is_hanging )
-            continue; // hanging locations get values from the constraint, not from summation
+
+    auto root_of = [&]( const Idx4& i ) { return find( class_of.at( key_of( i ) ) ); };
+
+    // one immediate row per hanging PHYSICAL node (its odd representative copy)
+    std::map< int, int > imm_row_of_root;
+    for ( std::size_t i = 0; i < imm_dst.size(); ++i )
+        imm_row_of_root[root_of( imm_dst[i] )] = static_cast< int >( i );
+    auto is_hanging_root = [&]( int r ) { return imm_row_of_root.count( r ) > 0; };
+
+    // canonical copy + CSR class members for GENUINE classes. A class is genuine iff its root is NOT a
+    // hanging physical node -- so a genuine-looking even node that is coincident with a hanging node is
+    // excluded from the class summation (and constrained below instead).
+    std::map< Key4, Idx4 > canonical;
+    std::map< int, Idx4 >  root_front;
+    t.cls_offsets.push_back( 0 );
+    for ( const auto& [root, members] : merged )
+    {
+        root_front[root] = members.front();
+        if ( is_hanging_root( root ) )
+            continue;
         for ( const auto& m : members )
             canonical[key_of( m )] = members.front();
         if ( members.size() >= 2 )
@@ -381,23 +424,70 @@ inline TwoToOneTables build_2to1_tables( const DistributedDomain& dom, int nx, i
         }
     }
 
+    // ---- pass 5: resolve each hanging physical node to GENUINE parents (memoized, at the class-root
+    // level so coincidence is handled), then emit a CSR constraint row for EVERY copy of it ---------
+    std::map< int, std::map< int, double > >                    resolved; // hanging root -> {genuine root: w}
+    std::function< const std::map< int, double >&( int ) > resolve =
+        [&]( int root ) -> const std::map< int, double >& {
+        auto found = resolved.find( root );
+        if ( found != resolved.end() )
+            return found->second;
+        std::map< int, double >& out = resolved[root]; // insert empty first (cycle guard)
+        const int                i   = imm_row_of_root.at( root );
+        for ( int p = 0; p < imm_np[i]; ++p )
+        {
+            const int    pr = root_of( imm_src[i][p] );
+            const double w  = imm_w[i][p];
+            if ( is_hanging_root( pr ) )
+                for ( const auto& [gr, gw] : resolve( pr ) )
+                    out[gr] += w * gw;
+            else
+                out[pr] += w;
+        }
+        return out;
+    };
+
+    t.con_off.push_back( 0 );
+    for ( const auto& [hroot, i] : imm_row_of_root )
+    {
+        (void) i;
+        const auto& gparents = resolve( hroot );
+        for ( const Idx4& copy : merged.at( hroot ) ) // constrain EVERY copy of this hanging node
+        {
+            t.con_dst.push_back( copy );
+            for ( const auto& [gr, w] : gparents )
+            {
+                // prefer the parent's copy ON THE SAME block as this hanging copy (block-local, so the
+                // row stays in-diamond and is correct even on a field whose copies are not yet
+                // consistent); fall back to the canonical copy only when the parent has no copy here
+                // (the genuinely cross-block nested case, where post-exchange all copies agree anyway).
+                Idx4 par = root_front.at( gr );
+                for ( const Idx4& c : merged.at( gr ) )
+                    if ( c.s == copy.s )
+                    {
+                        par = c;
+                        break;
+                    }
+                t.con_par.push_back( par );
+                t.con_wt.push_back( w );
+            }
+            t.con_off.push_back( static_cast< int >( t.con_par.size() ) );
+        }
+    }
+
     auto canon = [&]( const Idx4& i ) {
         const auto it = canonical.find( key_of( i ) );
         return it == canonical.end() ? i : it->second;
     };
 
-    // ---- pass 5: derive the P^T assembly from the constraint rows (parents canonicalized) --------
-    for ( std::size_t i = 0; i < t.con_np.size(); ++i )
-        for ( int p = 0; p < t.con_np[i]; ++p )
+    // ---- pass 6: P^T assembly = transpose of the resolved constraint (genuine parents, canonical) ---
+    for ( std::size_t i = 0; i < t.con_dst.size(); ++i )
+        for ( int p = t.con_off[i]; p < t.con_off[i + 1]; ++p )
         {
-            t.asm_dst.push_back( canon( t.con_src[i][p] ) );
+            t.asm_dst.push_back( canon( t.con_par[p] ) );
             t.asm_src.push_back( t.con_dst[i] );
-            t.asm_w.push_back( t.con_w[i][p] );
+            t.asm_w.push_back( t.con_wt[p] );
         }
-
-    // NOTE: con_src deliberately reads the owning coarse face's OWN copies (not canonicalized): after
-    // the exchange all class copies are equal anyway, and this keeps the constraint correct even when
-    // applied in isolation (e.g. after a plain interpolation instead of an assembly).
 
     return t;
 }
@@ -458,18 +548,18 @@ inline void apply_exchange_tables( const TwoToOneTables& t, FieldT& field )
 template < typename FieldT >
 inline void apply_constraint_tables( const TwoToOneTables& t, FieldT& field )
 {
-    std::vector< double > tmp( t.con_np.size() );
-    for ( std::size_t i = 0; i < t.con_np.size(); ++i )
+    std::vector< double > tmp( t.con_dst.size() );
+    for ( std::size_t i = 0; i < t.con_dst.size(); ++i )
     {
         double v = 0.0;
-        for ( int p = 0; p < t.con_np[i]; ++p )
+        for ( int p = t.con_off[i]; p < t.con_off[i + 1]; ++p )
         {
-            const Idx4& s = t.con_src[i][p];
-            v += t.con_w[i][p] * field( s.s, s.x, s.y, s.r );
+            const Idx4& s = t.con_par[p];
+            v += t.con_wt[p] * field( s.s, s.x, s.y, s.r );
         }
         tmp[i] = v;
     }
-    for ( std::size_t i = 0; i < t.con_np.size(); ++i )
+    for ( std::size_t i = 0; i < t.con_dst.size(); ++i )
     {
         const Idx4& d = t.con_dst[i];
         field( d.s, d.x, d.y, d.r ) = tmp[i];

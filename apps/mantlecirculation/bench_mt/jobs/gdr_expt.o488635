@@ -1,0 +1,93 @@
+### Starting TaskPrologue of job 488635 on h14-15 at Sat Jun  6 09:09:40 PM CEST 2026
+Running on cores 0-127 with governor performance
+Sat Jun  6 21:09:40 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 595.71.05              Driver Version: 595.71.05      CUDA Version: 13.2     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA H100                    On  |   00000000:06:00.0 Off |                    0 |
+| N/A   33C    P0             65W /  500W |       0MiB /  95830MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   1  NVIDIA H100                    On  |   00000000:26:00.0 Off |                    0 |
+| N/A   34C    P0             68W /  500W |       0MiB /  95830MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   2  NVIDIA H100                    On  |   00000000:A6:00.0 Off |                    0 |
+| N/A   33C    P0             67W /  500W |       0MiB /  95830MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   3  NVIDIA H100                    On  |   00000000:C6:00.0 Off |                    0 |
+| N/A   34C    P0             68W /  500W |       0MiB /  95830MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+### Finished TaskPrologue
+
+Loading openmpi/5.0.5-nvhpc24.11-cuda
+  Loading requirement: nvhpc/24.11
+########## A) BASELINE (default UCX) ##########
+[LOG | rank 0 | 2026-06-06 21:09:48] 1008602118,1.005e-02,0,8,2026-06-06 21:09:48,1.003e+11
+[LOG | rank 0 | 2026-06-06 21:09:48] 
+[LOG | rank 0 | 2026-06-06 21:09:48] 
+########## B) UCX_IB_GPU_DIRECT_RDMA=yes ##########
+[LOG | rank 0 | 2026-06-06 21:09:52] 1008602118,9.917e-03,0,8,2026-06-06 21:09:52,1.017e+11
+[LOG | rank 0 | 2026-06-06 21:09:52] 
+[LOG | rank 0 | 2026-06-06 21:09:52] 
+########## C) transport check with GPUDirect forced (proto info) ##########
+[1780773016.174048] [h14-15:60209:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780773016.174049] [h14-15:60211:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780773016.174052] [h14-15:60212:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780773016.174144] [h14-15:60211:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780773016.174146] [h14-15:60212:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780773016.174147] [h14-15:60209:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780773016.174197] [h14-15:60210:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780773016.174197] [h14-16:892222:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780773016.174203] [h14-16:892223:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780773016.174287] [h14-15:60210:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780773016.174292] [h14-16:892222:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780773016.174292] [h14-16:892223:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+########## END ##########
+=== JOB_STATISTICS ===
+=== current date     : Sat Jun  6 21:10:19 CEST 2026
+= Job-ID             : 488635 on helma
+= Job-Name           : gdr_expt
+= Job-Command        : /home/hpc/iwia/iwia054h/terraneo/apps/mantlecirculation/bench_mt/jobs/run_gdr_experiment.sh
+= Initial workdir    : /home/hpc/iwia/iwia054h/terraneo/apps/mantlecirculation/bench_mt/jobs
+= Queue/Partition    : h100
+= Slurm account      : iwia with QOS=normal
+= Requested resources: cpu=256,mem=1400G,node=2,billing=256,gres/gpu=8,gres/gpu:h100=8 for 00:15:00
+= Elapsed runtime    : 00:01:04
+= Total RAM usage    : 2.6 GiB of assigned 1400 GiB (0.2%)
+= Node list          : h14-[15-16]
+= Subm/Elig/Start/End: 2026-06-06T21:09:15 / 2026-06-06T21:09:15 / 2026-06-06T21:09:15 / 2026-06-06T21:10:19
+======================
+=== Quota infos ======
+    Path                 Used     SoftQ    HardQ    Gracetime  Filec    FileQ    FiHaQ    FileGrace    
+    /home/hpc              92.7G   104.9G   209.7G        N/A     280K     500K   1,000K        N/A    
+    /hnvme               2306.9G     0.0K     0.0K        N/A  24,836       61K      81K        N/A    
+======================
+=== GPU utilization ==
+gpu_name, gpu_bus_id, pid, gpu_utilization [%], mem_utilization [%], max_memory_usage [MiB], time [ms]
+NVIDIA H100, 00000000:06:00.0, 59999, 9 %, 2 %, 8310 MiB, 3205 ms
+NVIDIA H100, 00000000:06:00.0, 60083, 1 %, 0 %, 8310 MiB, 3135 ms
+NVIDIA H100, 00000000:06:00.0, 60209, 0 %, 0 %, 8310 MiB, 2920 ms
+NVIDIA H100, 00000000:26:00.0, 60000, 9 %, 2 %, 8322 MiB, 3231 ms
+NVIDIA H100, 00000000:26:00.0, 60084, 0 %, 0 %, 8322 MiB, 3163 ms
+NVIDIA H100, 00000000:26:00.0, 60210, 0 %, 0 %, 8322 MiB, 2866 ms
+NVIDIA H100, 00000000:A6:00.0, 60001, 1 %, 0 %, 8322 MiB, 3243 ms
+NVIDIA H100, 00000000:A6:00.0, 60085, 9 %, 2 %, 8322 MiB, 3180 ms
+NVIDIA H100, 00000000:A6:00.0, 60211, 0 %, 0 %, 8322 MiB, 2881 ms
+NVIDIA H100, 00000000:C6:00.0, 60002, 12 %, 3 %, 8318 MiB, 3171 ms
+NVIDIA H100, 00000000:C6:00.0, 60086, 3 %, 0 %, 8318 MiB, 3108 ms
+NVIDIA H100, 00000000:C6:00.0, 60212, 0 %, 0 %, 8318 MiB, 2666 ms

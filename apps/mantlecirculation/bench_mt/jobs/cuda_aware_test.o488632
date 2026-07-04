@@ -1,0 +1,102 @@
+### Starting TaskPrologue of job 488632 on h14-15 at Sat Jun  6 08:52:40 PM CEST 2026
+Running on cores 0-127 with governor performance
+Sat Jun  6 20:52:40 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 595.71.05              Driver Version: 595.71.05      CUDA Version: 13.2     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA H100                    On  |   00000000:06:00.0 Off |                    0 |
+| N/A   33C    P0             65W /  500W |       0MiB /  95830MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   1  NVIDIA H100                    On  |   00000000:26:00.0 Off |                    0 |
+| N/A   34C    P0             68W /  500W |       0MiB /  95830MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   2  NVIDIA H100                    On  |   00000000:A6:00.0 Off |                    0 |
+| N/A   33C    P0             67W /  500W |       0MiB /  95830MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   3  NVIDIA H100                    On  |   00000000:C6:00.0 Off |                    0 |
+| N/A   34C    P0             68W /  500W |       0MiB /  95830MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+### Finished TaskPrologue
+
+Loading openmpi/5.0.5-nvhpc24.11-cuda
+  Loading requirement: nvhpc/24.11
+########## CUDA-aware MPI test: device buffer rank0 -> rank1 across 2 nodes ##########
+[1780771963.180889] [h14-16:887282:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send* from host memory                                                                  |
+[1780771963.180900] [h14-16:887282:0]   |               52511..inf | (?) rendezvous zero-copy fenced write to remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780771963.180978] [h14-16:887282:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(fast-completion) from host memory                                                 |
+[1780771963.180987] [h14-16:887282:0]   |                256K..inf | (?) rendezvous zero-copy fenced write to remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780771963.181070] [h14-15:55041:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send* from host memory                                                                  |
+[1780771963.181080] [h14-15:55041:0]   |               52511..inf | (?) rendezvous zero-copy fenced write to remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780771963.181169] [h14-15:55041:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(fast-completion) from host memory                                                 |
+[1780771963.181177] [h14-15:55041:0]   |                256K..inf | (?) rendezvous zero-copy fenced write to remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780771963.181183] [h14-16:887282:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(multi) from host memory                                                         |
+[1780771963.181198] [h14-16:887282:0]   |                8324..inf | (?) rendezvous zero-copy read from remote     | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780771963.181374] [h14-15:55041:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(multi) from host memory                                                         |
+[1780771963.181382] [h14-15:55041:0]   |                8324..inf | (?) rendezvous zero-copy read from remote     | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[rank 0 h14-15] sending DEVICE pointer 0x152746800000 (4 devices)
+[1780771963.320558] [h14-15:55041:0]   | ucp_context_0 inter-node cfg#2 | tagged message by ucp_tag_send* from host memory                                                                  |
+[1780771963.320563] [h14-15:55041:0]   |                        0..2038 | eager short                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780771963.320565] [h14-15:55041:0]   |                     2039..8246 | eager zero-copy copy-out                        | rc_mlx5/mlx5_2:1/path0                                          |
+[1780771963.320567] [h14-15:55041:0]   |                    8247..22564 | multi-frag eager zero-copy copy-out             | rc_mlx5/mlx5_2:1/path0                                          |
+[1780771963.320569] [h14-15:55041:0]   |                      22565..1G | (?) rendezvous zero-copy read from remote       | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780771963.320573] [h14-15:55041:0]   |                1073741825..inf | (?) rendezvous zero-copy fenced write to remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780771963.320706] [h14-15:55041:0]   | ucp_context_0 inter-node cfg#2 | tagged message by ucp_tag_send*(fast-completion) from host memory                                                 |
+[1780771963.320711] [h14-15:55041:0]   |                        0..2038 | eager short                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780771963.320713] [h14-15:55041:0]   |                     2039..8246 | eager copy-in copy-out                          | rc_mlx5/mlx5_2:1/path0                                          |
+[1780771963.320715] [h14-15:55041:0]   |                    8247..23084 | multi-frag eager copy-in copy-out               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780771963.320717] [h14-15:55041:0]   |                  23085..262143 | multi-frag eager zero-copy copy-out             | rc_mlx5/mlx5_2:1/path0                                          |
+[1780771963.320719] [h14-15:55041:0]   |                       256K..1G | (?) rendezvous zero-copy read from remote       | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780771963.320721] [h14-15:55041:0]   |                1073741825..inf | (?) rendezvous zero-copy fenced write to remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780771963.320959] [h14-15:55041:0]   | ucp_context_0 inter-node cfg#2 | tagged message by ucp_tag_send*(multi) from host memory                                                     |
+[1780771963.320964] [h14-15:55041:0]   |                         0..514 | eager short                               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780771963.320967] [h14-15:55041:0]   |                      515..8246 | eager zero-copy copy-out                  | rc_mlx5/mlx5_2:1/path0                                          |
+[1780771963.320970] [h14-15:55041:0]   |                    8247..15523 | multi-frag eager zero-copy copy-out       | rc_mlx5/mlx5_2:1/path0                                          |
+[1780771963.320972] [h14-15:55041:0]   |                     15524..inf | (?) rendezvous zero-copy read from remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780771963.328912] [h14-15:55041:0]   |                              0 | eager short                                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780771963.328914] [h14-15:55041:0]   |                        1..8246 | eager copy-in copy-out                                          | rc_mlx5/mlx5_2:1/path0                                          |
+[1780771963.328916] [h14-15:55041:0]   |                    8247..14989 | multi-frag eager copy-in copy-out                               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780771963.328918] [h14-15:55041:0]   |                    14990..512K | (?) rendezvous cuda_copy, fenced write to remote, cuda_copy     | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780771963.328921] [h14-15:55041:0]   |                    524289..inf | (?) rendezvous pipeline cuda_copy, fenced write to remote, cuda | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780771963.335497] [h14-16:887282:0]   | ucp_context_0 inter-node cfg#2 | tagged message by ucp_tag_send* from host memory                                                                  |
+[1780771963.335502] [h14-16:887282:0]   |                        0..2038 | eager short                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780771963.335504] [h14-16:887282:0]   |                     2039..8246 | eager zero-copy copy-out                        | rc_mlx5/mlx5_2:1/path0                                          |
+[1780771963.335506] [h14-16:887282:0]   |                    8247..22564 | multi-frag eager zero-copy copy-out             | rc_mlx5/mlx5_2:1/path0                                          |
+########## END ##########
+=== JOB_STATISTICS ===
+=== current date     : Sat Jun  6 20:52:50 CEST 2026
+= Job-ID             : 488632 on helma
+= Job-Name           : cuda_aware_test
+= Job-Command        : /home/hpc/iwia/iwia054h/terraneo/apps/mantlecirculation/bench_mt/jobs/run_cuda_aware_test.sh
+= Initial workdir    : /home/hpc/iwia/iwia054h/terraneo/apps/mantlecirculation/bench_mt/jobs
+= Queue/Partition    : h100
+= Slurm account      : iwia with QOS=normal
+= Requested resources: cpu=256,mem=1400G,node=2,billing=256,gres/gpu=8,gres/gpu:h100=8 for 00:10:00
+= Elapsed runtime    : 00:00:23
+= Total RAM usage    : 0.6 GiB of assigned 1400 GiB (0.0%)
+= Node list          : h14-15
+= Subm/Elig/Start/End: 2026-06-06T20:52:21 / 2026-06-06T20:52:21 / 2026-06-06T20:52:21 / 2026-06-06T20:52:44
+======================
+=== Quota infos ======
+    Path                 Used     SoftQ    HardQ    Gracetime  Filec    FileQ    FiHaQ    FileGrace    
+    /home/hpc              92.7G   104.9G   209.7G        N/A     280K     500K   1,000K        N/A    
+    /hnvme               2306.9G     0.0K     0.0K        N/A  24,826       61K      81K        N/A    
+======================
+=== GPU utilization ==
+gpu_name, gpu_bus_id, pid, gpu_utilization [%], mem_utilization [%], max_memory_usage [MiB], time [ms]
+NVIDIA H100, 00000000:06:00.0, 55041, 0 %, 0 %, 528 MiB, 1231 ms

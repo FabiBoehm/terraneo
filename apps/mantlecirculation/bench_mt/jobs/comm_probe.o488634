@@ -1,0 +1,510 @@
+### Starting TaskPrologue of job 488634 on h14-15 at Sat Jun  6 09:07:36 PM CEST 2026
+Running on cores 0-127 with governor performance
+Sat Jun  6 21:07:36 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 595.71.05              Driver Version: 595.71.05      CUDA Version: 13.2     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA H100                    On  |   00000000:06:00.0 Off |                    0 |
+| N/A   33C    P0             65W /  500W |       0MiB /  95830MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   1  NVIDIA H100                    On  |   00000000:26:00.0 Off |                    0 |
+| N/A   34C    P0             68W /  500W |       0MiB /  95830MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   2  NVIDIA H100                    On  |   00000000:A6:00.0 Off |                    0 |
+| N/A   33C    P0             67W /  500W |       0MiB /  95830MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   3  NVIDIA H100                    On  |   00000000:C6:00.0 Off |                    0 |
+| N/A   34C    P0             68W /  500W |       0MiB /  95830MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+### Finished TaskPrologue
+
+Loading openmpi/5.0.5-nvhpc24.11-cuda
+  Loading requirement: nvhpc/24.11
+########## COMM BUFFER MEMORY-SPACE PROBE (2 nodes / 8 GPU, g8 cell) ##########
+[1780772859.533116] [h14-16:891170:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780772859.533126] [h14-16:891170:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.533208] [h14-16:891170:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780772859.533220] [h14-16:891170:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.533418] [h14-16:891170:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(multi) from host memory                                              |
+[1780772859.533428] [h14-16:891170:0]   |               16444..inf | (?) rendezvous zero-copy read from remote     | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.533527] [h14-15:59150:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780772859.533536] [h14-15:59150:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.533434] [h14-16:891167:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780772859.533447] [h14-16:891167:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.533527] [h14-15:59149:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780772859.533536] [h14-15:59149:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.533527] [h14-15:59148:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780772859.533536] [h14-15:59148:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.533529] [h14-15:59147:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780772859.533538] [h14-15:59147:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.533495] [h14-16:891169:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780772859.533508] [h14-16:891169:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.533614] [h14-15:59150:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780772859.533624] [h14-15:59150:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.533615] [h14-15:59148:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780772859.533625] [h14-15:59148:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.533616] [h14-15:59149:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780772859.533627] [h14-15:59149:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.533617] [h14-15:59147:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780772859.533628] [h14-15:59147:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.533509] [h14-16:891168:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780772859.533523] [h14-16:891168:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.533524] [h14-16:891167:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780772859.533541] [h14-16:891167:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.533588] [h14-16:891169:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780772859.533602] [h14-16:891169:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.533602] [h14-16:891168:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780772859.533617] [h14-16:891168:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.533824] [h14-15:59150:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(multi) from host memory                                              |
+[1780772859.533832] [h14-15:59150:0]   |               16444..inf | (?) rendezvous zero-copy read from remote     | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.533824] [h14-15:59148:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(multi) from host memory                                              |
+[1780772859.533832] [h14-15:59148:0]   |               16444..inf | (?) rendezvous zero-copy read from remote     | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.533828] [h14-15:59147:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(multi) from host memory                                              |
+[1780772859.533836] [h14-15:59147:0]   |               16444..inf | (?) rendezvous zero-copy read from remote     | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.533830] [h14-15:59149:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(multi) from host memory                                              |
+[1780772859.533838] [h14-15:59149:0]   |               16444..inf | (?) rendezvous zero-copy read from remote     | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.533737] [h14-16:891167:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(multi) from host memory                                              |
+[1780772859.533746] [h14-16:891167:0]   |               16444..inf | (?) rendezvous zero-copy read from remote     | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.533800] [h14-16:891169:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(multi) from host memory                                              |
+[1780772859.533810] [h14-16:891169:0]   |               16444..inf | (?) rendezvous zero-copy read from remote     | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.533812] [h14-16:891168:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(multi) from host memory                                              |
+[1780772859.533821] [h14-16:891168:0]   |               16444..inf | (?) rendezvous zero-copy read from remote     | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.568734] [h14-16:891167:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780772859.568745] [h14-16:891167:0]   |                     10691..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.568734] [h14-16:891169:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780772859.568745] [h14-16:891169:0]   |                     10691..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.568812] [h14-16:891169:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780772859.568822] [h14-16:891169:0]   |                      256K..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.568812] [h14-16:891167:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780772859.568825] [h14-16:891167:0]   |                      256K..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.568992] [h14-16:891169:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send*(multi) from host memory                                          |
+[1780772859.569002] [h14-16:891169:0]   |                     10637..inf | (?) rendezvous zero-copy read from remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.568994] [h14-16:891167:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send*(multi) from host memory                                          |
+[1780772859.569004] [h14-16:891167:0]   |                     10637..inf | (?) rendezvous zero-copy read from remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.569720] [h14-16:891170:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780772859.569731] [h14-16:891170:0]   |                     10691..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.569799] [h14-16:891170:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780772859.569810] [h14-16:891170:0]   |                      256K..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.570033] [h14-16:891170:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send*(multi) from host memory                                          |
+[1780772859.570045] [h14-16:891170:0]   |                     10637..inf | (?) rendezvous zero-copy read from remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.573428] [h14-16:891168:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780772859.573439] [h14-16:891168:0]   |                     10691..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.573507] [h14-16:891168:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780772859.573518] [h14-16:891168:0]   |                      256K..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.573688] [h14-16:891168:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send*(multi) from host memory                                          |
+[1780772859.573699] [h14-16:891168:0]   |                     10637..inf | (?) rendezvous zero-copy read from remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.579718] [h14-15:59147:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780772859.579732] [h14-15:59147:0]   |                     10691..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.579728] [h14-15:59148:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780772859.579750] [h14-15:59148:0]   |                     10691..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.579793] [h14-15:59149:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780772859.579803] [h14-15:59149:0]   |                     10691..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.579799] [h14-15:59147:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780772859.579809] [h14-15:59147:0]   |                      256K..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.579800] [h14-15:59150:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780772859.579811] [h14-15:59150:0]   |                     10691..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.579817] [h14-15:59148:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780772859.579829] [h14-15:59148:0]   |                      256K..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.579874] [h14-15:59149:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780772859.579884] [h14-15:59149:0]   |                      256K..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.579879] [h14-15:59150:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780772859.579889] [h14-15:59150:0]   |                      256K..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.579978] [h14-15:59147:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send*(multi) from host memory                                          |
+[1780772859.579988] [h14-15:59147:0]   |                     10637..inf | (?) rendezvous zero-copy read from remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.579997] [h14-15:59148:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send*(multi) from host memory                                          |
+[1780772859.580009] [h14-15:59148:0]   |                     10637..inf | (?) rendezvous zero-copy read from remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.580054] [h14-15:59149:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send*(multi) from host memory                                          |
+[1780772859.580064] [h14-15:59149:0]   |                     10637..inf | (?) rendezvous zero-copy read from remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.580056] [h14-15:59150:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send*(multi) from host memory                                          |
+[1780772859.580065] [h14-15:59150:0]   |                     10637..inf | (?) rendezvous zero-copy read from remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.585174] [h14-16:891167:a]   | ucp_context_0 intra-node cfg#3 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780772859.585185] [h14-16:891167:a]   |                     10691..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.585276] [h14-16:891167:a]   | ucp_context_0 intra-node cfg#3 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780772859.585304] [h14-16:891167:a]   |                      256K..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.585555] [h14-16:891167:a]   | ucp_context_0 intra-node cfg#3 | tagged message by ucp_tag_send*(multi) from host memory                                          |
+[1780772859.585569] [h14-16:891167:a]   |                     10637..inf | (?) rendezvous zero-copy read from remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.599052] [h14-15:59147:a]   | ucp_context_0 intra-node cfg#3 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780772859.599063] [h14-15:59147:a]   |                     10691..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.599156] [h14-15:59147:a]   | ucp_context_0 intra-node cfg#3 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780772859.599166] [h14-15:59147:a]   |                      256K..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.599367] [h14-15:59147:a]   | ucp_context_0 intra-node cfg#3 | tagged message by ucp_tag_send*(multi) from host memory                                          |
+[1780772859.599377] [h14-15:59147:a]   |                     10637..inf | (?) rendezvous zero-copy read from remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780772859.873428] [h14-15:59147:0]   | ucp_context_0 inter-node cfg#4 | tagged message by ucp_tag_send* from host memory                                                                  |
+[1780772859.873435] [h14-15:59147:0]   |                        0..2038 | eager short                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873437] [h14-15:59147:0]   |                     2039..8246 | eager zero-copy copy-out                        | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873440] [h14-15:59147:0]   |                    8247..22906 | multi-frag eager zero-copy copy-out             | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873443] [h14-15:59147:0]   |                      22907..1G | (?) rendezvous zero-copy read from remote       | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.873446] [h14-15:59147:0]   |                1073741825..inf | (?) rendezvous zero-copy fenced write to remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.873429] [h14-15:59150:0]   | ucp_context_0 inter-node cfg#3 | tagged message by ucp_tag_send* from host memory                                                                  |
+[1780772859.873435] [h14-15:59150:0]   |                        0..2038 | eager short                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873437] [h14-15:59150:0]   |                     2039..8246 | eager zero-copy copy-out                        | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873439] [h14-15:59150:0]   |                    8247..22906 | multi-frag eager zero-copy copy-out             | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873443] [h14-15:59150:0]   |                      22907..1G | (?) rendezvous zero-copy read from remote       | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.873445] [h14-15:59150:0]   |                1073741825..inf | (?) rendezvous zero-copy fenced write to remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.873472] [h14-15:59148:0]   | ucp_context_0 inter-node cfg#3 | tagged message by ucp_tag_send* from host memory                                                                  |
+[1780772859.873478] [h14-15:59148:0]   |                        0..2038 | eager short                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873481] [h14-15:59148:0]   |                     2039..8246 | eager zero-copy copy-out                        | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873484] [h14-15:59148:0]   |                    8247..22906 | multi-frag eager zero-copy copy-out             | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873487] [h14-15:59148:0]   |                      22907..1G | (?) rendezvous zero-copy read from remote       | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.873489] [h14-15:59148:0]   |                1073741825..inf | (?) rendezvous zero-copy fenced write to remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.873517] [h14-15:59149:0]   | ucp_context_0 inter-node cfg#3 | tagged message by ucp_tag_send* from host memory                                                                  |
+[1780772859.873523] [h14-15:59149:0]   |                        0..2038 | eager short                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873526] [h14-15:59149:0]   |                     2039..8246 | eager zero-copy copy-out                        | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873529] [h14-15:59149:0]   |                    8247..22906 | multi-frag eager zero-copy copy-out             | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873533] [h14-15:59149:0]   |                      22907..1G | (?) rendezvous zero-copy read from remote       | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.873536] [h14-15:59149:0]   |                1073741825..inf | (?) rendezvous zero-copy fenced write to remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.873581] [h14-15:59147:0]   | ucp_context_0 inter-node cfg#4 | tagged message by ucp_tag_send*(fast-completion) from host memory                                                 |
+[1780772859.873587] [h14-15:59147:0]   |                        0..2038 | eager short                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873589] [h14-15:59147:0]   |                     2039..8246 | eager copy-in copy-out                          | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873592] [h14-15:59147:0]   |                   8247..262143 | multi-frag eager copy-in copy-out               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873581] [h14-15:59150:0]   | ucp_context_0 inter-node cfg#3 | tagged message by ucp_tag_send*(fast-completion) from host memory                                                 |
+[1780772859.873585] [h14-15:59150:0]   |                        0..2038 | eager short                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873589] [h14-15:59150:0]   |                     2039..8246 | eager copy-in copy-out                          | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873591] [h14-15:59150:0]   |                   8247..262143 | multi-frag eager copy-in copy-out               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873594] [h14-15:59150:0]   |                       256K..1G | (?) rendezvous zero-copy read from remote       | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.873597] [h14-15:59150:0]   |                1073741825..inf | (?) rendezvous zero-copy fenced write to remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.873594] [h14-15:59147:0]   |                       256K..1G | (?) rendezvous zero-copy read from remote       | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.873597] [h14-15:59147:0]   |                1073741825..inf | (?) rendezvous zero-copy fenced write to remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.873628] [h14-15:59148:0]   | ucp_context_0 inter-node cfg#3 | tagged message by ucp_tag_send*(fast-completion) from host memory                                                 |
+[1780772859.873633] [h14-15:59148:0]   |                        0..2038 | eager short                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873635] [h14-15:59148:0]   |                     2039..8246 | eager copy-in copy-out                          | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873638] [h14-15:59148:0]   |                   8247..262143 | multi-frag eager copy-in copy-out               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873641] [h14-15:59148:0]   |                       256K..1G | (?) rendezvous zero-copy read from remote       | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.873643] [h14-15:59148:0]   |                1073741825..inf | (?) rendezvous zero-copy fenced write to remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.873677] [h14-15:59149:0]   | ucp_context_0 inter-node cfg#3 | tagged message by ucp_tag_send*(fast-completion) from host memory                                                 |
+[1780772859.873682] [h14-15:59149:0]   |                        0..2038 | eager short                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873685] [h14-15:59149:0]   |                     2039..8246 | eager copy-in copy-out                          | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873687] [h14-15:59149:0]   |                   8247..262143 | multi-frag eager copy-in copy-out               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873690] [h14-15:59149:0]   |                       256K..1G | (?) rendezvous zero-copy read from remote       | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.873693] [h14-15:59149:0]   |                1073741825..inf | (?) rendezvous zero-copy fenced write to remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.873870] [h14-15:59147:0]   | ucp_context_0 inter-node cfg#4 | tagged message by ucp_tag_send*(multi) from host memory                                                     |
+[1780772859.873874] [h14-15:59147:0]   |                         0..514 | eager short                               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873877] [h14-15:59147:0]   |                      515..1638 | eager zero-copy copy-out                  | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873879] [h14-15:59147:0]   |                     1639..3111 | multi-frag eager zero-copy copy-out       | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873882] [h14-15:59147:0]   |                    3112..13582 | multi-frag eager copy-in copy-out         | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873872] [h14-15:59150:0]   | ucp_context_0 inter-node cfg#3 | tagged message by ucp_tag_send*(multi) from host memory                                                     |
+[1780772859.873877] [h14-15:59150:0]   |                         0..514 | eager short                               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873879] [h14-15:59150:0]   |                      515..1638 | eager zero-copy copy-out                  | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873882] [h14-15:59150:0]   |                     1639..3111 | multi-frag eager zero-copy copy-out       | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873884] [h14-15:59150:0]   |                    3112..13582 | multi-frag eager copy-in copy-out         | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873887] [h14-15:59150:0]   |                     13583..inf | (?) rendezvous zero-copy read from remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.873885] [h14-15:59147:0]   |                     13583..inf | (?) rendezvous zero-copy read from remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.873918] [h14-15:59148:0]   | ucp_context_0 inter-node cfg#3 | tagged message by ucp_tag_send*(multi) from host memory                                                     |
+[1780772859.873923] [h14-15:59148:0]   |                         0..514 | eager short                               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873926] [h14-15:59148:0]   |                      515..1638 | eager zero-copy copy-out                  | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873929] [h14-15:59148:0]   |                     1639..3111 | multi-frag eager zero-copy copy-out       | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873931] [h14-15:59148:0]   |                    3112..13582 | multi-frag eager copy-in copy-out         | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873934] [h14-15:59148:0]   |                     13583..inf | (?) rendezvous zero-copy read from remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.873973] [h14-15:59149:0]   | ucp_context_0 inter-node cfg#3 | tagged message by ucp_tag_send*(multi) from host memory                                                     |
+[1780772859.873978] [h14-15:59149:0]   |                         0..514 | eager short                               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873981] [h14-15:59149:0]   |                      515..1638 | eager zero-copy copy-out                  | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873984] [h14-15:59149:0]   |                     1639..3111 | multi-frag eager zero-copy copy-out       | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873986] [h14-15:59149:0]   |                    3112..13582 | multi-frag eager copy-in copy-out         | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.873990] [h14-15:59149:0]   |                     13583..inf | (?) rendezvous zero-copy read from remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.895390] [h14-16:891169:0]   | ucp_context_0 inter-node cfg#3 | tagged message by ucp_tag_send* from host memory                                                                  |
+[1780772859.895395] [h14-16:891169:0]   |                        0..2038 | eager short                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.895397] [h14-16:891169:0]   |                     2039..8246 | eager zero-copy copy-out                        | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.895399] [h14-16:891169:0]   |                    8247..22906 | multi-frag eager zero-copy copy-out             | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.895402] [h14-16:891169:0]   |                      22907..1G | (?) rendezvous zero-copy read from remote       | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.895404] [h14-16:891169:0]   |                1073741825..inf | (?) rendezvous zero-copy fenced write to remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.895545] [h14-16:891169:0]   | ucp_context_0 inter-node cfg#3 | tagged message by ucp_tag_send*(fast-completion) from host memory                                                 |
+[1780772859.895550] [h14-16:891169:0]   |                        0..2038 | eager short                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.895553] [h14-16:891169:0]   |                     2039..8246 | eager copy-in copy-out                          | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.895555] [h14-16:891169:0]   |                   8247..262143 | multi-frag eager copy-in copy-out               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.895557] [h14-16:891169:0]   |                       256K..1G | (?) rendezvous zero-copy read from remote       | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.895561] [h14-16:891169:0]   |                1073741825..inf | (?) rendezvous zero-copy fenced write to remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.895834] [h14-16:891169:0]   | ucp_context_0 inter-node cfg#3 | tagged message by ucp_tag_send*(multi) from host memory                                                     |
+[1780772859.895839] [h14-16:891169:0]   |                         0..514 | eager short                               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.895841] [h14-16:891169:0]   |                      515..1638 | eager zero-copy copy-out                  | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.895844] [h14-16:891169:0]   |                     1639..3111 | multi-frag eager zero-copy copy-out       | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.895846] [h14-16:891169:0]   |                    3112..13582 | multi-frag eager copy-in copy-out         | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.895849] [h14-16:891169:0]   |                     13583..inf | (?) rendezvous zero-copy read from remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.896144] [h14-16:891168:0]   | ucp_context_0 inter-node cfg#3 | tagged message by ucp_tag_send* from host memory                                                                  |
+[1780772859.896150] [h14-16:891168:0]   |                        0..2038 | eager short                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.896153] [h14-16:891168:0]   |                     2039..8246 | eager zero-copy copy-out                        | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.896156] [h14-16:891168:0]   |                    8247..22906 | multi-frag eager zero-copy copy-out             | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.896160] [h14-16:891168:0]   |                      22907..1G | (?) rendezvous zero-copy read from remote       | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.896162] [h14-16:891168:0]   |                1073741825..inf | (?) rendezvous zero-copy fenced write to remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.896306] [h14-16:891168:0]   | ucp_context_0 inter-node cfg#3 | tagged message by ucp_tag_send*(fast-completion) from host memory                                                 |
+[1780772859.896311] [h14-16:891168:0]   |                        0..2038 | eager short                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.896313] [h14-16:891168:0]   |                     2039..8246 | eager copy-in copy-out                          | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.896317] [h14-16:891168:0]   |                   8247..262143 | multi-frag eager copy-in copy-out               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.896319] [h14-16:891168:0]   |                       256K..1G | (?) rendezvous zero-copy read from remote       | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.896323] [h14-16:891168:0]   |                1073741825..inf | (?) rendezvous zero-copy fenced write to remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.896406] [h14-16:891167:0]   | ucp_context_0 inter-node cfg#4 | tagged message by ucp_tag_send* from host memory                                                                  |
+[1780772859.896418] [h14-16:891167:0]   |                        0..2038 | eager short                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.896409] [h14-16:891170:0]   | ucp_context_0 inter-node cfg#3 | tagged message by ucp_tag_send* from host memory                                                                  |
+[1780772859.896418] [h14-16:891170:0]   |                        0..2038 | eager short                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.896422] [h14-16:891170:0]   |                     2039..8246 | eager zero-copy copy-out                        | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.896428] [h14-16:891170:0]   |                    8247..22906 | multi-frag eager zero-copy copy-out             | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.896432] [h14-16:891170:0]   |                      22907..1G | (?) rendezvous zero-copy read from remote       | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.896436] [h14-16:891170:0]   |                1073741825..inf | (?) rendezvous zero-copy fenced write to remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.896422] [h14-16:891167:0]   |                     2039..8246 | eager zero-copy copy-out                        | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.896428] [h14-16:891167:0]   |                    8247..22906 | multi-frag eager zero-copy copy-out             | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.896432] [h14-16:891167:0]   |                      22907..1G | (?) rendezvous zero-copy read from remote       | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.896436] [h14-16:891167:0]   |                1073741825..inf | (?) rendezvous zero-copy fenced write to remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.896598] [h14-16:891168:0]   | ucp_context_0 inter-node cfg#3 | tagged message by ucp_tag_send*(multi) from host memory                                                     |
+[1780772859.896604] [h14-16:891168:0]   |                         0..514 | eager short                               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.896608] [h14-16:891168:0]   |                      515..1638 | eager zero-copy copy-out                  | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.896612] [h14-16:891168:0]   |                     1639..3111 | multi-frag eager zero-copy copy-out       | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.896615] [h14-16:891168:0]   |                    3112..13582 | multi-frag eager copy-in copy-out         | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.896618] [h14-16:891168:0]   |                     13583..inf | (?) rendezvous zero-copy read from remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.896670] [h14-16:891170:0]   | ucp_context_0 inter-node cfg#3 | tagged message by ucp_tag_send*(fast-completion) from host memory                                                 |
+[1780772859.896678] [h14-16:891170:0]   |                        0..2038 | eager short                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.896683] [h14-16:891170:0]   |                     2039..8246 | eager copy-in copy-out                          | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.896687] [h14-16:891170:0]   |                   8247..262143 | multi-frag eager copy-in copy-out               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.896672] [h14-16:891167:0]   | ucp_context_0 inter-node cfg#4 | tagged message by ucp_tag_send*(fast-completion) from host memory                                                 |
+[1780772859.896680] [h14-16:891167:0]   |                        0..2038 | eager short                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.896684] [h14-16:891167:0]   |                     2039..8246 | eager copy-in copy-out                          | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.896690] [h14-16:891167:0]   |                   8247..262143 | multi-frag eager copy-in copy-out               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.896695] [h14-16:891167:0]   |                       256K..1G | (?) rendezvous zero-copy read from remote       | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.896700] [h14-16:891167:0]   |                1073741825..inf | (?) rendezvous zero-copy fenced write to remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.896691] [h14-16:891170:0]   |                       256K..1G | (?) rendezvous zero-copy read from remote       | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.896696] [h14-16:891170:0]   |                1073741825..inf | (?) rendezvous zero-copy fenced write to remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.896995] [h14-16:891167:0]   | ucp_context_0 inter-node cfg#4 | tagged message by ucp_tag_send*(multi) from host memory                                                     |
+[1780772859.897000] [h14-16:891167:0]   |                         0..514 | eager short                               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.897002] [h14-16:891167:0]   |                      515..1638 | eager zero-copy copy-out                  | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.897004] [h14-16:891167:0]   |                     1639..3111 | multi-frag eager zero-copy copy-out       | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.897008] [h14-16:891167:0]   |                    3112..13582 | multi-frag eager copy-in copy-out         | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.897010] [h14-16:891167:0]   |                     13583..inf | (?) rendezvous zero-copy read from remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772859.897167] [h14-16:891170:0]   | ucp_context_0 inter-node cfg#3 | tagged message by ucp_tag_send*(multi) from host memory                                                     |
+[1780772859.897177] [h14-16:891170:0]   |                         0..514 | eager short                               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.897181] [h14-16:891170:0]   |                      515..1638 | eager zero-copy copy-out                  | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.897186] [h14-16:891170:0]   |                     1639..3111 | multi-frag eager zero-copy copy-out       | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.897213] [h14-16:891170:0]   |                    3112..13582 | multi-frag eager copy-in copy-out         | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772859.897219] [h14-16:891170:0]   |                     13583..inf | (?) rendezvous zero-copy read from remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.597780] [h14-15:59150:0]   |                              0 | eager short                                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.597783] [h14-15:59150:0]   |                        1..8246 | eager copy-in copy-out                                          | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.597785] [h14-15:59150:0]   |                    8247..21986 | multi-frag eager copy-in copy-out                               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.597788] [h14-15:59150:0]   |                    21987..512K | (?) rendezvous cuda_copy, fenced write to remote, cuda_copy     | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.597791] [h14-15:59150:0]   |                    524289..inf | (?) rendezvous pipeline cuda_copy, fenced write to remote, cuda | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.601923] [h14-16:891170:0]   | ucp_context_0 inter-node cfg#4 | tagged message by ucp_tag_send* from host memory                                                                  |
+[1780772860.601929] [h14-16:891170:0]   |                        0..2038 | eager short                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.601931] [h14-16:891170:0]   |                     2039..8246 | eager zero-copy copy-out                        | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.601956] [h14-16:891170:0]   |                    8247..22906 | multi-frag eager zero-copy copy-out             | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.601959] [h14-16:891170:0]   |                      22907..1G | (?) rendezvous zero-copy read from remote       | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.601961] [h14-16:891170:0]   |                1073741825..inf | (?) rendezvous zero-copy fenced write to remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.602098] [h14-16:891170:0]   | ucp_context_0 inter-node cfg#4 | tagged message by ucp_tag_send*(fast-completion) from host memory                                                 |
+[1780772860.602102] [h14-16:891170:0]   |                        0..2038 | eager short                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.602104] [h14-16:891170:0]   |                     2039..8246 | eager copy-in copy-out                          | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.602106] [h14-16:891170:0]   |                   8247..262143 | multi-frag eager copy-in copy-out               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.602108] [h14-16:891170:0]   |                       256K..1G | (?) rendezvous zero-copy read from remote       | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.602112] [h14-16:891170:0]   |                1073741825..inf | (?) rendezvous zero-copy fenced write to remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.602307] [h14-16:891169:0]   |                              0 | eager short                                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.602309] [h14-16:891169:0]   |                        1..8246 | eager copy-in copy-out                                          | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.602312] [h14-16:891169:0]   |                    8247..21986 | multi-frag eager copy-in copy-out                               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.602336] [h14-16:891169:0]   |                    21987..512K | (?) rendezvous cuda_copy, fenced write to remote, cuda_copy     | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.602339] [h14-16:891169:0]   |                    524289..inf | (?) rendezvous pipeline cuda_copy, fenced write to remote, cuda | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.602398] [h14-16:891170:0]   | ucp_context_0 inter-node cfg#4 | tagged message by ucp_tag_send*(multi) from host memory                                                     |
+[1780772860.602403] [h14-16:891170:0]   |                         0..514 | eager short                               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.602406] [h14-16:891170:0]   |                      515..1638 | eager zero-copy copy-out                  | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.602410] [h14-16:891170:0]   |                     1639..3111 | multi-frag eager zero-copy copy-out       | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.602413] [h14-16:891170:0]   |                    3112..13582 | multi-frag eager copy-in copy-out         | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.602417] [h14-16:891170:0]   |                     13583..inf | (?) rendezvous zero-copy read from remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.602428] [h14-16:891168:0]   |                              0 | eager short                                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.602431] [h14-16:891168:0]   |                        1..8246 | eager copy-in copy-out                                          | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.602434] [h14-16:891168:0]   |                    8247..21986 | multi-frag eager copy-in copy-out                               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.602437] [h14-16:891168:0]   |                    21987..512K | (?) rendezvous cuda_copy, fenced write to remote, cuda_copy     | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.602440] [h14-16:891168:0]   |                    524289..inf | (?) rendezvous pipeline cuda_copy, fenced write to remote, cuda | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.603563] [h14-15:59148:0]   |                              0 | eager short                                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.603565] [h14-15:59148:0]   |                        1..8246 | eager copy-in copy-out                                          | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.603567] [h14-15:59148:0]   |                    8247..21986 | multi-frag eager copy-in copy-out                               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.603569] [h14-15:59148:0]   |                    21987..512K | (?) rendezvous cuda_copy, fenced write to remote, cuda_copy     | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.603571] [h14-15:59148:0]   |                    524289..inf | (?) rendezvous pipeline cuda_copy, fenced write to remote, cuda | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.603567] [h14-15:59149:0]   |                              0 | eager short                                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.603570] [h14-15:59149:0]   |                        1..8246 | eager copy-in copy-out                                          | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.603572] [h14-15:59149:0]   |                    8247..21986 | multi-frag eager copy-in copy-out                               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.603574] [h14-15:59149:0]   |                    21987..512K | (?) rendezvous cuda_copy, fenced write to remote, cuda_copy     | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.603576] [h14-15:59149:0]   |                    524289..inf | (?) rendezvous pipeline cuda_copy, fenced write to remote, cuda | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.603967] [h14-16:891167:0]   |                              0 | eager short                                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.603971] [h14-16:891167:0]   |                        1..8246 | eager copy-in copy-out                                          | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.603997] [h14-16:891167:0]   |                    8247..21986 | multi-frag eager copy-in copy-out                               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.604000] [h14-16:891167:0]   |                    21987..512K | (?) rendezvous cuda_copy, fenced write to remote, cuda_copy     | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.604003] [h14-16:891167:0]   |                    524289..inf | (?) rendezvous pipeline cuda_copy, fenced write to remote, cuda | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.604165] [h14-15:59147:0]   |                              0 | eager short                                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.604167] [h14-15:59147:0]   |                        1..8246 | eager copy-in copy-out                                          | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.604169] [h14-15:59147:0]   |                    8247..21986 | multi-frag eager copy-in copy-out                               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.604171] [h14-15:59147:0]   |                    21987..512K | (?) rendezvous cuda_copy, fenced write to remote, cuda_copy     | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.604174] [h14-15:59147:0]   |                    524289..inf | (?) rendezvous pipeline cuda_copy, fenced write to remote, cuda | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.604757] [h14-16:891168:0]   | ucp_context_0 inter-node cfg#4 | tagged message by ucp_tag_send* from host memory                                                                  |
+[1780772860.604763] [h14-16:891168:0]   |                        0..2038 | eager short                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.604766] [h14-16:891168:0]   |                     2039..8246 | eager zero-copy copy-out                        | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.604770] [h14-16:891168:0]   |                    8247..22906 | multi-frag eager zero-copy copy-out             | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.604774] [h14-16:891168:0]   |                      22907..1G | (?) rendezvous zero-copy read from remote       | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.604776] [h14-16:891168:0]   |                1073741825..inf | (?) rendezvous zero-copy fenced write to remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.604915] [h14-16:891168:0]   | ucp_context_0 inter-node cfg#4 | tagged message by ucp_tag_send*(fast-completion) from host memory                                                 |
+[1780772860.604920] [h14-16:891168:0]   |                        0..2038 | eager short                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.604922] [h14-16:891168:0]   |                     2039..8246 | eager copy-in copy-out                          | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.604924] [h14-16:891168:0]   |                   8247..262143 | multi-frag eager copy-in copy-out               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.604927] [h14-16:891168:0]   |                       256K..1G | (?) rendezvous zero-copy read from remote       | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.604929] [h14-16:891168:0]   |                1073741825..inf | (?) rendezvous zero-copy fenced write to remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.604916] [h14-16:891169:0]   | ucp_context_0 inter-node cfg#4 | tagged message by ucp_tag_send* from host memory                                                                  |
+[1780772860.604921] [h14-16:891169:0]   |                        0..2038 | eager short                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.604923] [h14-16:891169:0]   |                     2039..8246 | eager zero-copy copy-out                        | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.604925] [h14-16:891169:0]   |                    8247..22906 | multi-frag eager zero-copy copy-out             | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.604928] [h14-16:891169:0]   |                      22907..1G | (?) rendezvous zero-copy read from remote       | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.604930] [h14-16:891169:0]   |                1073741825..inf | (?) rendezvous zero-copy fenced write to remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.605069] [h14-16:891169:0]   | ucp_context_0 inter-node cfg#4 | tagged message by ucp_tag_send*(fast-completion) from host memory                                                 |
+[1780772860.605073] [h14-16:891169:0]   |                        0..2038 | eager short                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.605075] [h14-16:891169:0]   |                     2039..8246 | eager copy-in copy-out                          | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.605077] [h14-16:891169:0]   |                   8247..262143 | multi-frag eager copy-in copy-out               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.605079] [h14-16:891169:0]   |                       256K..1G | (?) rendezvous zero-copy read from remote       | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.605081] [h14-16:891169:0]   |                1073741825..inf | (?) rendezvous zero-copy fenced write to remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.605222] [h14-16:891168:0]   | ucp_context_0 inter-node cfg#4 | tagged message by ucp_tag_send*(multi) from host memory                                                     |
+[1780772860.605226] [h14-16:891168:0]   |                         0..514 | eager short                               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.605228] [h14-16:891168:0]   |                      515..1638 | eager zero-copy copy-out                  | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.605230] [h14-16:891168:0]   |                     1639..3111 | multi-frag eager zero-copy copy-out       | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.605232] [h14-16:891168:0]   |                    3112..13582 | multi-frag eager copy-in copy-out         | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.605234] [h14-16:891168:0]   |                     13583..inf | (?) rendezvous zero-copy read from remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.605366] [h14-16:891169:0]   | ucp_context_0 inter-node cfg#4 | tagged message by ucp_tag_send*(multi) from host memory                                                     |
+[1780772860.605371] [h14-16:891169:0]   |                         0..514 | eager short                               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.605374] [h14-16:891169:0]   |                      515..1638 | eager zero-copy copy-out                  | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.605403] [h14-16:891169:0]   |                     1639..3111 | multi-frag eager zero-copy copy-out       | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.605405] [h14-16:891169:0]   |                    3112..13582 | multi-frag eager copy-in copy-out         | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.605408] [h14-16:891169:0]   |                     13583..inf | (?) rendezvous zero-copy read from remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.606127] [h14-16:891167:0]   | ucp_context_0 inter-node cfg#5 | tagged message by ucp_tag_send* from host memory                                                                  |
+[1780772860.606133] [h14-16:891167:0]   |                        0..2038 | eager short                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.606137] [h14-16:891167:0]   |                     2039..8246 | eager zero-copy copy-out                        | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.606140] [h14-16:891167:0]   |                    8247..22906 | multi-frag eager zero-copy copy-out             | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.606143] [h14-16:891167:0]   |                      22907..1G | (?) rendezvous zero-copy read from remote       | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.606145] [h14-16:891167:0]   |                1073741825..inf | (?) rendezvous zero-copy fenced write to remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.606289] [h14-16:891167:0]   | ucp_context_0 inter-node cfg#5 | tagged message by ucp_tag_send*(fast-completion) from host memory                                                 |
+[1780772860.606295] [h14-16:891167:0]   |                        0..2038 | eager short                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.606297] [h14-16:891167:0]   |                     2039..8246 | eager copy-in copy-out                          | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.606322] [h14-16:891167:0]   |                   8247..262143 | multi-frag eager copy-in copy-out               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.606324] [h14-16:891167:0]   |                       256K..1G | (?) rendezvous zero-copy read from remote       | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.606327] [h14-16:891167:0]   |                1073741825..inf | (?) rendezvous zero-copy fenced write to remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.606617] [h14-16:891167:0]   | ucp_context_0 inter-node cfg#5 | tagged message by ucp_tag_send*(multi) from host memory                                                     |
+[1780772860.606622] [h14-16:891167:0]   |                         0..514 | eager short                               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.606625] [h14-16:891167:0]   |                      515..1638 | eager zero-copy copy-out                  | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.606627] [h14-16:891167:0]   |                     1639..3111 | multi-frag eager zero-copy copy-out       | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.606630] [h14-16:891167:0]   |                    3112..13582 | multi-frag eager copy-in copy-out         | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.606633] [h14-16:891167:0]   |                     13583..inf | (?) rendezvous zero-copy read from remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.613238] [h14-16:891167:0]   |                              0 | eager short                                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.613241] [h14-16:891167:0]   |                        1..8246 | eager copy-in copy-out                                          | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.613243] [h14-16:891167:0]   |                    8247..21986 | multi-frag eager copy-in copy-out                               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.613246] [h14-16:891167:0]   |                    21987..512K | (?) rendezvous cuda_copy, fenced write to remote, cuda_copy     | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.613248] [h14-16:891167:0]   |                    524289..inf | (?) rendezvous pipeline cuda_copy, fenced write to remote, cuda | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.616316] [h14-16:891170:0]   |                              0 | eager short                                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.616318] [h14-16:891170:0]   |                        1..8246 | eager copy-in copy-out                                          | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.616322] [h14-16:891170:0]   |                    8247..21986 | multi-frag eager copy-in copy-out                               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.616354] [h14-16:891170:0]   |                    21987..512K | (?) rendezvous cuda_copy, fenced write to remote, cuda_copy     | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.616358] [h14-16:891170:0]   |                    524289..inf | (?) rendezvous pipeline cuda_copy, fenced write to remote, cuda | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.619656] [h14-16:891168:0]   |                              0 | eager short                                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.619658] [h14-16:891168:0]   |                        1..8246 | eager copy-in copy-out                                          | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.619663] [h14-16:891168:0]   |                    8247..21986 | multi-frag eager copy-in copy-out                               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.619665] [h14-16:891168:0]   |                    21987..512K | (?) rendezvous cuda_copy, fenced write to remote, cuda_copy     | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.619668] [h14-16:891168:0]   |                    524289..inf | (?) rendezvous pipeline cuda_copy, fenced write to remote, cuda | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.619872] [h14-16:891169:0]   |                              0 | eager short                                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.619881] [h14-16:891169:0]   |                        1..8246 | eager copy-in copy-out                                          | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.619884] [h14-16:891169:0]   |                    8247..21986 | multi-frag eager copy-in copy-out                               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.619886] [h14-16:891169:0]   |                    21987..512K | (?) rendezvous cuda_copy, fenced write to remote, cuda_copy     | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.619888] [h14-16:891169:0]   |                    524289..inf | (?) rendezvous pipeline cuda_copy, fenced write to remote, cuda | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.625408] [h14-16:891170:0]   |                              0 | eager short                                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.625413] [h14-16:891170:0]   |                        1..8246 | eager copy-in copy-out                                          | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.625416] [h14-16:891170:0]   |                    8247..21986 | multi-frag eager copy-in copy-out                               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.625421] [h14-16:891170:0]   |                    21987..512K | (?) rendezvous cuda_copy, fenced write to remote, cuda_copy     | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.625425] [h14-16:891170:0]   |                    524289..inf | (?) rendezvous pipeline cuda_copy, fenced write to remote, cuda | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.671802] [h14-15:59148:0]   |                       1..18307 | (?) fragmented copy-in copy-out                       | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.671805] [h14-15:59148:0]   |                    18308..512K | (?) cuda_copy, fenced write to remote, cuda_copy      | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.671807] [h14-15:59148:0]   |                    524289..inf | pipeline cuda_copy, fenced write to remote, cuda_copy | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.720761] [h14-15:59150:0]   |                       1..18307 | (?) fragmented copy-in copy-out                       | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.720763] [h14-15:59150:0]   |                    18308..512K | (?) cuda_copy, fenced write to remote, cuda_copy      | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.720765] [h14-15:59150:0]   |                    524289..inf | pipeline cuda_copy, fenced write to remote, cuda_copy | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.721162] [h14-15:59149:0]   |                       1..18307 | (?) fragmented copy-in copy-out                       | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.721164] [h14-15:59149:0]   |                    18308..512K | (?) cuda_copy, fenced write to remote, cuda_copy      | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.721166] [h14-15:59149:0]   |                    524289..inf | pipeline cuda_copy, fenced write to remote, cuda_copy | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.721268] [h14-15:59148:0]   |                       1..18307 | (?) fragmented copy-in copy-out                       | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.721271] [h14-15:59148:0]   |                    18308..512K | (?) cuda_copy, fenced write to remote, cuda_copy      | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.721274] [h14-15:59148:0]   |                    524289..inf | pipeline cuda_copy, fenced write to remote, cuda_copy | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.746379] [h14-16:891168:0]   |                       1..18307 | (?) fragmented copy-in copy-out                       | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.746381] [h14-16:891168:0]   |                    18308..512K | (?) cuda_copy, fenced write to remote, cuda_copy      | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.746383] [h14-16:891168:0]   |                    524289..inf | pipeline cuda_copy, fenced write to remote, cuda_copy | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.746827] [h14-16:891170:0]   |                       1..18307 | (?) fragmented copy-in copy-out                       | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.746829] [h14-16:891170:0]   |                    18308..512K | (?) cuda_copy, fenced write to remote, cuda_copy      | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.746832] [h14-16:891170:0]   |                    524289..inf | pipeline cuda_copy, fenced write to remote, cuda_copy | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.747253] [h14-16:891169:0]   |                       1..18307 | (?) fragmented copy-in copy-out                       | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.747256] [h14-16:891169:0]   |                    18308..512K | (?) cuda_copy, fenced write to remote, cuda_copy      | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.747260] [h14-16:891169:0]   |                    524289..inf | pipeline cuda_copy, fenced write to remote, cuda_copy | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.747433] [h14-15:59150:0]   |                       1..18307 | (?) fragmented copy-in copy-out                       | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.747435] [h14-15:59150:0]   |                    18308..512K | (?) cuda_copy, fenced write to remote, cuda_copy      | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.747437] [h14-15:59150:0]   |                    524289..inf | pipeline cuda_copy, fenced write to remote, cuda_copy | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.747658] [h14-16:891167:0]   |                       1..18307 | (?) fragmented copy-in copy-out                       | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.747662] [h14-16:891167:0]   |                    18308..512K | (?) cuda_copy, fenced write to remote, cuda_copy      | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.747665] [h14-16:891167:0]   |                    524289..inf | pipeline cuda_copy, fenced write to remote, cuda_copy | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.748433] [h14-15:59147:0]   |                       1..18307 | (?) fragmented copy-in copy-out                       | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.748435] [h14-15:59147:0]   |                    18308..512K | (?) cuda_copy, fenced write to remote, cuda_copy      | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.748437] [h14-15:59147:0]   |                    524289..inf | pipeline cuda_copy, fenced write to remote, cuda_copy | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.748527] [h14-16:891170:0]   |                       1..18307 | (?) fragmented copy-in copy-out                       | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.748531] [h14-16:891170:0]   |                    18308..512K | (?) cuda_copy, fenced write to remote, cuda_copy      | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.748537] [h14-16:891170:0]   |                    524289..inf | pipeline cuda_copy, fenced write to remote, cuda_copy | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.749002] [h14-16:891168:0]   |                       1..18307 | (?) fragmented copy-in copy-out                       | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.749004] [h14-16:891168:0]   |                    18308..512K | (?) cuda_copy, fenced write to remote, cuda_copy      | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.749006] [h14-16:891168:0]   |                    524289..inf | pipeline cuda_copy, fenced write to remote, cuda_copy | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.749051] [h14-16:891169:0]   |                       1..18307 | (?) fragmented copy-in copy-out                       | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.749055] [h14-16:891169:0]   |                    18308..512K | (?) cuda_copy, fenced write to remote, cuda_copy      | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.749060] [h14-16:891169:0]   |                    524289..inf | pipeline cuda_copy, fenced write to remote, cuda_copy | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.750090] [h14-15:59149:0]   |                       1..18307 | (?) fragmented copy-in copy-out                       | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772860.750092] [h14-15:59149:0]   |                    18308..512K | (?) cuda_copy, fenced write to remote, cuda_copy      | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772860.750094] [h14-15:59149:0]   |                    524289..inf | pipeline cuda_copy, fenced write to remote, cuda_copy | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[comm-probe] rank_buffer_view memory_space=Cuda host_accessible=0 send_ptr=0x152c36400080
+[1780772861.035749] [h14-15:59147:0]   | ucp_context_0 inter-node cfg#5 | tagged message by ucp_tag_send* from host memory                                                                  |
+[1780772861.035754] [h14-15:59147:0]   |                        0..2038 | eager short                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772861.035756] [h14-15:59147:0]   |                     2039..8246 | eager zero-copy copy-out                        | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772861.035758] [h14-15:59147:0]   |                    8247..22906 | multi-frag eager zero-copy copy-out             | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772861.035760] [h14-15:59147:0]   |                      22907..1G | (?) rendezvous zero-copy read from remote       | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772861.035762] [h14-15:59147:0]   |                1073741825..inf | (?) rendezvous zero-copy fenced write to remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772861.035887] [h14-15:59147:0]   | ucp_context_0 inter-node cfg#5 | tagged message by ucp_tag_send*(fast-completion) from host memory                                                 |
+[1780772861.035891] [h14-15:59147:0]   |                        0..2038 | eager short                                     | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772861.035893] [h14-15:59147:0]   |                     2039..8246 | eager copy-in copy-out                          | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772861.035895] [h14-15:59147:0]   |                   8247..262143 | multi-frag eager copy-in copy-out               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772861.035897] [h14-15:59147:0]   |                       256K..1G | (?) rendezvous zero-copy read from remote       | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772861.035899] [h14-15:59147:0]   |                1073741825..inf | (?) rendezvous zero-copy fenced write to remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+[1780772861.036147] [h14-15:59147:0]   | ucp_context_0 inter-node cfg#5 | tagged message by ucp_tag_send*(multi) from host memory                                                     |
+[1780772861.036151] [h14-15:59147:0]   |                         0..514 | eager short                               | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772861.036153] [h14-15:59147:0]   |                      515..1638 | eager zero-copy copy-out                  | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772861.036155] [h14-15:59147:0]   |                     1639..3111 | multi-frag eager zero-copy copy-out       | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772861.036157] [h14-15:59147:0]   |                    3112..13582 | multi-frag eager copy-in copy-out         | rc_mlx5/mlx5_2:1/path0                                          |
+[1780772861.036159] [h14-15:59147:0]   |                     13583..inf | (?) rendezvous zero-copy read from remote | 50% on rc_mlx5/mlx5_2:1/path0 and 50% on rc_mlx5/mlx5_3:1/path0 |
+########## END ##########
+=== JOB_STATISTICS ===
+=== current date     : Sat Jun  6 21:07:42 CEST 2026
+= Job-ID             : 488634 on helma
+= Job-Name           : comm_probe
+= Job-Command        : /home/hpc/iwia/iwia054h/terraneo/apps/mantlecirculation/bench_mt/jobs/run_comm_probe.sh
+= Initial workdir    : /home/hpc/iwia/iwia054h/terraneo/apps/mantlecirculation/bench_mt/jobs
+= Queue/Partition    : h100
+= Slurm account      : iwia with QOS=normal
+= Requested resources: cpu=256,mem=1400G,node=2,billing=256,gres/gpu=8,gres/gpu:h100=8 for 00:10:00
+= Elapsed runtime    : 00:00:23
+= Total RAM usage    : 2.6 GiB of assigned 1400 GiB (0.2%)
+= Node list          : h14-[15-16]
+= Subm/Elig/Start/End: 2026-06-06T21:07:19 / 2026-06-06T21:07:19 / 2026-06-06T21:07:19 / 2026-06-06T21:07:42
+======================
+=== Quota infos ======
+    Path                 Used     SoftQ    HardQ    Gracetime  Filec    FileQ    FiHaQ    FileGrace    
+    /home/hpc              92.7G   104.9G   209.7G        N/A     280K     500K   1,000K        N/A    
+    /hnvme               2306.9G     0.0K     0.0K        N/A  24,826       61K      81K        N/A    
+======================
+=== GPU utilization ==
+gpu_name, gpu_bus_id, pid, gpu_utilization [%], mem_utilization [%], max_memory_usage [MiB], time [ms]
+NVIDIA H100, 00000000:06:00.0, 59147, 2 %, 0 %, 8310 MiB, 2983 ms
+NVIDIA H100, 00000000:26:00.0, 59148, 2 %, 0 %, 8322 MiB, 2964 ms
+NVIDIA H100, 00000000:A6:00.0, 59149, 1 %, 0 %, 8322 MiB, 3012 ms
+NVIDIA H100, 00000000:C6:00.0, 59150, 3 %, 0 %, 8318 MiB, 2937 ms

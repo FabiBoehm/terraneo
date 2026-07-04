@@ -79,7 +79,7 @@ int main( int argc, char** argv )
         const auto t = build_2to1_tables( dom, nx, ny, nr );
         CHECK( !t.asm_w.empty() );
         CHECK( !t.cls_members.empty() );
-        CHECK( !t.con_np.empty() );
+        CHECK( !t.con_dst.empty() );
         CHECK( t.cls_offsets.size() >= 2 );
 
         // deterministic per-node pattern
@@ -258,21 +258,21 @@ int main( int argc, char** argv )
         };
 
         const auto t = build_2to1_tables( dom, nx, ny, nr );
-        CHECK( !t.con_np.empty() );
+        CHECK( !t.con_dst.empty() );
 
         // (b) parent bracketing for EVERY constraint row (seam rows included)
         double worst_bracket = 0.0;
-        for ( std::size_t i = 0; i < t.con_np.size(); ++i )
+        for ( std::size_t i = 0; i < t.con_dst.size(); ++i )
         {
             const auto            d = t.con_dst[i];
             const auto            pd = pos( d.s, d.x, d.y, d.r );
             std::array< double, 3 > pi{ 0, 0, 0 };
-            for ( int p = 0; p < t.con_np[i]; ++p )
+            for ( int p = t.con_off[i]; p < t.con_off[i + 1]; ++p )
             {
-                const auto s  = t.con_src[i][p];
+                const auto s  = t.con_par[p];
                 const auto ps = pos( s.s, s.x, s.y, s.r );
                 for ( int c = 0; c < 3; ++c )
-                    pi[c] += t.con_w[i][p] * ps[c];
+                    pi[c] += t.con_wt[p] * ps[c];
             }
             const double dist = std::sqrt( ( pd[0] - pi[0] ) * ( pd[0] - pi[0] ) +
                                            ( pd[1] - pi[1] ) * ( pd[1] - pi[1] ) +
@@ -283,11 +283,11 @@ int main( int argc, char** argv )
 
         // every hanging copy's mass is scattered exactly once (weights of its row sum to 1)
         double worst_mass = 0.0;
-        for ( std::size_t i = 0; i < t.con_np.size(); ++i )
+        for ( std::size_t i = 0; i < t.con_dst.size(); ++i )
         {
             double wsum = 0.0;
-            for ( int p = 0; p < t.con_np[i]; ++p )
-                wsum += t.con_w[i][p];
+            for ( int p = t.con_off[i]; p < t.con_off[i + 1]; ++p )
+                wsum += t.con_wt[p];
             worst_mass = std::max( worst_mass, std::fabs( wsum - 1.0 ) );
         }
         CHECK( worst_mass < 1e-12 );

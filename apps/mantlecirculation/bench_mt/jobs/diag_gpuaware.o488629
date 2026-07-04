@@ -1,0 +1,204 @@
+### Starting TaskPrologue of job 488629 on h14-15 at Sat Jun  6 08:42:35 PM CEST 2026
+Running on cores 0-127 with governor performance
+Sat Jun  6 20:42:35 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 595.71.05              Driver Version: 595.71.05      CUDA Version: 13.2     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA H100                    On  |   00000000:06:00.0 Off |                    0 |
+| N/A   33C    P0             65W /  500W |       0MiB /  95830MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   1  NVIDIA H100                    On  |   00000000:26:00.0 Off |                    0 |
+| N/A   34C    P0             68W /  500W |       0MiB /  95830MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   2  NVIDIA H100                    On  |   00000000:A6:00.0 Off |                    0 |
+| N/A   33C    P0             67W /  500W |       0MiB /  95830MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   3  NVIDIA H100                    On  |   00000000:C6:00.0 Off |                    0 |
+| N/A   34C    P0             68W /  500W |       0MiB /  95830MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+### Finished TaskPrologue
+
+Loading openmpi/5.0.5-nvhpc24.11-cuda
+  Loading requirement: nvhpc/24.11
+########## A) PER-NODE CAPABILITY (cuda/gdr transports + GPUDirect-RDMA kernel module) ##########
+----- h14-15 -----
+[cuda/gdr UCX transports on this node:]
+----- h14-16 -----
+[cuda/gdr UCX transports on this node:]
+#      Transport: cuda_copy
+#      Transport: cuda_ipc
+[GPUDirect-RDMA kernel module (need nvidia_peermem or nv_peer_mem loaded):]
+nvidia_peermem         20480  0
+nvidia              98955264  60 nvidia_uvm,nvidia_peermem,nvidia_modeset
+ib_uverbs             225280  3 nvidia_peermem,rdma_ucm,mlx5_ib
+#      Transport: cuda_copy
+#      Transport: cuda_ipc
+[GPUDirect-RDMA kernel module (need nvidia_peermem or nv_peer_mem loaded):]
+nvidia_peermem         20480  0
+nvidia              98955264  60 nvidia_uvm,nvidia_peermem,nvidia_modeset
+ib_uverbs             225280  3 nvidia_peermem,rdma_ucm,mlx5_ib
+
+########## B) ACTUAL HALO PATH: benchmark_operators on 2 nodes with UCX_PROTO_INFO ##########
+Look for the rendezvous (rndv) protocol on cuda buffers: rc_mlx5/gdr_copy = GPU-direct; cuda_copy->sysmem->rc_mlx5 = host-staged.
+[1780771359.476770] [h14-15:52573:0]          parser.c:2314 UCX  INFO  UCX_* env variables: UCX_PROTO_INFO=y UCX_LOG_LEVEL=info
+[1780771359.476770] [h14-15:52572:0]          parser.c:2314 UCX  INFO  UCX_* env variables: UCX_PROTO_INFO=y UCX_LOG_LEVEL=info
+[1780771359.476770] [h14-15:52574:0]          parser.c:2314 UCX  INFO  UCX_* env variables: UCX_PROTO_INFO=y UCX_LOG_LEVEL=info
+[1780771359.476810] [h14-15:52571:0]          parser.c:2314 UCX  INFO  UCX_* env variables: UCX_PROTO_INFO=y UCX_LOG_LEVEL=info
+[1780771359.538231] [h14-16:884881:0]          parser.c:2314 UCX  INFO  UCX_* env variables: UCX_PROTO_INFO=y UCX_LOG_LEVEL=info
+[1780771359.538229] [h14-16:884880:0]          parser.c:2314 UCX  INFO  UCX_* env variables: UCX_PROTO_INFO=y UCX_LOG_LEVEL=info
+[1780771359.538229] [h14-16:884879:0]          parser.c:2314 UCX  INFO  UCX_* env variables: UCX_PROTO_INFO=y UCX_LOG_LEVEL=info
+[1780771359.538794] [h14-16:884882:0]          parser.c:2314 UCX  INFO  UCX_* env variables: UCX_PROTO_INFO=y UCX_LOG_LEVEL=info
+[1780771359.546081] [h14-15:52573:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780771359.546091] [h14-15:52573:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.546081] [h14-15:52574:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780771359.546091] [h14-15:52574:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.546081] [h14-15:52571:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780771359.546090] [h14-15:52571:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.546110] [h14-15:52572:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780771359.546122] [h14-15:52572:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.546069] [h14-16:884882:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780771359.546079] [h14-16:884882:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.546174] [h14-15:52571:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780771359.546184] [h14-15:52571:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.546175] [h14-15:52573:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780771359.546185] [h14-15:52573:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.546175] [h14-15:52574:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780771359.546185] [h14-15:52574:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.546207] [h14-15:52572:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780771359.546220] [h14-15:52572:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.546157] [h14-16:884882:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780771359.546168] [h14-16:884882:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.546386] [h14-15:52571:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(multi) from host memory                                              |
+[1780771359.546396] [h14-15:52571:0]   |               16444..inf | (?) rendezvous zero-copy read from remote     | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.546388] [h14-15:52574:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(multi) from host memory                                              |
+[1780771359.546398] [h14-15:52574:0]   |               16444..inf | (?) rendezvous zero-copy read from remote     | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.546407] [h14-15:52574:0]      ucp_worker.c:1888 UCX  INFO    ucp_context_0 self cfg#1 tag(self/memory knem/memory rc_mlx5/mlx5_2:1 rc_mlx5/mlx5_3:1 rc_mlx5/mlx5_4:1 rc_mlx5/mlx5_5:1 rc_mlx5/mlx5_2:1 rc_mlx5/mlx5_3:1 rc_mlx5/mlx5_4:1 rc_mlx5/mlx5_5:1)
+[1780771359.546390] [h14-15:52573:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(multi) from host memory                                              |
+[1780771359.546401] [h14-15:52573:0]   |               16444..inf | (?) rendezvous zero-copy read from remote     | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.546410] [h14-15:52573:0]      ucp_worker.c:1888 UCX  INFO    ucp_context_0 self cfg#1 tag(self/memory knem/memory rc_mlx5/mlx5_2:1 rc_mlx5/mlx5_3:1 rc_mlx5/mlx5_4:1 rc_mlx5/mlx5_5:1 rc_mlx5/mlx5_2:1 rc_mlx5/mlx5_3:1 rc_mlx5/mlx5_4:1 rc_mlx5/mlx5_5:1)
+[1780771359.546305] [h14-16:884881:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780771359.546314] [h14-16:884881:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.546406] [h14-15:52571:0]      ucp_worker.c:1888 UCX  INFO    ucp_context_0 self cfg#1 tag(self/memory knem/memory rc_mlx5/mlx5_2:1 rc_mlx5/mlx5_3:1 rc_mlx5/mlx5_4:1 rc_mlx5/mlx5_5:1 rc_mlx5/mlx5_2:1 rc_mlx5/mlx5_3:1 rc_mlx5/mlx5_4:1 rc_mlx5/mlx5_5:1)
+[1780771359.546421] [h14-15:52572:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(multi) from host memory                                              |
+[1780771359.546431] [h14-15:52572:0]   |               16444..inf | (?) rendezvous zero-copy read from remote     | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.546440] [h14-15:52572:0]      ucp_worker.c:1888 UCX  INFO    ucp_context_0 self cfg#1 tag(self/memory knem/memory rc_mlx5/mlx5_2:1 rc_mlx5/mlx5_3:1 rc_mlx5/mlx5_4:1 rc_mlx5/mlx5_5:1 rc_mlx5/mlx5_2:1 rc_mlx5/mlx5_3:1 rc_mlx5/mlx5_4:1 rc_mlx5/mlx5_5:1)
+[1780771359.546375] [h14-16:884882:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(multi) from host memory                                              |
+[1780771359.546383] [h14-16:884882:0]   |               16444..inf | (?) rendezvous zero-copy read from remote     | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.546392] [h14-16:884881:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780771359.546405] [h14-16:884881:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.546394] [h14-16:884882:0]      ucp_worker.c:1888 UCX  INFO    ucp_context_0 self cfg#1 tag(self/memory knem/memory rc_mlx5/mlx5_2:1 rc_mlx5/mlx5_3:1 rc_mlx5/mlx5_4:1 rc_mlx5/mlx5_5:1 rc_mlx5/mlx5_2:1 rc_mlx5/mlx5_3:1 rc_mlx5/mlx5_4:1 rc_mlx5/mlx5_5:1)
+[1780771359.546436] [h14-16:884879:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780771359.546448] [h14-16:884879:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.546464] [h14-16:884880:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780771359.546478] [h14-16:884880:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.546527] [h14-16:884879:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780771359.546540] [h14-16:884879:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.546556] [h14-16:884880:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780771359.546570] [h14-16:884880:0]   |             3530992..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.546599] [h14-16:884881:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(multi) from host memory                                              |
+[1780771359.546610] [h14-16:884881:0]   |               16444..inf | (?) rendezvous zero-copy read from remote     | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.546618] [h14-16:884881:0]      ucp_worker.c:1888 UCX  INFO    ucp_context_0 self cfg#1 tag(self/memory knem/memory rc_mlx5/mlx5_2:1 rc_mlx5/mlx5_3:1 rc_mlx5/mlx5_4:1 rc_mlx5/mlx5_5:1 rc_mlx5/mlx5_2:1 rc_mlx5/mlx5_3:1 rc_mlx5/mlx5_4:1 rc_mlx5/mlx5_5:1)
+[1780771359.546739] [h14-16:884879:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(multi) from host memory                                              |
+[1780771359.546749] [h14-16:884879:0]   |               16444..inf | (?) rendezvous zero-copy read from remote     | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.546767] [h14-16:884880:0]   | ucp_context_0 self cfg#1 | tagged message by ucp_tag_send*(multi) from host memory                                              |
+[1780771359.546777] [h14-16:884880:0]   |               16444..inf | (?) rendezvous zero-copy read from remote     | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.546757] [h14-16:884879:0]      ucp_worker.c:1888 UCX  INFO    ucp_context_0 self cfg#1 tag(self/memory knem/memory rc_mlx5/mlx5_2:1 rc_mlx5/mlx5_3:1 rc_mlx5/mlx5_4:1 rc_mlx5/mlx5_5:1 rc_mlx5/mlx5_2:1 rc_mlx5/mlx5_3:1 rc_mlx5/mlx5_4:1 rc_mlx5/mlx5_5:1)
+[1780771359.546786] [h14-16:884880:0]      ucp_worker.c:1888 UCX  INFO    ucp_context_0 self cfg#1 tag(self/memory knem/memory rc_mlx5/mlx5_2:1 rc_mlx5/mlx5_3:1 rc_mlx5/mlx5_4:1 rc_mlx5/mlx5_5:1 rc_mlx5/mlx5_2:1 rc_mlx5/mlx5_3:1 rc_mlx5/mlx5_4:1 rc_mlx5/mlx5_5:1)
+[1780771359.581777] [h14-16:884882:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780771359.581788] [h14-16:884882:0]   |                     10691..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.581854] [h14-16:884882:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780771359.581864] [h14-16:884882:0]   |                      256K..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.581777] [h14-16:884881:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780771359.581788] [h14-16:884881:0]   |                     10691..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.581851] [h14-16:884881:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780771359.581862] [h14-16:884881:0]   |                      256K..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.581777] [h14-16:884879:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780771359.581788] [h14-16:884879:0]   |                     10691..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.581853] [h14-16:884879:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780771359.581864] [h14-16:884879:0]   |                      256K..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.582028] [h14-16:884881:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send*(multi) from host memory                                          |
+[1780771359.582038] [h14-16:884881:0]   |                     10637..inf | (?) rendezvous zero-copy read from remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.582046] [h14-16:884881:0]      ucp_worker.c:1888 UCX  INFO    ucp_context_0 intra-node cfg#2 tag(sysv/memory knem/memory rc_mlx5/mlx5_2:1 rc_mlx5/mlx5_3:1 rc_mlx5/mlx5_4:1 rc_mlx5/mlx5_5:1 rc_mlx5/mlx5_2:1 rc_mlx5/mlx5_3:1 rc_mlx5/mlx5_4:1 rc_mlx5/mlx5_5:1 cuda_ipc/cuda)
+[1780771359.582031] [h14-16:884879:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send*(multi) from host memory                                          |
+[1780771359.582041] [h14-16:884879:0]   |                     10637..inf | (?) rendezvous zero-copy read from remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.582048] [h14-16:884879:0]      ucp_worker.c:1888 UCX  INFO    ucp_context_0 intra-node cfg#2 tag(sysv/memory knem/memory rc_mlx5/mlx5_2:1 rc_mlx5/mlx5_3:1 rc_mlx5/mlx5_4:1 rc_mlx5/mlx5_5:1 rc_mlx5/mlx5_2:1 rc_mlx5/mlx5_3:1 rc_mlx5/mlx5_4:1 rc_mlx5/mlx5_5:1 cuda_ipc/cuda)
+[1780771359.582034] [h14-16:884882:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send*(multi) from host memory                                          |
+[1780771359.582044] [h14-16:884882:0]   |                     10637..inf | (?) rendezvous zero-copy read from remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.582051] [h14-16:884882:0]      ucp_worker.c:1888 UCX  INFO    ucp_context_0 intra-node cfg#2 tag(sysv/memory knem/memory rc_mlx5/mlx5_2:1 rc_mlx5/mlx5_3:1 rc_mlx5/mlx5_4:1 rc_mlx5/mlx5_5:1 rc_mlx5/mlx5_2:1 rc_mlx5/mlx5_3:1 rc_mlx5/mlx5_4:1 rc_mlx5/mlx5_5:1 cuda_ipc/cuda)
+[1780771359.588345] [h14-16:884880:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780771359.588356] [h14-16:884880:0]   |                     10691..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.588423] [h14-16:884880:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780771359.588439] [h14-16:884880:0]   |                      256K..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.588608] [h14-16:884880:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send*(multi) from host memory                                          |
+[1780771359.588619] [h14-16:884880:0]   |                     10637..inf | (?) rendezvous zero-copy read from remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.588627] [h14-16:884880:0]      ucp_worker.c:1888 UCX  INFO    ucp_context_0 intra-node cfg#2 tag(sysv/memory knem/memory rc_mlx5/mlx5_2:1 rc_mlx5/mlx5_3:1 rc_mlx5/mlx5_4:1 rc_mlx5/mlx5_5:1 rc_mlx5/mlx5_2:1 rc_mlx5/mlx5_3:1 rc_mlx5/mlx5_4:1 rc_mlx5/mlx5_5:1 cuda_ipc/cuda)
+[1780771359.592684] [h14-15:52571:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780771359.592695] [h14-15:52571:0]   |                     10691..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.592761] [h14-15:52571:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780771359.592773] [h14-15:52571:0]   |                      256K..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.592944] [h14-15:52571:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send*(multi) from host memory                                          |
+[1780771359.592954] [h14-15:52571:0]   |                     10637..inf | (?) rendezvous zero-copy read from remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.592963] [h14-15:52571:0]      ucp_worker.c:1888 UCX  INFO    ucp_context_0 intra-node cfg#2 tag(sysv/memory knem/memory rc_mlx5/mlx5_2:1 rc_mlx5/mlx5_3:1 rc_mlx5/mlx5_4:1 rc_mlx5/mlx5_5:1 rc_mlx5/mlx5_2:1 rc_mlx5/mlx5_3:1 rc_mlx5/mlx5_4:1 rc_mlx5/mlx5_5:1 cuda_ipc/cuda)
+[1780771359.598721] [h14-15:52573:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780771359.598732] [h14-15:52573:0]   |                     10691..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.598736] [h14-15:52574:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780771359.598750] [h14-15:52574:0]   |                     10691..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.598752] [h14-15:52572:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send* from host memory                                                        |
+[1780771359.598765] [h14-15:52572:0]   |                     10691..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.598802] [h14-15:52573:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780771359.598816] [h14-15:52573:0]   |                      256K..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.598818] [h14-15:52574:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780771359.598830] [h14-15:52574:0]   |                      256K..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.598833] [h14-15:52572:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send*(fast-completion) from host memory                                       |
+[1780771359.598847] [h14-15:52572:0]   |                      256K..inf | (?) rendezvous zero-copy flushed write to remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.598984] [h14-15:52573:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send*(multi) from host memory                                          |
+[1780771359.598994] [h14-15:52573:0]   |                     10637..inf | (?) rendezvous zero-copy read from remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.598999] [h14-15:52574:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send*(multi) from host memory                                          |
+[1780771359.599024] [h14-15:52574:0]   |                     10637..inf | (?) rendezvous zero-copy read from remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.599003] [h14-15:52573:0]      ucp_worker.c:1888 UCX  INFO    ucp_context_0 intra-node cfg#2 tag(sysv/memory knem/memory rc_mlx5/mlx5_2:1 rc_mlx5/mlx5_3:1 rc_mlx5/mlx5_4:1 rc_mlx5/mlx5_5:1 rc_mlx5/mlx5_2:1 rc_mlx5/mlx5_3:1 rc_mlx5/mlx5_4:1 rc_mlx5/mlx5_5:1 cuda_ipc/cuda)
+[1780771359.599027] [h14-15:52572:0]   | ucp_context_0 intra-node cfg#2 | tagged message by ucp_tag_send*(multi) from host memory                                          |
+[1780771359.599039] [h14-15:52572:0]   |                     10637..inf | (?) rendezvous zero-copy read from remote | 71% on knem/memory and 29% on rc_mlx5/mlx5_2:1/path0 |
+[1780771359.599048] [h14-15:52572:0]      ucp_worker.c:1888 UCX  INFO    ucp_context_0 intra-node cfg#2 tag(sysv/memory knem/memory rc_mlx5/mlx5_2:1 rc_mlx5/mlx5_3:1 rc_mlx5/mlx5_4:1 rc_mlx5/mlx5_5:1 rc_mlx5/mlx5_2:1 rc_mlx5/mlx5_3:1 rc_mlx5/mlx5_4:1 rc_mlx5/mlx5_5:1 cuda_ipc/cuda)
+[1780771359.599032] [h14-15:52574:0]      ucp_worker.c:1888 UCX  INFO    ucp_context_0 intra-node cfg#2 tag(sysv/memory knem/memory rc_mlx5/mlx5_2:1 rc_mlx5/mlx5_3:1 rc_mlx5/mlx5_4:1 rc_mlx5/mlx5_5:1 rc_mlx5/mlx5_2:1 rc_mlx5/mlx5_3:1 rc_mlx5/mlx5_4:1 rc_mlx5/mlx5_5:1 cuda_ipc/cuda)
+########## END ##########
+=== JOB_STATISTICS ===
+=== current date     : Sat Jun  6 20:42:41 CEST 2026
+= Job-ID             : 488629 on helma
+= Job-Name           : diag_gpuaware
+= Job-Command        : /home/hpc/iwia/iwia054h/terraneo/apps/mantlecirculation/bench_mt/jobs/diag_gpuaware_2node.sh
+= Initial workdir    : /home/hpc/iwia/iwia054h/terraneo/apps/mantlecirculation/bench_mt/jobs
+= Queue/Partition    : h100
+= Slurm account      : iwia with QOS=normal
+= Requested resources: cpu=256,mem=1400G,node=2,billing=256,gres/gpu=8,gres/gpu:h100=8 for 00:15:00
+= Elapsed runtime    : 00:00:08
+= Total RAM usage    : 2.1 GiB of assigned 1400 GiB (0.1%)
+= Node list          : h14-[15-16]
+= Subm/Elig/Start/End: 2026-06-06T20:42:31 / 2026-06-06T20:42:31 / 2026-06-06T20:42:33 / 2026-06-06T20:42:41
+======================
+=== Quota infos ======
+    Path                 Used     SoftQ    HardQ    Gracetime  Filec    FileQ    FiHaQ    FileGrace    
+    /home/hpc              92.7G   104.9G   209.7G        N/A     280K     500K   1,000K        N/A    
+    /hnvme               2306.9G     0.0K     0.0K        N/A  24,826       61K      81K        N/A    
+======================
+=== GPU utilization ==
+gpu_name, gpu_bus_id, pid, gpu_utilization [%], mem_utilization [%], max_memory_usage [MiB], time [ms]
+NVIDIA H100, 00000000:06:00.0, 52571, 0 %, 0 %, 524 MiB, 1661 ms
+NVIDIA H100, 00000000:26:00.0, 52572, 0 %, 0 %, 524 MiB, 1600 ms
+NVIDIA H100, 00000000:A6:00.0, 52573, 0 %, 0 %, 524 MiB, 1636 ms
+NVIDIA H100, 00000000:C6:00.0, 52574, 0 %, 0 %, 524 MiB, 1448 ms

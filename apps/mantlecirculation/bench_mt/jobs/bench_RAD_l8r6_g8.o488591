@@ -1,0 +1,132 @@
+### Starting TaskPrologue of job 488591 on h13-07 at Sat Jun  6 07:14:01 PM CEST 2026
+Running on cores 0-127 with governor performance
+Sat Jun  6 19:14:01 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 595.71.05              Driver Version: 595.71.05      CUDA Version: 13.2     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA H100                    On  |   00000000:06:00.0 Off |                    0 |
+| N/A   34C    P0             70W /  500W |       0MiB /  95830MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   1  NVIDIA H100                    On  |   00000000:26:00.0 Off |                    0 |
+| N/A   34C    P0             66W /  500W |       0MiB /  95830MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   2  NVIDIA H100                    On  |   00000000:A6:00.0 Off |                    0 |
+| N/A   34C    P0             71W /  500W |       0MiB /  95830MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   3  NVIDIA H100                    On  |   00000000:C6:00.0 Off |                    0 |
+| N/A   34C    P0             67W /  500W |       0MiB /  95830MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+### Finished TaskPrologue
+
+Cell: RAD_l8r6_g8  lat_level=8  rad_level=6  lat_sdr=1  rad_sdr=1  subdomains=80  n_gpus=8  nodes=2x4  partition=h100
+[LOG | rank 1 | 2026-06-06 19:14:05] Rank 1: device id = 1, node = h13-07
+[LOG | rank 3 | 2026-06-06 19:14:05] Rank 3: device id = 3, node = h13-07
+[LOG | rank 2 | 2026-06-06 19:14:05] Rank 2: device id = 2, node = h13-07
+[LOG | rank 0 | 2026-06-06 19:14:05] =========================================
+[LOG | rank 0 | 2026-06-06 19:14:05]           TerraNeo - Run Info          
+[LOG | rank 0 | 2026-06-06 19:14:05] =========================================
+[LOG | rank 0 | 2026-06-06 19:14:05] Wall time start : 2026-06-06 19:14:05
+[LOG | rank 0 | 2026-06-06 19:14:05] Executable path : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/benchmark_operators"
+[LOG | rank 0 | 2026-06-06 19:14:05] Executable dir  : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance"
+[LOG | rank 0 | 2026-06-06 19:14:05] Working dir     : "/home/hpc/iwia/iwia054h/terraneo/apps/mantlecirculation/bench_mt/outputs/RAD_l8r6_g8"
+[LOG | rank 0 | 2026-06-06 19:14:05] Command line    : /home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/benchmark_operators --min-level 8 --max-level 8 --radial-extra-levels -2 --lat-sdr 1 --rad-sdr 1 --executions 30 --warmup 5
+[LOG | rank 0 | 2026-06-06 19:14:05] MPI processes   : 8
+[LOG | rank 0 | 2026-06-06 19:14:05] MPI rank        : 0
+[LOG | rank 0 | 2026-06-06 19:14:05] Kokkos threads  : 1
+[LOG | rank 0 | 2026-06-06 19:14:05] Kokkos devices  : 4
+[LOG | rank 0 | 2026-06-06 19:14:05] ExecSpace       : Cuda
+[LOG | rank 0 | 2026-06-06 19:14:05] MemSpace        : Cuda
+[LOG | rank 0 | 2026-06-06 19:14:05] Rank 0: device id = 0, node = h13-07
+[LOG | rank 0 | 2026-06-06 19:14:05] =========================================
+[LOG | rank 0 | 2026-06-06 19:14:05] 
+[LOG | rank 0 | 2026-06-06 19:14:05] 
+[LOG | rank 0 | 2026-06-06 19:14:05] Operator benchmark. Runs a couple of matrix-vector multiplications for various operators to get an idea of the throughput.
+[LOG | rank 0 | 2026-06-06 19:14:05] 
+[LOG | rank 0 | 2026-06-06 19:14:05] Name                           Count  Value      Default
+[LOG | rank 0 | 2026-06-06 19:14:05] ----------------------------------------------------------
+[LOG | rank 0 | 2026-06-06 19:14:05] --help                         0      (not set)  
+[LOG | rank 0 | 2026-06-06 19:14:05] --min-level                    1      8          1
+[LOG | rank 0 | 2026-06-06 19:14:05] --max-level                    1      8          6
+[LOG | rank 0 | 2026-06-06 19:14:05] --refinement-level-subdomains  0      (not set)  0
+[LOG | rank 0 | 2026-06-06 19:14:05] --executions                   1      30         5
+[LOG | rank 0 | 2026-06-06 19:14:05] --warmup                       1      5          5
+[LOG | rank 0 | 2026-06-06 19:14:05] --lat-tile                     0      (not set)  0
+[LOG | rank 0 | 2026-06-06 19:14:05] --r-tile                       0      (not set)  0
+[LOG | rank 0 | 2026-06-06 19:14:05] --r-passes                     0      (not set)  0
+[LOG | rank 0 | 2026-06-06 19:14:05] --radial-extra-levels          1      -2         0
+[LOG | rank 0 | 2026-06-06 19:14:05] --lat-sdr                      1      1          -1
+[LOG | rank 0 | 2026-06-06 19:14:05] --rad-sdr                      1      1          -1
+[LOG | rank 0 | 2026-06-06 19:14:05] 
+[LOG | rank 0 | 2026-06-06 19:14:05] 
+[LOG | rank 0 | 2026-06-06 19:14:05] Running operator (matvec) benchmarks.
+[LOG | rank 0 | 2026-06-06 19:14:05] min_level:            8
+[LOG | rank 0 | 2026-06-06 19:14:05] max_level:            8
+[LOG | rank 0 | 2026-06-06 19:14:05] executions per level: 30
+[LOG | rank 0 | 2026-06-06 19:14:05] warmup iterations:    5
+[LOG | rank 0 | 2026-06-06 19:14:05] lat_sdr / rad_sdr:    1 / 1
+[LOG | rank 0 | 2026-06-06 19:14:05] radial_extra_levels:  -2
+[LOG | rank 0 | 2026-06-06 19:14:05] 
+[LOG | rank 0 | 2026-06-06 19:14:05] v10 seq r_passes (7.8 Gdofs)
+[LOG | rank 4 | 2026-06-06 19:14:05] Rank 4: device id = 0, node = h13-08
+[LOG | rank 6 | 2026-06-06 19:14:05] Rank 6: device id = 2, node = h13-08
+[LOG | rank 5 | 2026-06-06 19:14:05] Rank 5: device id = 1, node = h13-08
+[LOG | rank 7 | 2026-06-06 19:14:05] Rank 7: device id = 3, node = h13-08
+[LOG | rank 0 | 2026-06-06 19:14:05] Subdomain distribution: 
+[LOG | rank 0 | 2026-06-06 19:14:05]  - total: 80
+[LOG | rank 0 | 2026-06-06 19:14:05]  - min:   10
+[LOG | rank 0 | 2026-06-06 19:14:05]  - avg:   10
+[LOG | rank 0 | 2026-06-06 19:14:05]  - max:   10
+[LOG | rank 0 | 2026-06-06 19:14:05] 
+[LOG | rank 0 | 2026-06-06 19:14:06] [EpsilonDivDiv] tile size (x,y,r)=(4,4,8), r_passes=2
+[LOG | rank 0 | 2026-06-06 19:14:06] [EpsilonDivDiv] number of tiles (x,y,r)=(32,32,2), team_size=128, blocks=20480
+[LOG | rank 0 | 2026-06-06 19:14:06] [EpsilonDivDiv] kernel path = fast-dirichlet-neumann
+[LOG | rank 0 | 2026-06-06 19:14:06] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-06-06 19:14:06] |      dofs | duration (s) | id | level |           timestamp | updated dofs/sec |
+[LOG | rank 0 | 2026-06-06 19:14:06] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-06-06 19:14:06] | 127795590 |    3.058e-03 |  0 |     8 | 2026-06-06 19:14:06 |        4.178e+10 |
+[LOG | rank 0 | 2026-06-06 19:14:06] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-06-06 19:14:06] dofs,duration (s),id,level,timestamp,updated dofs/sec
+[LOG | rank 0 | 2026-06-06 19:14:06] 127795590,3.058e-03,0,8,2026-06-06 19:14:06,4.178e+10
+[LOG | rank 0 | 2026-06-06 19:14:06] 
+[LOG | rank 0 | 2026-06-06 19:14:06] 
+=== JOB_STATISTICS ===
+=== current date     : Sat Jun  6 19:14:07 CEST 2026
+= Job-ID             : 488591 on helma
+= Job-Name           : bench_RAD_l8r6_g8
+= Job-Command        : /home/hpc/iwia/iwia054h/terraneo/apps/mantlecirculation/bench_mt/jobs/bench_RAD_l8r6_g8.sh
+= Initial workdir    : /home/hpc/iwia/iwia054h/terraneo/apps/mantlecirculation/bench_mt/jobs
+= Queue/Partition    : h100
+= Slurm account      : iwia with QOS=normal
+= Requested resources: cpu=256,mem=1400G,node=2,billing=256,gres/gpu=8,gres/gpu:h100=8 for 00:15:00
+= Elapsed runtime    : 00:00:06
+= Total RAM usage    : 2.6 GiB of assigned 1400 GiB (0.2%)
+= Node list          : h13-[07-08]
+= Subm/Elig/Start/End: 2026-06-06T19:12:37 / 2026-06-06T19:12:37 / 2026-06-06T19:14:01 / 2026-06-06T19:14:07
+======================
+=== Quota infos ======
+    Path                 Used     SoftQ    HardQ    Gracetime  Filec    FileQ    FiHaQ    FileGrace    
+    /home/hpc              92.8G   104.9G   209.7G        N/A     280K     500K   1,000K        N/A    
+    /hnvme               2306.9G     0.0K     0.0K        N/A  24,826       61K      81K        N/A    
+======================
+=== GPU utilization ==
+gpu_name, gpu_bus_id, pid, gpu_utilization [%], mem_utilization [%], max_memory_usage [MiB], time [ms]
+NVIDIA H100, 00000000:06:00.0, 30990, 3 %, 0 %, 1638 MiB, 2957 ms
+NVIDIA H100, 00000000:26:00.0, 30991, 2 %, 0 %, 1638 MiB, 3004 ms
+NVIDIA H100, 00000000:A6:00.0, 30992, 2 %, 0 %, 1638 MiB, 3016 ms
+NVIDIA H100, 00000000:C6:00.0, 30993, 3 %, 0 %, 1638 MiB, 2978 ms

@@ -142,7 +142,7 @@ int main( int argc, char** argv )
             const int ny   = nx;
 
             const auto t = build_2to1_tables( dom, nx, ny, nr ); // must NOT throw
-            CHECK( !t.con_np.empty() );                          // seam-hanging nodes exist
+            CHECK( !t.con_dst.empty() );                          // seam-hanging nodes exist
 
             // Constraint rows are now local to each fine block (parents = own even nodes), so the
             // cross-diamond coupling lives in the ASSEMBLY: some node class must span diamonds -- that
@@ -150,9 +150,9 @@ int main( int argc, char** argv )
             auto diamond_of_sub = [&]( int s ) {
                 return dom.subdomain_info_from_local_idx( s ).diamond_id();
             };
-            for ( std::size_t i = 0; i < t.con_np.size(); ++i )   // constraint rows stay in-diamond
-                for ( int p = 0; p < t.con_np[i]; ++p )
-                    CHECK( diamond_of_sub( t.con_dst[i].s ) == diamond_of_sub( t.con_src[i][p].s ) );
+            for ( std::size_t i = 0; i < t.con_dst.size(); ++i )   // constraint rows stay in-diamond
+                for ( int p = t.con_off[i]; p < t.con_off[i + 1]; ++p )
+                    CHECK( diamond_of_sub( t.con_dst[i].s ) == diamond_of_sub( t.con_par[p].s ) );
             bool cross_diamond_class = false;                     // but a class crosses the seam
             for ( std::size_t c = 0; c + 1 < t.cls_offsets.size(); ++c )
             {
@@ -206,7 +206,7 @@ int main( int argc, char** argv )
             const int nr = dom.domain_info().subdomain_num_nodes_radially();
 
             const auto t = build_2to1_tables( dom, nx, nx, nr ); // must NOT throw
-            CHECK( t.con_np.empty() );                           // fully conforming: no hanging nodes
+            CHECK( t.con_dst.empty() );                           // fully conforming: no hanging nodes
 
             Field field( (int) dom.subdomains().size(), nx, nx, nr ); // all ones
             apply_exchange_tables( t, field );
@@ -230,7 +230,7 @@ int main( int argc, char** argv )
             const int ny   = nx;
 
             const auto t = build_2to1_tables( dom, nx, ny, nr );
-            CHECK( !t.con_np.empty() );
+            CHECK( !t.con_dst.empty() );
             CHECK( !t.cls_members.empty() );
 
             Field field( nsub, nx, ny, nr ); // all ones
@@ -281,7 +281,7 @@ int main( int argc, char** argv )
             const int ny   = nx;
 
             const auto t = build_2to1_tables( dom, nx, ny, nr ); // must NOT throw
-            CHECK( t.con_np.empty() );                           // fully conforming: no hanging nodes
+            CHECK( t.con_dst.empty() );                           // fully conforming: no hanging nodes
 
             Field field( nsub, nx, ny, nr ); // all ones
             apply_exchange_tables( t, field );

@@ -108,13 +108,17 @@ struct FaceNeighbor
     bool       seam_reversed = false; // cross-diamond only; lateral in-face reversal
 };
 
-// What lies across a face: interior neighbor(s), the CMB/surface radial boundary, or a diamond seam.
+// What lies across a face. face_neighbors only ever sets Interior or DomainBoundary: a lateral diamond
+// seam is resolved INLINE (probe points are transformed into the neighbor diamond's frame) and reported
+// as Interior with the neighbor(s) filled in -- including finer neighbors, so seam-edge blocks refine
+// freely; node classes across the seam are merged later by union-find in build_2to1_tables. Only
+// pole/CORNER blocks (both lateral indices extreme) are restricted from non-conforming refinement
+// (see corner_guard in adaptive_exchange.hpp).
 enum class NeighborKind
 {
     Interior,
     DomainBoundary,  // radial: CMB or surface -- no neighbor
-    DiamondCrossing  // lateral diamond seam -- resolved later via the existing pole logic (Milestone A
-                     // keeps such blocks at subdivision 0, so this is only hit by base leaves)
+    DiamondCrossing  // reserved/unused: seam crossings are reported as Interior (see note above)
 };
 
 struct FaceNeighbors
@@ -271,7 +275,8 @@ class AdaptiveForest
     }
 
     // All neighbors across one face of `L`. Interior faces return 1 neighbor (same/coarser) or up to 4
-    // (finer). Radial-boundary faces return DomainBoundary; lateral diamond-seam faces DiamondCrossing.
+    // (finer). Radial-boundary faces return DomainBoundary. A lateral diamond seam is resolved inline
+    // (probe points transformed into the neighbor diamond's frame) and reported as Interior neighbors.
     // Detection: sample the 2x2 finer sub-face centers just outside the face (in the finest frame) and
     // look up which leaf covers each -- one distinct hit => same/coarser, four => finer.
     [[nodiscard]] FaceNeighbors face_neighbors( const ForestLeaf& L, Face f ) const

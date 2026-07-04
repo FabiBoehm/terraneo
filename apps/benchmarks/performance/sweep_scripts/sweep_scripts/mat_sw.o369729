@@ -1,0 +1,1551 @@
+### Starting TaskPrologue of job 369729 on h12-13 at Wed Apr 15 01:51:21 PM CEST 2026
+Running on cores 64-95 with governor performance
+Wed Apr 15 13:51:21 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 590.48.01              Driver Version: 590.48.01      CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA H100                    On  |   00000000:A6:00.0 Off |                    0 |
+| N/A   34C    P0             70W /  500W |       0MiB /  95830MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+### Finished TaskPrologue
+
+=== Matrix sweep lat × r (r_passes=1) ===
+--- (1,2,1) team=4 ---
+[LOG | rank 0 | 2026-04-15 13:51:24] =========================================
+[LOG | rank 0 | 2026-04-15 13:51:24]           TerraNeo - Run Info          
+[LOG | rank 0 | 2026-04-15 13:51:24] =========================================
+[LOG | rank 0 | 2026-04-15 13:51:24] Wall time start : 2026-04-15 13:51:24
+[LOG | rank 0 | 2026-04-15 13:51:24] Executable path : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators"
+[LOG | rank 0 | 2026-04-15 13:51:24] Executable dir  : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/."
+[LOG | rank 0 | 2026-04-15 13:51:24] Working dir     : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance"
+[LOG | rank 0 | 2026-04-15 13:51:24] Command line    : /home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators --min-level 8 --max-level 8 --executions 5 --lat-tile 1 --r-tile 2 --r-passes 1
+[LOG | rank 0 | 2026-04-15 13:51:24] MPI processes   : 1
+[LOG | rank 0 | 2026-04-15 13:51:24] MPI rank        : 0
+[LOG | rank 0 | 2026-04-15 13:51:24] Kokkos threads  : 32
+[LOG | rank 0 | 2026-04-15 13:51:24] Kokkos devices  : 1
+[LOG | rank 0 | 2026-04-15 13:51:24] ExecSpace       : Cuda
+[LOG | rank 0 | 2026-04-15 13:51:24] MemSpace        : Cuda
+[LOG | rank 0 | 2026-04-15 13:51:24] Rank 0: device id = 0, node = h12-13
+[LOG | rank 0 | 2026-04-15 13:51:24] =========================================
+[LOG | rank 0 | 2026-04-15 13:51:24] 
+[LOG | rank 0 | 2026-04-15 13:51:24] 
+[LOG | rank 0 | 2026-04-15 13:51:24] Operator benchmark. Runs a couple of matrix-vector multiplications for various operators to get an idea of the throughput.
+[LOG | rank 0 | 2026-04-15 13:51:24] 
+[LOG | rank 0 | 2026-04-15 13:51:24] Name                           Count  Value      Default
+[LOG | rank 0 | 2026-04-15 13:51:24] ----------------------------------------------------------
+[LOG | rank 0 | 2026-04-15 13:51:24] --help                         0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:51:24] --min-level                    1      8          1
+[LOG | rank 0 | 2026-04-15 13:51:24] --max-level                    1      8          6
+[LOG | rank 0 | 2026-04-15 13:51:24] --refinement-level-subdomains  0      (not set)  0
+[LOG | rank 0 | 2026-04-15 13:51:24] --executions                   1      5          5
+[LOG | rank 0 | 2026-04-15 13:51:24] --lat-tile                     1      1          0
+[LOG | rank 0 | 2026-04-15 13:51:24] --r-tile                       1      2          0
+[LOG | rank 0 | 2026-04-15 13:51:24] --r-passes                     1      1          0
+[LOG | rank 0 | 2026-04-15 13:51:24] --check-hip                    0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:51:24] 
+[LOG | rank 0 | 2026-04-15 13:51:24] 
+[LOG | rank 0 | 2026-04-15 13:51:24] Running operator (matvec) benchmarks.
+[LOG | rank 0 | 2026-04-15 13:51:24] min_level:            8
+[LOG | rank 0 | 2026-04-15 13:51:24] max_level:            8
+[LOG | rank 0 | 2026-04-15 13:51:24] executions per level: 5
+[LOG | rank 0 | 2026-04-15 13:51:24] refinement for subdomains 0
+[LOG | rank 0 | 2026-04-15 13:51:24] 
+[LOG | rank 0 | 2026-04-15 13:51:24] EpsDivDivKerngen Kokkos (double)
+[LOG | rank 0 | 2026-04-15 13:51:24] Subdomain distribution: 
+[LOG | rank 0 | 2026-04-15 13:51:24]  - total: 10
+[LOG | rank 0 | 2026-04-15 13:51:24]  - min:   10
+[LOG | rank 0 | 2026-04-15 13:51:24]  - avg:   10
+[LOG | rank 0 | 2026-04-15 13:51:24]  - max:   10
+[LOG | rank 0 | 2026-04-15 13:51:24] 
+[LOG | rank 0 | 2026-04-15 13:51:27] [EpsilonDivDiv] tile size (x,y,r)=(1,1,2), r_passes=1
+[LOG | rank 0 | 2026-04-15 13:51:27] [EpsilonDivDiv] number of tiles (x,y,r)=(256,256,128), team_size=2, blocks=83886080
+[LOG | rank 0 | 2026-04-15 13:51:27] [EpsilonDivDiv] kernel path = fast-dirichlet-neumann
+[LOG | rank 0 | 2026-04-15 13:51:29] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:51:29] |      dofs | duration (s) | id | level |           timestamp | updated dofs/sec |
+[LOG | rank 0 | 2026-04-15 13:51:29] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:51:29] | 505284102 |    4.718e-01 |  0 |     8 | 2026-04-15 13:51:29 |        1.071e+09 |
+[LOG | rank 0 | 2026-04-15 13:51:29] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:51:30] dofs,duration (s),id,level,timestamp,updated dofs/sec
+[LOG | rank 0 | 2026-04-15 13:51:30] 505284102,4.718e-01,0,8,2026-04-15 13:51:29,1.071e+09
+[LOG | rank 0 | 2026-04-15 13:51:30] 
+[LOG | rank 0 | 2026-04-15 13:51:30] 
+--- (1,4,1) team=8 ---
+[LOG | rank 0 | 2026-04-15 13:51:31] =========================================
+[LOG | rank 0 | 2026-04-15 13:51:31]           TerraNeo - Run Info          
+[LOG | rank 0 | 2026-04-15 13:51:31] =========================================
+[LOG | rank 0 | 2026-04-15 13:51:31] Wall time start : 2026-04-15 13:51:31
+[LOG | rank 0 | 2026-04-15 13:51:31] Executable path : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators"
+[LOG | rank 0 | 2026-04-15 13:51:31] Executable dir  : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/."
+[LOG | rank 0 | 2026-04-15 13:51:31] Working dir     : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance"
+[LOG | rank 0 | 2026-04-15 13:51:31] Command line    : /home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators --min-level 8 --max-level 8 --executions 5 --lat-tile 1 --r-tile 4 --r-passes 1
+[LOG | rank 0 | 2026-04-15 13:51:31] MPI processes   : 1
+[LOG | rank 0 | 2026-04-15 13:51:31] MPI rank        : 0
+[LOG | rank 0 | 2026-04-15 13:51:31] Kokkos threads  : 32
+[LOG | rank 0 | 2026-04-15 13:51:31] Kokkos devices  : 1
+[LOG | rank 0 | 2026-04-15 13:51:31] ExecSpace       : Cuda
+[LOG | rank 0 | 2026-04-15 13:51:31] MemSpace        : Cuda
+[LOG | rank 0 | 2026-04-15 13:51:31] Rank 0: device id = 0, node = h12-13
+[LOG | rank 0 | 2026-04-15 13:51:31] =========================================
+[LOG | rank 0 | 2026-04-15 13:51:31] 
+[LOG | rank 0 | 2026-04-15 13:51:31] 
+[LOG | rank 0 | 2026-04-15 13:51:31] Operator benchmark. Runs a couple of matrix-vector multiplications for various operators to get an idea of the throughput.
+[LOG | rank 0 | 2026-04-15 13:51:31] 
+[LOG | rank 0 | 2026-04-15 13:51:31] Name                           Count  Value      Default
+[LOG | rank 0 | 2026-04-15 13:51:31] ----------------------------------------------------------
+[LOG | rank 0 | 2026-04-15 13:51:31] --help                         0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:51:31] --min-level                    1      8          1
+[LOG | rank 0 | 2026-04-15 13:51:31] --max-level                    1      8          6
+[LOG | rank 0 | 2026-04-15 13:51:31] --refinement-level-subdomains  0      (not set)  0
+[LOG | rank 0 | 2026-04-15 13:51:31] --executions                   1      5          5
+[LOG | rank 0 | 2026-04-15 13:51:31] --lat-tile                     1      1          0
+[LOG | rank 0 | 2026-04-15 13:51:31] --r-tile                       1      4          0
+[LOG | rank 0 | 2026-04-15 13:51:31] --r-passes                     1      1          0
+[LOG | rank 0 | 2026-04-15 13:51:31] --check-hip                    0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:51:31] 
+[LOG | rank 0 | 2026-04-15 13:51:31] 
+[LOG | rank 0 | 2026-04-15 13:51:31] Running operator (matvec) benchmarks.
+[LOG | rank 0 | 2026-04-15 13:51:31] min_level:            8
+[LOG | rank 0 | 2026-04-15 13:51:31] max_level:            8
+[LOG | rank 0 | 2026-04-15 13:51:31] executions per level: 5
+[LOG | rank 0 | 2026-04-15 13:51:31] refinement for subdomains 0
+[LOG | rank 0 | 2026-04-15 13:51:31] 
+[LOG | rank 0 | 2026-04-15 13:51:31] EpsDivDivKerngen Kokkos (double)
+[LOG | rank 0 | 2026-04-15 13:51:31] Subdomain distribution: 
+[LOG | rank 0 | 2026-04-15 13:51:31]  - total: 10
+[LOG | rank 0 | 2026-04-15 13:51:31]  - min:   10
+[LOG | rank 0 | 2026-04-15 13:51:31]  - avg:   10
+[LOG | rank 0 | 2026-04-15 13:51:31]  - max:   10
+[LOG | rank 0 | 2026-04-15 13:51:31] 
+[LOG | rank 0 | 2026-04-15 13:51:34] [EpsilonDivDiv] tile size (x,y,r)=(1,1,4), r_passes=1
+[LOG | rank 0 | 2026-04-15 13:51:34] [EpsilonDivDiv] number of tiles (x,y,r)=(256,256,64), team_size=4, blocks=41943040
+[LOG | rank 0 | 2026-04-15 13:51:34] [EpsilonDivDiv] kernel path = fast-dirichlet-neumann
+[LOG | rank 0 | 2026-04-15 13:51:35] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:51:35] |      dofs | duration (s) | id | level |           timestamp | updated dofs/sec |
+[LOG | rank 0 | 2026-04-15 13:51:35] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:51:35] | 505284102 |    2.342e-01 |  0 |     8 | 2026-04-15 13:51:35 |        2.157e+09 |
+[LOG | rank 0 | 2026-04-15 13:51:35] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:51:35] dofs,duration (s),id,level,timestamp,updated dofs/sec
+[LOG | rank 0 | 2026-04-15 13:51:35] 505284102,2.342e-01,0,8,2026-04-15 13:51:35,2.157e+09
+[LOG | rank 0 | 2026-04-15 13:51:35] 
+[LOG | rank 0 | 2026-04-15 13:51:35] 
+--- (1,8,1) team=16 ---
+[LOG | rank 0 | 2026-04-15 13:51:37] =========================================
+[LOG | rank 0 | 2026-04-15 13:51:37]           TerraNeo - Run Info          
+[LOG | rank 0 | 2026-04-15 13:51:37] =========================================
+[LOG | rank 0 | 2026-04-15 13:51:37] Wall time start : 2026-04-15 13:51:37
+[LOG | rank 0 | 2026-04-15 13:51:37] Executable path : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators"
+[LOG | rank 0 | 2026-04-15 13:51:37] Executable dir  : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/."
+[LOG | rank 0 | 2026-04-15 13:51:37] Working dir     : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance"
+[LOG | rank 0 | 2026-04-15 13:51:37] Command line    : /home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators --min-level 8 --max-level 8 --executions 5 --lat-tile 1 --r-tile 8 --r-passes 1
+[LOG | rank 0 | 2026-04-15 13:51:37] MPI processes   : 1
+[LOG | rank 0 | 2026-04-15 13:51:37] MPI rank        : 0
+[LOG | rank 0 | 2026-04-15 13:51:37] Kokkos threads  : 32
+[LOG | rank 0 | 2026-04-15 13:51:37] Kokkos devices  : 1
+[LOG | rank 0 | 2026-04-15 13:51:37] ExecSpace       : Cuda
+[LOG | rank 0 | 2026-04-15 13:51:37] MemSpace        : Cuda
+[LOG | rank 0 | 2026-04-15 13:51:37] Rank 0: device id = 0, node = h12-13
+[LOG | rank 0 | 2026-04-15 13:51:37] =========================================
+[LOG | rank 0 | 2026-04-15 13:51:37] 
+[LOG | rank 0 | 2026-04-15 13:51:37] 
+[LOG | rank 0 | 2026-04-15 13:51:37] Operator benchmark. Runs a couple of matrix-vector multiplications for various operators to get an idea of the throughput.
+[LOG | rank 0 | 2026-04-15 13:51:37] 
+[LOG | rank 0 | 2026-04-15 13:51:37] Name                           Count  Value      Default
+[LOG | rank 0 | 2026-04-15 13:51:37] ----------------------------------------------------------
+[LOG | rank 0 | 2026-04-15 13:51:37] --help                         0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:51:37] --min-level                    1      8          1
+[LOG | rank 0 | 2026-04-15 13:51:37] --max-level                    1      8          6
+[LOG | rank 0 | 2026-04-15 13:51:37] --refinement-level-subdomains  0      (not set)  0
+[LOG | rank 0 | 2026-04-15 13:51:37] --executions                   1      5          5
+[LOG | rank 0 | 2026-04-15 13:51:37] --lat-tile                     1      1          0
+[LOG | rank 0 | 2026-04-15 13:51:37] --r-tile                       1      8          0
+[LOG | rank 0 | 2026-04-15 13:51:37] --r-passes                     1      1          0
+[LOG | rank 0 | 2026-04-15 13:51:37] --check-hip                    0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:51:37] 
+[LOG | rank 0 | 2026-04-15 13:51:37] 
+[LOG | rank 0 | 2026-04-15 13:51:37] Running operator (matvec) benchmarks.
+[LOG | rank 0 | 2026-04-15 13:51:37] min_level:            8
+[LOG | rank 0 | 2026-04-15 13:51:37] max_level:            8
+[LOG | rank 0 | 2026-04-15 13:51:37] executions per level: 5
+[LOG | rank 0 | 2026-04-15 13:51:37] refinement for subdomains 0
+[LOG | rank 0 | 2026-04-15 13:51:37] 
+[LOG | rank 0 | 2026-04-15 13:51:37] EpsDivDivKerngen Kokkos (double)
+[LOG | rank 0 | 2026-04-15 13:51:37] Subdomain distribution: 
+[LOG | rank 0 | 2026-04-15 13:51:37]  - total: 10
+[LOG | rank 0 | 2026-04-15 13:51:37]  - min:   10
+[LOG | rank 0 | 2026-04-15 13:51:37]  - avg:   10
+[LOG | rank 0 | 2026-04-15 13:51:37]  - max:   10
+[LOG | rank 0 | 2026-04-15 13:51:37] 
+[LOG | rank 0 | 2026-04-15 13:51:40] [EpsilonDivDiv] tile size (x,y,r)=(1,1,8), r_passes=1
+[LOG | rank 0 | 2026-04-15 13:51:40] [EpsilonDivDiv] number of tiles (x,y,r)=(256,256,32), team_size=8, blocks=20971520
+[LOG | rank 0 | 2026-04-15 13:51:40] [EpsilonDivDiv] kernel path = fast-dirichlet-neumann
+[LOG | rank 0 | 2026-04-15 13:51:40] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:51:40] |      dofs | duration (s) | id | level |           timestamp | updated dofs/sec |
+[LOG | rank 0 | 2026-04-15 13:51:40] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:51:40] | 505284102 |    1.231e-01 |  0 |     8 | 2026-04-15 13:51:40 |        4.104e+09 |
+[LOG | rank 0 | 2026-04-15 13:51:40] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:51:40] dofs,duration (s),id,level,timestamp,updated dofs/sec
+[LOG | rank 0 | 2026-04-15 13:51:40] 505284102,1.231e-01,0,8,2026-04-15 13:51:40,4.104e+09
+[LOG | rank 0 | 2026-04-15 13:51:40] 
+[LOG | rank 0 | 2026-04-15 13:51:40] 
+--- (1,16,1) team=32 ---
+[LOG | rank 0 | 2026-04-15 13:51:42] =========================================
+[LOG | rank 0 | 2026-04-15 13:51:42]           TerraNeo - Run Info          
+[LOG | rank 0 | 2026-04-15 13:51:42] =========================================
+[LOG | rank 0 | 2026-04-15 13:51:42] Wall time start : 2026-04-15 13:51:42
+[LOG | rank 0 | 2026-04-15 13:51:42] Executable path : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators"
+[LOG | rank 0 | 2026-04-15 13:51:42] Executable dir  : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/."
+[LOG | rank 0 | 2026-04-15 13:51:42] Working dir     : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance"
+[LOG | rank 0 | 2026-04-15 13:51:42] Command line    : /home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators --min-level 8 --max-level 8 --executions 5 --lat-tile 1 --r-tile 16 --r-passes 1
+[LOG | rank 0 | 2026-04-15 13:51:42] MPI processes   : 1
+[LOG | rank 0 | 2026-04-15 13:51:42] MPI rank        : 0
+[LOG | rank 0 | 2026-04-15 13:51:42] Kokkos threads  : 32
+[LOG | rank 0 | 2026-04-15 13:51:42] Kokkos devices  : 1
+[LOG | rank 0 | 2026-04-15 13:51:42] ExecSpace       : Cuda
+[LOG | rank 0 | 2026-04-15 13:51:42] MemSpace        : Cuda
+[LOG | rank 0 | 2026-04-15 13:51:42] Rank 0: device id = 0, node = h12-13
+[LOG | rank 0 | 2026-04-15 13:51:42] =========================================
+[LOG | rank 0 | 2026-04-15 13:51:42] 
+[LOG | rank 0 | 2026-04-15 13:51:42] 
+[LOG | rank 0 | 2026-04-15 13:51:42] Operator benchmark. Runs a couple of matrix-vector multiplications for various operators to get an idea of the throughput.
+[LOG | rank 0 | 2026-04-15 13:51:42] 
+[LOG | rank 0 | 2026-04-15 13:51:42] Name                           Count  Value      Default
+[LOG | rank 0 | 2026-04-15 13:51:42] ----------------------------------------------------------
+[LOG | rank 0 | 2026-04-15 13:51:42] --help                         0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:51:42] --min-level                    1      8          1
+[LOG | rank 0 | 2026-04-15 13:51:42] --max-level                    1      8          6
+[LOG | rank 0 | 2026-04-15 13:51:42] --refinement-level-subdomains  0      (not set)  0
+[LOG | rank 0 | 2026-04-15 13:51:42] --executions                   1      5          5
+[LOG | rank 0 | 2026-04-15 13:51:42] --lat-tile                     1      1          0
+[LOG | rank 0 | 2026-04-15 13:51:42] --r-tile                       1      16         0
+[LOG | rank 0 | 2026-04-15 13:51:42] --r-passes                     1      1          0
+[LOG | rank 0 | 2026-04-15 13:51:42] --check-hip                    0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:51:42] 
+[LOG | rank 0 | 2026-04-15 13:51:42] 
+[LOG | rank 0 | 2026-04-15 13:51:42] Running operator (matvec) benchmarks.
+[LOG | rank 0 | 2026-04-15 13:51:42] min_level:            8
+[LOG | rank 0 | 2026-04-15 13:51:42] max_level:            8
+[LOG | rank 0 | 2026-04-15 13:51:42] executions per level: 5
+[LOG | rank 0 | 2026-04-15 13:51:42] refinement for subdomains 0
+[LOG | rank 0 | 2026-04-15 13:51:42] 
+[LOG | rank 0 | 2026-04-15 13:51:42] EpsDivDivKerngen Kokkos (double)
+[LOG | rank 0 | 2026-04-15 13:51:42] Subdomain distribution: 
+[LOG | rank 0 | 2026-04-15 13:51:42]  - total: 10
+[LOG | rank 0 | 2026-04-15 13:51:42]  - min:   10
+[LOG | rank 0 | 2026-04-15 13:51:42]  - avg:   10
+[LOG | rank 0 | 2026-04-15 13:51:42]  - max:   10
+[LOG | rank 0 | 2026-04-15 13:51:42] 
+[LOG | rank 0 | 2026-04-15 13:51:45] [EpsilonDivDiv] tile size (x,y,r)=(1,1,16), r_passes=1
+[LOG | rank 0 | 2026-04-15 13:51:45] [EpsilonDivDiv] number of tiles (x,y,r)=(256,256,16), team_size=16, blocks=10485760
+[LOG | rank 0 | 2026-04-15 13:51:45] [EpsilonDivDiv] kernel path = fast-dirichlet-neumann
+[LOG | rank 0 | 2026-04-15 13:51:45] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:51:45] |      dofs | duration (s) | id | level |           timestamp | updated dofs/sec |
+[LOG | rank 0 | 2026-04-15 13:51:45] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:51:45] | 505284102 |    6.944e-02 |  0 |     8 | 2026-04-15 13:51:45 |        7.276e+09 |
+[LOG | rank 0 | 2026-04-15 13:51:45] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:51:45] dofs,duration (s),id,level,timestamp,updated dofs/sec
+[LOG | rank 0 | 2026-04-15 13:51:45] 505284102,6.944e-02,0,8,2026-04-15 13:51:45,7.276e+09
+[LOG | rank 0 | 2026-04-15 13:51:45] 
+[LOG | rank 0 | 2026-04-15 13:51:45] 
+--- (1,32,1) team=64 ---
+[LOG | rank 0 | 2026-04-15 13:51:47] =========================================
+[LOG | rank 0 | 2026-04-15 13:51:47]           TerraNeo - Run Info          
+[LOG | rank 0 | 2026-04-15 13:51:47] =========================================
+[LOG | rank 0 | 2026-04-15 13:51:47] Wall time start : 2026-04-15 13:51:47
+[LOG | rank 0 | 2026-04-15 13:51:47] Executable path : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators"
+[LOG | rank 0 | 2026-04-15 13:51:47] Executable dir  : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/."
+[LOG | rank 0 | 2026-04-15 13:51:47] Working dir     : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance"
+[LOG | rank 0 | 2026-04-15 13:51:47] Command line    : /home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators --min-level 8 --max-level 8 --executions 5 --lat-tile 1 --r-tile 32 --r-passes 1
+[LOG | rank 0 | 2026-04-15 13:51:47] MPI processes   : 1
+[LOG | rank 0 | 2026-04-15 13:51:47] MPI rank        : 0
+[LOG | rank 0 | 2026-04-15 13:51:47] Kokkos threads  : 32
+[LOG | rank 0 | 2026-04-15 13:51:47] Kokkos devices  : 1
+[LOG | rank 0 | 2026-04-15 13:51:47] ExecSpace       : Cuda
+[LOG | rank 0 | 2026-04-15 13:51:47] MemSpace        : Cuda
+[LOG | rank 0 | 2026-04-15 13:51:47] Rank 0: device id = 0, node = h12-13
+[LOG | rank 0 | 2026-04-15 13:51:47] =========================================
+[LOG | rank 0 | 2026-04-15 13:51:47] 
+[LOG | rank 0 | 2026-04-15 13:51:47] 
+[LOG | rank 0 | 2026-04-15 13:51:47] Operator benchmark. Runs a couple of matrix-vector multiplications for various operators to get an idea of the throughput.
+[LOG | rank 0 | 2026-04-15 13:51:47] 
+[LOG | rank 0 | 2026-04-15 13:51:47] Name                           Count  Value      Default
+[LOG | rank 0 | 2026-04-15 13:51:47] ----------------------------------------------------------
+[LOG | rank 0 | 2026-04-15 13:51:47] --help                         0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:51:47] --min-level                    1      8          1
+[LOG | rank 0 | 2026-04-15 13:51:47] --max-level                    1      8          6
+[LOG | rank 0 | 2026-04-15 13:51:47] --refinement-level-subdomains  0      (not set)  0
+[LOG | rank 0 | 2026-04-15 13:51:47] --executions                   1      5          5
+[LOG | rank 0 | 2026-04-15 13:51:47] --lat-tile                     1      1          0
+[LOG | rank 0 | 2026-04-15 13:51:47] --r-tile                       1      32         0
+[LOG | rank 0 | 2026-04-15 13:51:47] --r-passes                     1      1          0
+[LOG | rank 0 | 2026-04-15 13:51:47] --check-hip                    0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:51:47] 
+[LOG | rank 0 | 2026-04-15 13:51:47] 
+[LOG | rank 0 | 2026-04-15 13:51:47] Running operator (matvec) benchmarks.
+[LOG | rank 0 | 2026-04-15 13:51:47] min_level:            8
+[LOG | rank 0 | 2026-04-15 13:51:47] max_level:            8
+[LOG | rank 0 | 2026-04-15 13:51:47] executions per level: 5
+[LOG | rank 0 | 2026-04-15 13:51:47] refinement for subdomains 0
+[LOG | rank 0 | 2026-04-15 13:51:47] 
+[LOG | rank 0 | 2026-04-15 13:51:47] EpsDivDivKerngen Kokkos (double)
+[LOG | rank 0 | 2026-04-15 13:51:47] Subdomain distribution: 
+[LOG | rank 0 | 2026-04-15 13:51:47]  - total: 10
+[LOG | rank 0 | 2026-04-15 13:51:47]  - min:   10
+[LOG | rank 0 | 2026-04-15 13:51:47]  - avg:   10
+[LOG | rank 0 | 2026-04-15 13:51:47]  - max:   10
+[LOG | rank 0 | 2026-04-15 13:51:47] 
+[LOG | rank 0 | 2026-04-15 13:51:50] [EpsilonDivDiv] tile size (x,y,r)=(1,1,32), r_passes=1
+[LOG | rank 0 | 2026-04-15 13:51:50] [EpsilonDivDiv] number of tiles (x,y,r)=(256,256,8), team_size=32, blocks=5242880
+[LOG | rank 0 | 2026-04-15 13:51:50] [EpsilonDivDiv] kernel path = fast-dirichlet-neumann
+[LOG | rank 0 | 2026-04-15 13:51:50] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:51:50] |      dofs | duration (s) | id | level |           timestamp | updated dofs/sec |
+[LOG | rank 0 | 2026-04-15 13:51:50] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:51:50] | 505284102 |    4.814e-02 |  0 |     8 | 2026-04-15 13:51:50 |        1.050e+10 |
+[LOG | rank 0 | 2026-04-15 13:51:50] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:51:50] dofs,duration (s),id,level,timestamp,updated dofs/sec
+[LOG | rank 0 | 2026-04-15 13:51:50] 505284102,4.814e-02,0,8,2026-04-15 13:51:50,1.050e+10
+[LOG | rank 0 | 2026-04-15 13:51:50] 
+[LOG | rank 0 | 2026-04-15 13:51:50] 
+--- (1,64,1) team=128 ---
+[LOG | rank 0 | 2026-04-15 13:51:51] =========================================
+[LOG | rank 0 | 2026-04-15 13:51:51]           TerraNeo - Run Info          
+[LOG | rank 0 | 2026-04-15 13:51:51] =========================================
+[LOG | rank 0 | 2026-04-15 13:51:51] Wall time start : 2026-04-15 13:51:51
+[LOG | rank 0 | 2026-04-15 13:51:51] Executable path : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators"
+[LOG | rank 0 | 2026-04-15 13:51:51] Executable dir  : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/."
+[LOG | rank 0 | 2026-04-15 13:51:51] Working dir     : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance"
+[LOG | rank 0 | 2026-04-15 13:51:51] Command line    : /home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators --min-level 8 --max-level 8 --executions 5 --lat-tile 1 --r-tile 64 --r-passes 1
+[LOG | rank 0 | 2026-04-15 13:51:51] MPI processes   : 1
+[LOG | rank 0 | 2026-04-15 13:51:51] MPI rank        : 0
+[LOG | rank 0 | 2026-04-15 13:51:51] Kokkos threads  : 32
+[LOG | rank 0 | 2026-04-15 13:51:51] Kokkos devices  : 1
+[LOG | rank 0 | 2026-04-15 13:51:51] ExecSpace       : Cuda
+[LOG | rank 0 | 2026-04-15 13:51:51] MemSpace        : Cuda
+[LOG | rank 0 | 2026-04-15 13:51:51] Rank 0: device id = 0, node = h12-13
+[LOG | rank 0 | 2026-04-15 13:51:51] =========================================
+[LOG | rank 0 | 2026-04-15 13:51:51] 
+[LOG | rank 0 | 2026-04-15 13:51:51] 
+[LOG | rank 0 | 2026-04-15 13:51:51] Operator benchmark. Runs a couple of matrix-vector multiplications for various operators to get an idea of the throughput.
+[LOG | rank 0 | 2026-04-15 13:51:51] 
+[LOG | rank 0 | 2026-04-15 13:51:51] Name                           Count  Value      Default
+[LOG | rank 0 | 2026-04-15 13:51:51] ----------------------------------------------------------
+[LOG | rank 0 | 2026-04-15 13:51:51] --help                         0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:51:51] --min-level                    1      8          1
+[LOG | rank 0 | 2026-04-15 13:51:51] --max-level                    1      8          6
+[LOG | rank 0 | 2026-04-15 13:51:51] --refinement-level-subdomains  0      (not set)  0
+[LOG | rank 0 | 2026-04-15 13:51:51] --executions                   1      5          5
+[LOG | rank 0 | 2026-04-15 13:51:51] --lat-tile                     1      1          0
+[LOG | rank 0 | 2026-04-15 13:51:51] --r-tile                       1      64         0
+[LOG | rank 0 | 2026-04-15 13:51:51] --r-passes                     1      1          0
+[LOG | rank 0 | 2026-04-15 13:51:51] --check-hip                    0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:51:51] 
+[LOG | rank 0 | 2026-04-15 13:51:51] 
+[LOG | rank 0 | 2026-04-15 13:51:51] Running operator (matvec) benchmarks.
+[LOG | rank 0 | 2026-04-15 13:51:51] min_level:            8
+[LOG | rank 0 | 2026-04-15 13:51:51] max_level:            8
+[LOG | rank 0 | 2026-04-15 13:51:51] executions per level: 5
+[LOG | rank 0 | 2026-04-15 13:51:51] refinement for subdomains 0
+[LOG | rank 0 | 2026-04-15 13:51:51] 
+[LOG | rank 0 | 2026-04-15 13:51:51] EpsDivDivKerngen Kokkos (double)
+[LOG | rank 0 | 2026-04-15 13:51:51] Subdomain distribution: 
+[LOG | rank 0 | 2026-04-15 13:51:51]  - total: 10
+[LOG | rank 0 | 2026-04-15 13:51:51]  - min:   10
+[LOG | rank 0 | 2026-04-15 13:51:51]  - avg:   10
+[LOG | rank 0 | 2026-04-15 13:51:51]  - max:   10
+[LOG | rank 0 | 2026-04-15 13:51:51] 
+[LOG | rank 0 | 2026-04-15 13:51:55] [EpsilonDivDiv] tile size (x,y,r)=(1,1,64), r_passes=1
+[LOG | rank 0 | 2026-04-15 13:51:55] [EpsilonDivDiv] number of tiles (x,y,r)=(256,256,4), team_size=64, blocks=2621440
+[LOG | rank 0 | 2026-04-15 13:51:55] [EpsilonDivDiv] kernel path = fast-dirichlet-neumann
+[LOG | rank 0 | 2026-04-15 13:51:55] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:51:55] |      dofs | duration (s) | id | level |           timestamp | updated dofs/sec |
+[LOG | rank 0 | 2026-04-15 13:51:55] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:51:55] | 505284102 |    4.765e-02 |  0 |     8 | 2026-04-15 13:51:55 |        1.060e+10 |
+[LOG | rank 0 | 2026-04-15 13:51:55] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:51:55] dofs,duration (s),id,level,timestamp,updated dofs/sec
+[LOG | rank 0 | 2026-04-15 13:51:55] 505284102,4.765e-02,0,8,2026-04-15 13:51:55,1.060e+10
+[LOG | rank 0 | 2026-04-15 13:51:55] 
+[LOG | rank 0 | 2026-04-15 13:51:55] 
+--- (2,2,1) team=16 ---
+[LOG | rank 0 | 2026-04-15 13:51:56] =========================================
+[LOG | rank 0 | 2026-04-15 13:51:56]           TerraNeo - Run Info          
+[LOG | rank 0 | 2026-04-15 13:51:56] =========================================
+[LOG | rank 0 | 2026-04-15 13:51:56] Wall time start : 2026-04-15 13:51:56
+[LOG | rank 0 | 2026-04-15 13:51:56] Executable path : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators"
+[LOG | rank 0 | 2026-04-15 13:51:56] Executable dir  : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/."
+[LOG | rank 0 | 2026-04-15 13:51:56] Working dir     : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance"
+[LOG | rank 0 | 2026-04-15 13:51:56] Command line    : /home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators --min-level 8 --max-level 8 --executions 5 --lat-tile 2 --r-tile 2 --r-passes 1
+[LOG | rank 0 | 2026-04-15 13:51:56] MPI processes   : 1
+[LOG | rank 0 | 2026-04-15 13:51:56] MPI rank        : 0
+[LOG | rank 0 | 2026-04-15 13:51:56] Kokkos threads  : 32
+[LOG | rank 0 | 2026-04-15 13:51:56] Kokkos devices  : 1
+[LOG | rank 0 | 2026-04-15 13:51:56] ExecSpace       : Cuda
+[LOG | rank 0 | 2026-04-15 13:51:56] MemSpace        : Cuda
+[LOG | rank 0 | 2026-04-15 13:51:56] Rank 0: device id = 0, node = h12-13
+[LOG | rank 0 | 2026-04-15 13:51:56] =========================================
+[LOG | rank 0 | 2026-04-15 13:51:56] 
+[LOG | rank 0 | 2026-04-15 13:51:56] 
+[LOG | rank 0 | 2026-04-15 13:51:56] Operator benchmark. Runs a couple of matrix-vector multiplications for various operators to get an idea of the throughput.
+[LOG | rank 0 | 2026-04-15 13:51:56] 
+[LOG | rank 0 | 2026-04-15 13:51:56] Name                           Count  Value      Default
+[LOG | rank 0 | 2026-04-15 13:51:56] ----------------------------------------------------------
+[LOG | rank 0 | 2026-04-15 13:51:56] --help                         0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:51:56] --min-level                    1      8          1
+[LOG | rank 0 | 2026-04-15 13:51:56] --max-level                    1      8          6
+[LOG | rank 0 | 2026-04-15 13:51:56] --refinement-level-subdomains  0      (not set)  0
+[LOG | rank 0 | 2026-04-15 13:51:56] --executions                   1      5          5
+[LOG | rank 0 | 2026-04-15 13:51:56] --lat-tile                     1      2          0
+[LOG | rank 0 | 2026-04-15 13:51:56] --r-tile                       1      2          0
+[LOG | rank 0 | 2026-04-15 13:51:56] --r-passes                     1      1          0
+[LOG | rank 0 | 2026-04-15 13:51:56] --check-hip                    0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:51:56] 
+[LOG | rank 0 | 2026-04-15 13:51:56] 
+[LOG | rank 0 | 2026-04-15 13:51:56] Running operator (matvec) benchmarks.
+[LOG | rank 0 | 2026-04-15 13:51:56] min_level:            8
+[LOG | rank 0 | 2026-04-15 13:51:56] max_level:            8
+[LOG | rank 0 | 2026-04-15 13:51:56] executions per level: 5
+[LOG | rank 0 | 2026-04-15 13:51:56] refinement for subdomains 0
+[LOG | rank 0 | 2026-04-15 13:51:56] 
+[LOG | rank 0 | 2026-04-15 13:51:56] EpsDivDivKerngen Kokkos (double)
+[LOG | rank 0 | 2026-04-15 13:51:56] Subdomain distribution: 
+[LOG | rank 0 | 2026-04-15 13:51:56]  - total: 10
+[LOG | rank 0 | 2026-04-15 13:51:56]  - min:   10
+[LOG | rank 0 | 2026-04-15 13:51:56]  - avg:   10
+[LOG | rank 0 | 2026-04-15 13:51:56]  - max:   10
+[LOG | rank 0 | 2026-04-15 13:51:56] 
+[LOG | rank 0 | 2026-04-15 13:51:59] [EpsilonDivDiv] tile size (x,y,r)=(2,2,2), r_passes=1
+[LOG | rank 0 | 2026-04-15 13:51:59] [EpsilonDivDiv] number of tiles (x,y,r)=(128,128,128), team_size=8, blocks=20971520
+[LOG | rank 0 | 2026-04-15 13:51:59] [EpsilonDivDiv] kernel path = fast-dirichlet-neumann
+[LOG | rank 0 | 2026-04-15 13:52:00] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:00] |      dofs | duration (s) | id | level |           timestamp | updated dofs/sec |
+[LOG | rank 0 | 2026-04-15 13:52:00] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:00] | 505284102 |    1.176e-01 |  0 |     8 | 2026-04-15 13:52:00 |        4.297e+09 |
+[LOG | rank 0 | 2026-04-15 13:52:00] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:00] dofs,duration (s),id,level,timestamp,updated dofs/sec
+[LOG | rank 0 | 2026-04-15 13:52:00] 505284102,1.176e-01,0,8,2026-04-15 13:52:00,4.297e+09
+[LOG | rank 0 | 2026-04-15 13:52:00] 
+[LOG | rank 0 | 2026-04-15 13:52:00] 
+--- (2,4,1) team=32 ---
+[LOG | rank 0 | 2026-04-15 13:52:01] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:01]           TerraNeo - Run Info          
+[LOG | rank 0 | 2026-04-15 13:52:01] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:01] Wall time start : 2026-04-15 13:52:01
+[LOG | rank 0 | 2026-04-15 13:52:01] Executable path : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators"
+[LOG | rank 0 | 2026-04-15 13:52:01] Executable dir  : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/."
+[LOG | rank 0 | 2026-04-15 13:52:01] Working dir     : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance"
+[LOG | rank 0 | 2026-04-15 13:52:01] Command line    : /home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators --min-level 8 --max-level 8 --executions 5 --lat-tile 2 --r-tile 4 --r-passes 1
+[LOG | rank 0 | 2026-04-15 13:52:01] MPI processes   : 1
+[LOG | rank 0 | 2026-04-15 13:52:01] MPI rank        : 0
+[LOG | rank 0 | 2026-04-15 13:52:01] Kokkos threads  : 32
+[LOG | rank 0 | 2026-04-15 13:52:01] Kokkos devices  : 1
+[LOG | rank 0 | 2026-04-15 13:52:01] ExecSpace       : Cuda
+[LOG | rank 0 | 2026-04-15 13:52:01] MemSpace        : Cuda
+[LOG | rank 0 | 2026-04-15 13:52:01] Rank 0: device id = 0, node = h12-13
+[LOG | rank 0 | 2026-04-15 13:52:01] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:01] 
+[LOG | rank 0 | 2026-04-15 13:52:01] 
+[LOG | rank 0 | 2026-04-15 13:52:01] Operator benchmark. Runs a couple of matrix-vector multiplications for various operators to get an idea of the throughput.
+[LOG | rank 0 | 2026-04-15 13:52:01] 
+[LOG | rank 0 | 2026-04-15 13:52:01] Name                           Count  Value      Default
+[LOG | rank 0 | 2026-04-15 13:52:01] ----------------------------------------------------------
+[LOG | rank 0 | 2026-04-15 13:52:01] --help                         0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:52:01] --min-level                    1      8          1
+[LOG | rank 0 | 2026-04-15 13:52:01] --max-level                    1      8          6
+[LOG | rank 0 | 2026-04-15 13:52:01] --refinement-level-subdomains  0      (not set)  0
+[LOG | rank 0 | 2026-04-15 13:52:01] --executions                   1      5          5
+[LOG | rank 0 | 2026-04-15 13:52:01] --lat-tile                     1      2          0
+[LOG | rank 0 | 2026-04-15 13:52:01] --r-tile                       1      4          0
+[LOG | rank 0 | 2026-04-15 13:52:01] --r-passes                     1      1          0
+[LOG | rank 0 | 2026-04-15 13:52:01] --check-hip                    0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:52:01] 
+[LOG | rank 0 | 2026-04-15 13:52:01] 
+[LOG | rank 0 | 2026-04-15 13:52:01] Running operator (matvec) benchmarks.
+[LOG | rank 0 | 2026-04-15 13:52:01] min_level:            8
+[LOG | rank 0 | 2026-04-15 13:52:01] max_level:            8
+[LOG | rank 0 | 2026-04-15 13:52:01] executions per level: 5
+[LOG | rank 0 | 2026-04-15 13:52:01] refinement for subdomains 0
+[LOG | rank 0 | 2026-04-15 13:52:01] 
+[LOG | rank 0 | 2026-04-15 13:52:01] EpsDivDivKerngen Kokkos (double)
+[LOG | rank 0 | 2026-04-15 13:52:01] Subdomain distribution: 
+[LOG | rank 0 | 2026-04-15 13:52:01]  - total: 10
+[LOG | rank 0 | 2026-04-15 13:52:01]  - min:   10
+[LOG | rank 0 | 2026-04-15 13:52:01]  - avg:   10
+[LOG | rank 0 | 2026-04-15 13:52:01]  - max:   10
+[LOG | rank 0 | 2026-04-15 13:52:01] 
+[LOG | rank 0 | 2026-04-15 13:52:04] [EpsilonDivDiv] tile size (x,y,r)=(2,2,4), r_passes=1
+[LOG | rank 0 | 2026-04-15 13:52:04] [EpsilonDivDiv] number of tiles (x,y,r)=(128,128,64), team_size=16, blocks=10485760
+[LOG | rank 0 | 2026-04-15 13:52:04] [EpsilonDivDiv] kernel path = fast-dirichlet-neumann
+[LOG | rank 0 | 2026-04-15 13:52:05] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:05] |      dofs | duration (s) | id | level |           timestamp | updated dofs/sec |
+[LOG | rank 0 | 2026-04-15 13:52:05] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:05] | 505284102 |    6.642e-02 |  0 |     8 | 2026-04-15 13:52:05 |        7.608e+09 |
+[LOG | rank 0 | 2026-04-15 13:52:05] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:05] dofs,duration (s),id,level,timestamp,updated dofs/sec
+[LOG | rank 0 | 2026-04-15 13:52:05] 505284102,6.642e-02,0,8,2026-04-15 13:52:05,7.608e+09
+[LOG | rank 0 | 2026-04-15 13:52:05] 
+[LOG | rank 0 | 2026-04-15 13:52:05] 
+--- (2,8,1) team=64 ---
+[LOG | rank 0 | 2026-04-15 13:52:06] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:06]           TerraNeo - Run Info          
+[LOG | rank 0 | 2026-04-15 13:52:06] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:06] Wall time start : 2026-04-15 13:52:06
+[LOG | rank 0 | 2026-04-15 13:52:06] Executable path : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators"
+[LOG | rank 0 | 2026-04-15 13:52:06] Executable dir  : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/."
+[LOG | rank 0 | 2026-04-15 13:52:06] Working dir     : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance"
+[LOG | rank 0 | 2026-04-15 13:52:06] Command line    : /home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators --min-level 8 --max-level 8 --executions 5 --lat-tile 2 --r-tile 8 --r-passes 1
+[LOG | rank 0 | 2026-04-15 13:52:06] MPI processes   : 1
+[LOG | rank 0 | 2026-04-15 13:52:06] MPI rank        : 0
+[LOG | rank 0 | 2026-04-15 13:52:06] Kokkos threads  : 32
+[LOG | rank 0 | 2026-04-15 13:52:06] Kokkos devices  : 1
+[LOG | rank 0 | 2026-04-15 13:52:06] ExecSpace       : Cuda
+[LOG | rank 0 | 2026-04-15 13:52:06] MemSpace        : Cuda
+[LOG | rank 0 | 2026-04-15 13:52:06] Rank 0: device id = 0, node = h12-13
+[LOG | rank 0 | 2026-04-15 13:52:06] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:06] 
+[LOG | rank 0 | 2026-04-15 13:52:06] 
+[LOG | rank 0 | 2026-04-15 13:52:06] Operator benchmark. Runs a couple of matrix-vector multiplications for various operators to get an idea of the throughput.
+[LOG | rank 0 | 2026-04-15 13:52:06] 
+[LOG | rank 0 | 2026-04-15 13:52:06] Name                           Count  Value      Default
+[LOG | rank 0 | 2026-04-15 13:52:06] ----------------------------------------------------------
+[LOG | rank 0 | 2026-04-15 13:52:06] --help                         0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:52:06] --min-level                    1      8          1
+[LOG | rank 0 | 2026-04-15 13:52:06] --max-level                    1      8          6
+[LOG | rank 0 | 2026-04-15 13:52:06] --refinement-level-subdomains  0      (not set)  0
+[LOG | rank 0 | 2026-04-15 13:52:06] --executions                   1      5          5
+[LOG | rank 0 | 2026-04-15 13:52:06] --lat-tile                     1      2          0
+[LOG | rank 0 | 2026-04-15 13:52:06] --r-tile                       1      8          0
+[LOG | rank 0 | 2026-04-15 13:52:06] --r-passes                     1      1          0
+[LOG | rank 0 | 2026-04-15 13:52:06] --check-hip                    0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:52:06] 
+[LOG | rank 0 | 2026-04-15 13:52:06] 
+[LOG | rank 0 | 2026-04-15 13:52:06] Running operator (matvec) benchmarks.
+[LOG | rank 0 | 2026-04-15 13:52:06] min_level:            8
+[LOG | rank 0 | 2026-04-15 13:52:06] max_level:            8
+[LOG | rank 0 | 2026-04-15 13:52:06] executions per level: 5
+[LOG | rank 0 | 2026-04-15 13:52:06] refinement for subdomains 0
+[LOG | rank 0 | 2026-04-15 13:52:06] 
+[LOG | rank 0 | 2026-04-15 13:52:06] EpsDivDivKerngen Kokkos (double)
+[LOG | rank 0 | 2026-04-15 13:52:06] Subdomain distribution: 
+[LOG | rank 0 | 2026-04-15 13:52:06]  - total: 10
+[LOG | rank 0 | 2026-04-15 13:52:06]  - min:   10
+[LOG | rank 0 | 2026-04-15 13:52:06]  - avg:   10
+[LOG | rank 0 | 2026-04-15 13:52:06]  - max:   10
+[LOG | rank 0 | 2026-04-15 13:52:06] 
+[LOG | rank 0 | 2026-04-15 13:52:09] [EpsilonDivDiv] tile size (x,y,r)=(2,2,8), r_passes=1
+[LOG | rank 0 | 2026-04-15 13:52:09] [EpsilonDivDiv] number of tiles (x,y,r)=(128,128,32), team_size=32, blocks=5242880
+[LOG | rank 0 | 2026-04-15 13:52:09] [EpsilonDivDiv] kernel path = fast-dirichlet-neumann
+[LOG | rank 0 | 2026-04-15 13:52:10] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:10] |      dofs | duration (s) | id | level |           timestamp | updated dofs/sec |
+[LOG | rank 0 | 2026-04-15 13:52:10] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:10] | 505284102 |    4.364e-02 |  0 |     8 | 2026-04-15 13:52:10 |        1.158e+10 |
+[LOG | rank 0 | 2026-04-15 13:52:10] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:10] dofs,duration (s),id,level,timestamp,updated dofs/sec
+[LOG | rank 0 | 2026-04-15 13:52:10] 505284102,4.364e-02,0,8,2026-04-15 13:52:10,1.158e+10
+[LOG | rank 0 | 2026-04-15 13:52:10] 
+[LOG | rank 0 | 2026-04-15 13:52:10] 
+--- (2,16,1) team=128 ---
+[LOG | rank 0 | 2026-04-15 13:52:11] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:11]           TerraNeo - Run Info          
+[LOG | rank 0 | 2026-04-15 13:52:11] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:11] Wall time start : 2026-04-15 13:52:11
+[LOG | rank 0 | 2026-04-15 13:52:11] Executable path : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators"
+[LOG | rank 0 | 2026-04-15 13:52:11] Executable dir  : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/."
+[LOG | rank 0 | 2026-04-15 13:52:11] Working dir     : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance"
+[LOG | rank 0 | 2026-04-15 13:52:11] Command line    : /home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators --min-level 8 --max-level 8 --executions 5 --lat-tile 2 --r-tile 16 --r-passes 1
+[LOG | rank 0 | 2026-04-15 13:52:11] MPI processes   : 1
+[LOG | rank 0 | 2026-04-15 13:52:11] MPI rank        : 0
+[LOG | rank 0 | 2026-04-15 13:52:11] Kokkos threads  : 32
+[LOG | rank 0 | 2026-04-15 13:52:11] Kokkos devices  : 1
+[LOG | rank 0 | 2026-04-15 13:52:11] ExecSpace       : Cuda
+[LOG | rank 0 | 2026-04-15 13:52:11] MemSpace        : Cuda
+[LOG | rank 0 | 2026-04-15 13:52:11] Rank 0: device id = 0, node = h12-13
+[LOG | rank 0 | 2026-04-15 13:52:11] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:11] 
+[LOG | rank 0 | 2026-04-15 13:52:11] 
+[LOG | rank 0 | 2026-04-15 13:52:11] Operator benchmark. Runs a couple of matrix-vector multiplications for various operators to get an idea of the throughput.
+[LOG | rank 0 | 2026-04-15 13:52:11] 
+[LOG | rank 0 | 2026-04-15 13:52:11] Name                           Count  Value      Default
+[LOG | rank 0 | 2026-04-15 13:52:11] ----------------------------------------------------------
+[LOG | rank 0 | 2026-04-15 13:52:11] --help                         0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:52:11] --min-level                    1      8          1
+[LOG | rank 0 | 2026-04-15 13:52:11] --max-level                    1      8          6
+[LOG | rank 0 | 2026-04-15 13:52:11] --refinement-level-subdomains  0      (not set)  0
+[LOG | rank 0 | 2026-04-15 13:52:11] --executions                   1      5          5
+[LOG | rank 0 | 2026-04-15 13:52:11] --lat-tile                     1      2          0
+[LOG | rank 0 | 2026-04-15 13:52:11] --r-tile                       1      16         0
+[LOG | rank 0 | 2026-04-15 13:52:11] --r-passes                     1      1          0
+[LOG | rank 0 | 2026-04-15 13:52:11] --check-hip                    0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:52:11] 
+[LOG | rank 0 | 2026-04-15 13:52:11] 
+[LOG | rank 0 | 2026-04-15 13:52:11] Running operator (matvec) benchmarks.
+[LOG | rank 0 | 2026-04-15 13:52:11] min_level:            8
+[LOG | rank 0 | 2026-04-15 13:52:11] max_level:            8
+[LOG | rank 0 | 2026-04-15 13:52:11] executions per level: 5
+[LOG | rank 0 | 2026-04-15 13:52:11] refinement for subdomains 0
+[LOG | rank 0 | 2026-04-15 13:52:11] 
+[LOG | rank 0 | 2026-04-15 13:52:11] EpsDivDivKerngen Kokkos (double)
+[LOG | rank 0 | 2026-04-15 13:52:11] Subdomain distribution: 
+[LOG | rank 0 | 2026-04-15 13:52:11]  - total: 10
+[LOG | rank 0 | 2026-04-15 13:52:11]  - min:   10
+[LOG | rank 0 | 2026-04-15 13:52:11]  - avg:   10
+[LOG | rank 0 | 2026-04-15 13:52:11]  - max:   10
+[LOG | rank 0 | 2026-04-15 13:52:11] 
+[LOG | rank 0 | 2026-04-15 13:52:14] [EpsilonDivDiv] tile size (x,y,r)=(2,2,16), r_passes=1
+[LOG | rank 0 | 2026-04-15 13:52:14] [EpsilonDivDiv] number of tiles (x,y,r)=(128,128,16), team_size=64, blocks=2621440
+[LOG | rank 0 | 2026-04-15 13:52:14] [EpsilonDivDiv] kernel path = fast-dirichlet-neumann
+[LOG | rank 0 | 2026-04-15 13:52:14] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:14] |      dofs | duration (s) | id | level |           timestamp | updated dofs/sec |
+[LOG | rank 0 | 2026-04-15 13:52:14] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:14] | 505284102 |    4.018e-02 |  0 |     8 | 2026-04-15 13:52:14 |        1.257e+10 |
+[LOG | rank 0 | 2026-04-15 13:52:14] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:14] dofs,duration (s),id,level,timestamp,updated dofs/sec
+[LOG | rank 0 | 2026-04-15 13:52:14] 505284102,4.018e-02,0,8,2026-04-15 13:52:14,1.257e+10
+[LOG | rank 0 | 2026-04-15 13:52:14] 
+[LOG | rank 0 | 2026-04-15 13:52:14] 
+--- (2,32,1) team=256 ---
+[LOG | rank 0 | 2026-04-15 13:52:16] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:16]           TerraNeo - Run Info          
+[LOG | rank 0 | 2026-04-15 13:52:16] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:16] Wall time start : 2026-04-15 13:52:16
+[LOG | rank 0 | 2026-04-15 13:52:16] Executable path : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators"
+[LOG | rank 0 | 2026-04-15 13:52:16] Executable dir  : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/."
+[LOG | rank 0 | 2026-04-15 13:52:16] Working dir     : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance"
+[LOG | rank 0 | 2026-04-15 13:52:16] Command line    : /home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators --min-level 8 --max-level 8 --executions 5 --lat-tile 2 --r-tile 32 --r-passes 1
+[LOG | rank 0 | 2026-04-15 13:52:16] MPI processes   : 1
+[LOG | rank 0 | 2026-04-15 13:52:16] MPI rank        : 0
+[LOG | rank 0 | 2026-04-15 13:52:16] Kokkos threads  : 32
+[LOG | rank 0 | 2026-04-15 13:52:16] Kokkos devices  : 1
+[LOG | rank 0 | 2026-04-15 13:52:16] ExecSpace       : Cuda
+[LOG | rank 0 | 2026-04-15 13:52:16] MemSpace        : Cuda
+[LOG | rank 0 | 2026-04-15 13:52:16] Rank 0: device id = 0, node = h12-13
+[LOG | rank 0 | 2026-04-15 13:52:16] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:16] 
+[LOG | rank 0 | 2026-04-15 13:52:16] 
+[LOG | rank 0 | 2026-04-15 13:52:16] Operator benchmark. Runs a couple of matrix-vector multiplications for various operators to get an idea of the throughput.
+[LOG | rank 0 | 2026-04-15 13:52:16] 
+[LOG | rank 0 | 2026-04-15 13:52:16] Name                           Count  Value      Default
+[LOG | rank 0 | 2026-04-15 13:52:16] ----------------------------------------------------------
+[LOG | rank 0 | 2026-04-15 13:52:16] --help                         0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:52:16] --min-level                    1      8          1
+[LOG | rank 0 | 2026-04-15 13:52:16] --max-level                    1      8          6
+[LOG | rank 0 | 2026-04-15 13:52:16] --refinement-level-subdomains  0      (not set)  0
+[LOG | rank 0 | 2026-04-15 13:52:16] --executions                   1      5          5
+[LOG | rank 0 | 2026-04-15 13:52:16] --lat-tile                     1      2          0
+[LOG | rank 0 | 2026-04-15 13:52:16] --r-tile                       1      32         0
+[LOG | rank 0 | 2026-04-15 13:52:16] --r-passes                     1      1          0
+[LOG | rank 0 | 2026-04-15 13:52:16] --check-hip                    0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:52:16] 
+[LOG | rank 0 | 2026-04-15 13:52:16] 
+[LOG | rank 0 | 2026-04-15 13:52:16] Running operator (matvec) benchmarks.
+[LOG | rank 0 | 2026-04-15 13:52:16] min_level:            8
+[LOG | rank 0 | 2026-04-15 13:52:16] max_level:            8
+[LOG | rank 0 | 2026-04-15 13:52:16] executions per level: 5
+[LOG | rank 0 | 2026-04-15 13:52:16] refinement for subdomains 0
+[LOG | rank 0 | 2026-04-15 13:52:16] 
+[LOG | rank 0 | 2026-04-15 13:52:16] EpsDivDivKerngen Kokkos (double)
+[LOG | rank 0 | 2026-04-15 13:52:16] Subdomain distribution: 
+[LOG | rank 0 | 2026-04-15 13:52:16]  - total: 10
+[LOG | rank 0 | 2026-04-15 13:52:16]  - min:   10
+[LOG | rank 0 | 2026-04-15 13:52:16]  - avg:   10
+[LOG | rank 0 | 2026-04-15 13:52:16]  - max:   10
+[LOG | rank 0 | 2026-04-15 13:52:16] 
+[LOG | rank 0 | 2026-04-15 13:52:19] [EpsilonDivDiv] tile size (x,y,r)=(2,2,32), r_passes=1
+[LOG | rank 0 | 2026-04-15 13:52:19] [EpsilonDivDiv] number of tiles (x,y,r)=(128,128,8), team_size=128, blocks=1310720
+[LOG | rank 0 | 2026-04-15 13:52:19] [EpsilonDivDiv] kernel path = fast-dirichlet-neumann
+[LOG | rank 0 | 2026-04-15 13:52:19] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:19] |      dofs | duration (s) | id | level |           timestamp | updated dofs/sec |
+[LOG | rank 0 | 2026-04-15 13:52:19] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:19] | 505284102 |    4.017e-02 |  0 |     8 | 2026-04-15 13:52:19 |        1.258e+10 |
+[LOG | rank 0 | 2026-04-15 13:52:19] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:19] dofs,duration (s),id,level,timestamp,updated dofs/sec
+[LOG | rank 0 | 2026-04-15 13:52:19] 505284102,4.017e-02,0,8,2026-04-15 13:52:19,1.258e+10
+[LOG | rank 0 | 2026-04-15 13:52:19] 
+[LOG | rank 0 | 2026-04-15 13:52:19] 
+--- (2,64,1) team=512 ---
+[LOG | rank 0 | 2026-04-15 13:52:20] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:20]           TerraNeo - Run Info          
+[LOG | rank 0 | 2026-04-15 13:52:20] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:20] Wall time start : 2026-04-15 13:52:20
+[LOG | rank 0 | 2026-04-15 13:52:20] Executable path : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators"
+[LOG | rank 0 | 2026-04-15 13:52:20] Executable dir  : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/."
+[LOG | rank 0 | 2026-04-15 13:52:20] Working dir     : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance"
+[LOG | rank 0 | 2026-04-15 13:52:20] Command line    : /home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators --min-level 8 --max-level 8 --executions 5 --lat-tile 2 --r-tile 64 --r-passes 1
+[LOG | rank 0 | 2026-04-15 13:52:20] MPI processes   : 1
+[LOG | rank 0 | 2026-04-15 13:52:20] MPI rank        : 0
+[LOG | rank 0 | 2026-04-15 13:52:20] Kokkos threads  : 32
+[LOG | rank 0 | 2026-04-15 13:52:20] Kokkos devices  : 1
+[LOG | rank 0 | 2026-04-15 13:52:20] ExecSpace       : Cuda
+[LOG | rank 0 | 2026-04-15 13:52:20] MemSpace        : Cuda
+[LOG | rank 0 | 2026-04-15 13:52:20] Rank 0: device id = 0, node = h12-13
+[LOG | rank 0 | 2026-04-15 13:52:20] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:20] 
+[LOG | rank 0 | 2026-04-15 13:52:20] 
+[LOG | rank 0 | 2026-04-15 13:52:20] Operator benchmark. Runs a couple of matrix-vector multiplications for various operators to get an idea of the throughput.
+[LOG | rank 0 | 2026-04-15 13:52:20] 
+[LOG | rank 0 | 2026-04-15 13:52:20] Name                           Count  Value      Default
+[LOG | rank 0 | 2026-04-15 13:52:20] ----------------------------------------------------------
+[LOG | rank 0 | 2026-04-15 13:52:20] --help                         0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:52:20] --min-level                    1      8          1
+[LOG | rank 0 | 2026-04-15 13:52:20] --max-level                    1      8          6
+[LOG | rank 0 | 2026-04-15 13:52:20] --refinement-level-subdomains  0      (not set)  0
+[LOG | rank 0 | 2026-04-15 13:52:20] --executions                   1      5          5
+[LOG | rank 0 | 2026-04-15 13:52:20] --lat-tile                     1      2          0
+[LOG | rank 0 | 2026-04-15 13:52:20] --r-tile                       1      64         0
+[LOG | rank 0 | 2026-04-15 13:52:20] --r-passes                     1      1          0
+[LOG | rank 0 | 2026-04-15 13:52:20] --check-hip                    0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:52:20] 
+[LOG | rank 0 | 2026-04-15 13:52:20] 
+[LOG | rank 0 | 2026-04-15 13:52:20] Running operator (matvec) benchmarks.
+[LOG | rank 0 | 2026-04-15 13:52:20] min_level:            8
+[LOG | rank 0 | 2026-04-15 13:52:20] max_level:            8
+[LOG | rank 0 | 2026-04-15 13:52:20] executions per level: 5
+[LOG | rank 0 | 2026-04-15 13:52:20] refinement for subdomains 0
+[LOG | rank 0 | 2026-04-15 13:52:20] 
+[LOG | rank 0 | 2026-04-15 13:52:20] EpsDivDivKerngen Kokkos (double)
+[LOG | rank 0 | 2026-04-15 13:52:20] Subdomain distribution: 
+[LOG | rank 0 | 2026-04-15 13:52:20]  - total: 10
+[LOG | rank 0 | 2026-04-15 13:52:20]  - min:   10
+[LOG | rank 0 | 2026-04-15 13:52:20]  - avg:   10
+[LOG | rank 0 | 2026-04-15 13:52:20]  - max:   10
+[LOG | rank 0 | 2026-04-15 13:52:20] 
+[LOG | rank 0 | 2026-04-15 13:52:23] [EpsilonDivDiv] tile size (x,y,r)=(2,2,64), r_passes=1
+[LOG | rank 0 | 2026-04-15 13:52:23] [EpsilonDivDiv] number of tiles (x,y,r)=(128,128,4), team_size=256, blocks=655360
+[LOG | rank 0 | 2026-04-15 13:52:23] [EpsilonDivDiv] kernel path = fast-dirichlet-neumann
+[LOG | rank 0 | 2026-04-15 13:52:24] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:24] |      dofs | duration (s) | id | level |           timestamp | updated dofs/sec |
+[LOG | rank 0 | 2026-04-15 13:52:24] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:24] | 505284102 |    3.965e-02 |  0 |     8 | 2026-04-15 13:52:24 |        1.274e+10 |
+[LOG | rank 0 | 2026-04-15 13:52:24] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:24] dofs,duration (s),id,level,timestamp,updated dofs/sec
+[LOG | rank 0 | 2026-04-15 13:52:24] 505284102,3.965e-02,0,8,2026-04-15 13:52:24,1.274e+10
+[LOG | rank 0 | 2026-04-15 13:52:24] 
+[LOG | rank 0 | 2026-04-15 13:52:24] 
+--- (3,2,1) team=36 ---
+[LOG | rank 0 | 2026-04-15 13:52:25] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:25]           TerraNeo - Run Info          
+[LOG | rank 0 | 2026-04-15 13:52:25] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:25] Wall time start : 2026-04-15 13:52:25
+[LOG | rank 0 | 2026-04-15 13:52:25] Executable path : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators"
+[LOG | rank 0 | 2026-04-15 13:52:25] Executable dir  : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/."
+[LOG | rank 0 | 2026-04-15 13:52:25] Working dir     : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance"
+[LOG | rank 0 | 2026-04-15 13:52:25] Command line    : /home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators --min-level 8 --max-level 8 --executions 5 --lat-tile 3 --r-tile 2 --r-passes 1
+[LOG | rank 0 | 2026-04-15 13:52:25] MPI processes   : 1
+[LOG | rank 0 | 2026-04-15 13:52:25] MPI rank        : 0
+[LOG | rank 0 | 2026-04-15 13:52:25] Kokkos threads  : 32
+[LOG | rank 0 | 2026-04-15 13:52:25] Kokkos devices  : 1
+[LOG | rank 0 | 2026-04-15 13:52:25] ExecSpace       : Cuda
+[LOG | rank 0 | 2026-04-15 13:52:25] MemSpace        : Cuda
+[LOG | rank 0 | 2026-04-15 13:52:25] Rank 0: device id = 0, node = h12-13
+[LOG | rank 0 | 2026-04-15 13:52:25] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:25] 
+[LOG | rank 0 | 2026-04-15 13:52:25] 
+[LOG | rank 0 | 2026-04-15 13:52:25] Operator benchmark. Runs a couple of matrix-vector multiplications for various operators to get an idea of the throughput.
+[LOG | rank 0 | 2026-04-15 13:52:25] 
+[LOG | rank 0 | 2026-04-15 13:52:25] Name                           Count  Value      Default
+[LOG | rank 0 | 2026-04-15 13:52:25] ----------------------------------------------------------
+[LOG | rank 0 | 2026-04-15 13:52:25] --help                         0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:52:25] --min-level                    1      8          1
+[LOG | rank 0 | 2026-04-15 13:52:25] --max-level                    1      8          6
+[LOG | rank 0 | 2026-04-15 13:52:25] --refinement-level-subdomains  0      (not set)  0
+[LOG | rank 0 | 2026-04-15 13:52:25] --executions                   1      5          5
+[LOG | rank 0 | 2026-04-15 13:52:25] --lat-tile                     1      3          0
+[LOG | rank 0 | 2026-04-15 13:52:25] --r-tile                       1      2          0
+[LOG | rank 0 | 2026-04-15 13:52:25] --r-passes                     1      1          0
+[LOG | rank 0 | 2026-04-15 13:52:25] --check-hip                    0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:52:25] 
+[LOG | rank 0 | 2026-04-15 13:52:25] 
+[LOG | rank 0 | 2026-04-15 13:52:25] Running operator (matvec) benchmarks.
+[LOG | rank 0 | 2026-04-15 13:52:25] min_level:            8
+[LOG | rank 0 | 2026-04-15 13:52:25] max_level:            8
+[LOG | rank 0 | 2026-04-15 13:52:25] executions per level: 5
+[LOG | rank 0 | 2026-04-15 13:52:25] refinement for subdomains 0
+[LOG | rank 0 | 2026-04-15 13:52:25] 
+[LOG | rank 0 | 2026-04-15 13:52:25] EpsDivDivKerngen Kokkos (double)
+[LOG | rank 0 | 2026-04-15 13:52:25] Subdomain distribution: 
+[LOG | rank 0 | 2026-04-15 13:52:25]  - total: 10
+[LOG | rank 0 | 2026-04-15 13:52:25]  - min:   10
+[LOG | rank 0 | 2026-04-15 13:52:25]  - avg:   10
+[LOG | rank 0 | 2026-04-15 13:52:25]  - max:   10
+[LOG | rank 0 | 2026-04-15 13:52:25] 
+[LOG | rank 0 | 2026-04-15 13:52:28] [EpsilonDivDiv] tile size (x,y,r)=(3,3,2), r_passes=1
+[LOG | rank 0 | 2026-04-15 13:52:28] [EpsilonDivDiv] number of tiles (x,y,r)=(86,86,128), team_size=18, blocks=9466880
+[LOG | rank 0 | 2026-04-15 13:52:28] [EpsilonDivDiv] kernel path = fast-dirichlet-neumann
+[LOG | rank 0 | 2026-04-15 13:52:29] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:29] |      dofs | duration (s) | id | level |           timestamp | updated dofs/sec |
+[LOG | rank 0 | 2026-04-15 13:52:29] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:29] | 505284102 |    7.995e-02 |  0 |     8 | 2026-04-15 13:52:29 |        6.320e+09 |
+[LOG | rank 0 | 2026-04-15 13:52:29] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:29] dofs,duration (s),id,level,timestamp,updated dofs/sec
+[LOG | rank 0 | 2026-04-15 13:52:29] 505284102,7.995e-02,0,8,2026-04-15 13:52:29,6.320e+09
+[LOG | rank 0 | 2026-04-15 13:52:29] 
+[LOG | rank 0 | 2026-04-15 13:52:29] 
+--- (3,4,1) team=72 ---
+[LOG | rank 0 | 2026-04-15 13:52:30] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:30]           TerraNeo - Run Info          
+[LOG | rank 0 | 2026-04-15 13:52:30] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:30] Wall time start : 2026-04-15 13:52:30
+[LOG | rank 0 | 2026-04-15 13:52:30] Executable path : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators"
+[LOG | rank 0 | 2026-04-15 13:52:30] Executable dir  : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/."
+[LOG | rank 0 | 2026-04-15 13:52:30] Working dir     : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance"
+[LOG | rank 0 | 2026-04-15 13:52:30] Command line    : /home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators --min-level 8 --max-level 8 --executions 5 --lat-tile 3 --r-tile 4 --r-passes 1
+[LOG | rank 0 | 2026-04-15 13:52:30] MPI processes   : 1
+[LOG | rank 0 | 2026-04-15 13:52:30] MPI rank        : 0
+[LOG | rank 0 | 2026-04-15 13:52:30] Kokkos threads  : 32
+[LOG | rank 0 | 2026-04-15 13:52:30] Kokkos devices  : 1
+[LOG | rank 0 | 2026-04-15 13:52:30] ExecSpace       : Cuda
+[LOG | rank 0 | 2026-04-15 13:52:30] MemSpace        : Cuda
+[LOG | rank 0 | 2026-04-15 13:52:30] Rank 0: device id = 0, node = h12-13
+[LOG | rank 0 | 2026-04-15 13:52:30] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:30] 
+[LOG | rank 0 | 2026-04-15 13:52:30] 
+[LOG | rank 0 | 2026-04-15 13:52:30] Operator benchmark. Runs a couple of matrix-vector multiplications for various operators to get an idea of the throughput.
+[LOG | rank 0 | 2026-04-15 13:52:30] 
+[LOG | rank 0 | 2026-04-15 13:52:30] Name                           Count  Value      Default
+[LOG | rank 0 | 2026-04-15 13:52:30] ----------------------------------------------------------
+[LOG | rank 0 | 2026-04-15 13:52:30] --help                         0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:52:30] --min-level                    1      8          1
+[LOG | rank 0 | 2026-04-15 13:52:30] --max-level                    1      8          6
+[LOG | rank 0 | 2026-04-15 13:52:30] --refinement-level-subdomains  0      (not set)  0
+[LOG | rank 0 | 2026-04-15 13:52:30] --executions                   1      5          5
+[LOG | rank 0 | 2026-04-15 13:52:30] --lat-tile                     1      3          0
+[LOG | rank 0 | 2026-04-15 13:52:30] --r-tile                       1      4          0
+[LOG | rank 0 | 2026-04-15 13:52:30] --r-passes                     1      1          0
+[LOG | rank 0 | 2026-04-15 13:52:30] --check-hip                    0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:52:30] 
+[LOG | rank 0 | 2026-04-15 13:52:30] 
+[LOG | rank 0 | 2026-04-15 13:52:30] Running operator (matvec) benchmarks.
+[LOG | rank 0 | 2026-04-15 13:52:30] min_level:            8
+[LOG | rank 0 | 2026-04-15 13:52:30] max_level:            8
+[LOG | rank 0 | 2026-04-15 13:52:30] executions per level: 5
+[LOG | rank 0 | 2026-04-15 13:52:30] refinement for subdomains 0
+[LOG | rank 0 | 2026-04-15 13:52:30] 
+[LOG | rank 0 | 2026-04-15 13:52:30] EpsDivDivKerngen Kokkos (double)
+[LOG | rank 0 | 2026-04-15 13:52:30] Subdomain distribution: 
+[LOG | rank 0 | 2026-04-15 13:52:30]  - total: 10
+[LOG | rank 0 | 2026-04-15 13:52:30]  - min:   10
+[LOG | rank 0 | 2026-04-15 13:52:30]  - avg:   10
+[LOG | rank 0 | 2026-04-15 13:52:30]  - max:   10
+[LOG | rank 0 | 2026-04-15 13:52:30] 
+[LOG | rank 0 | 2026-04-15 13:52:33] [EpsilonDivDiv] tile size (x,y,r)=(3,3,4), r_passes=1
+[LOG | rank 0 | 2026-04-15 13:52:33] [EpsilonDivDiv] number of tiles (x,y,r)=(86,86,64), team_size=36, blocks=4733440
+[LOG | rank 0 | 2026-04-15 13:52:33] [EpsilonDivDiv] kernel path = fast-dirichlet-neumann
+[LOG | rank 0 | 2026-04-15 13:52:33] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:33] |      dofs | duration (s) | id | level |           timestamp | updated dofs/sec |
+[LOG | rank 0 | 2026-04-15 13:52:33] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:33] | 505284102 |    6.352e-02 |  0 |     8 | 2026-04-15 13:52:33 |        7.955e+09 |
+[LOG | rank 0 | 2026-04-15 13:52:33] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:33] dofs,duration (s),id,level,timestamp,updated dofs/sec
+[LOG | rank 0 | 2026-04-15 13:52:33] 505284102,6.352e-02,0,8,2026-04-15 13:52:33,7.955e+09
+[LOG | rank 0 | 2026-04-15 13:52:33] 
+[LOG | rank 0 | 2026-04-15 13:52:33] 
+--- (3,8,1) team=144 ---
+[LOG | rank 0 | 2026-04-15 13:52:35] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:35]           TerraNeo - Run Info          
+[LOG | rank 0 | 2026-04-15 13:52:35] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:35] Wall time start : 2026-04-15 13:52:35
+[LOG | rank 0 | 2026-04-15 13:52:35] Executable path : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators"
+[LOG | rank 0 | 2026-04-15 13:52:35] Executable dir  : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/."
+[LOG | rank 0 | 2026-04-15 13:52:35] Working dir     : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance"
+[LOG | rank 0 | 2026-04-15 13:52:35] Command line    : /home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators --min-level 8 --max-level 8 --executions 5 --lat-tile 3 --r-tile 8 --r-passes 1
+[LOG | rank 0 | 2026-04-15 13:52:35] MPI processes   : 1
+[LOG | rank 0 | 2026-04-15 13:52:35] MPI rank        : 0
+[LOG | rank 0 | 2026-04-15 13:52:35] Kokkos threads  : 32
+[LOG | rank 0 | 2026-04-15 13:52:35] Kokkos devices  : 1
+[LOG | rank 0 | 2026-04-15 13:52:35] ExecSpace       : Cuda
+[LOG | rank 0 | 2026-04-15 13:52:35] MemSpace        : Cuda
+[LOG | rank 0 | 2026-04-15 13:52:35] Rank 0: device id = 0, node = h12-13
+[LOG | rank 0 | 2026-04-15 13:52:35] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:35] 
+[LOG | rank 0 | 2026-04-15 13:52:35] 
+[LOG | rank 0 | 2026-04-15 13:52:35] Operator benchmark. Runs a couple of matrix-vector multiplications for various operators to get an idea of the throughput.
+[LOG | rank 0 | 2026-04-15 13:52:35] 
+[LOG | rank 0 | 2026-04-15 13:52:35] Name                           Count  Value      Default
+[LOG | rank 0 | 2026-04-15 13:52:35] ----------------------------------------------------------
+[LOG | rank 0 | 2026-04-15 13:52:35] --help                         0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:52:35] --min-level                    1      8          1
+[LOG | rank 0 | 2026-04-15 13:52:35] --max-level                    1      8          6
+[LOG | rank 0 | 2026-04-15 13:52:35] --refinement-level-subdomains  0      (not set)  0
+[LOG | rank 0 | 2026-04-15 13:52:35] --executions                   1      5          5
+[LOG | rank 0 | 2026-04-15 13:52:35] --lat-tile                     1      3          0
+[LOG | rank 0 | 2026-04-15 13:52:35] --r-tile                       1      8          0
+[LOG | rank 0 | 2026-04-15 13:52:35] --r-passes                     1      1          0
+[LOG | rank 0 | 2026-04-15 13:52:35] --check-hip                    0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:52:35] 
+[LOG | rank 0 | 2026-04-15 13:52:35] 
+[LOG | rank 0 | 2026-04-15 13:52:35] Running operator (matvec) benchmarks.
+[LOG | rank 0 | 2026-04-15 13:52:35] min_level:            8
+[LOG | rank 0 | 2026-04-15 13:52:35] max_level:            8
+[LOG | rank 0 | 2026-04-15 13:52:35] executions per level: 5
+[LOG | rank 0 | 2026-04-15 13:52:35] refinement for subdomains 0
+[LOG | rank 0 | 2026-04-15 13:52:35] 
+[LOG | rank 0 | 2026-04-15 13:52:35] EpsDivDivKerngen Kokkos (double)
+[LOG | rank 0 | 2026-04-15 13:52:35] Subdomain distribution: 
+[LOG | rank 0 | 2026-04-15 13:52:35]  - total: 10
+[LOG | rank 0 | 2026-04-15 13:52:35]  - min:   10
+[LOG | rank 0 | 2026-04-15 13:52:35]  - avg:   10
+[LOG | rank 0 | 2026-04-15 13:52:35]  - max:   10
+[LOG | rank 0 | 2026-04-15 13:52:35] 
+[LOG | rank 0 | 2026-04-15 13:52:38] [EpsilonDivDiv] tile size (x,y,r)=(3,3,8), r_passes=1
+[LOG | rank 0 | 2026-04-15 13:52:38] [EpsilonDivDiv] number of tiles (x,y,r)=(86,86,32), team_size=72, blocks=2366720
+[LOG | rank 0 | 2026-04-15 13:52:38] [EpsilonDivDiv] kernel path = fast-dirichlet-neumann
+[LOG | rank 0 | 2026-04-15 13:52:38] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:38] |      dofs | duration (s) | id | level |           timestamp | updated dofs/sec |
+[LOG | rank 0 | 2026-04-15 13:52:38] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:38] | 505284102 |    4.837e-02 |  0 |     8 | 2026-04-15 13:52:38 |        1.045e+10 |
+[LOG | rank 0 | 2026-04-15 13:52:38] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:38] dofs,duration (s),id,level,timestamp,updated dofs/sec
+[LOG | rank 0 | 2026-04-15 13:52:38] 505284102,4.837e-02,0,8,2026-04-15 13:52:38,1.045e+10
+[LOG | rank 0 | 2026-04-15 13:52:38] 
+[LOG | rank 0 | 2026-04-15 13:52:38] 
+--- (3,16,1) team=288 ---
+[LOG | rank 0 | 2026-04-15 13:52:39] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:39]           TerraNeo - Run Info          
+[LOG | rank 0 | 2026-04-15 13:52:39] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:39] Wall time start : 2026-04-15 13:52:39
+[LOG | rank 0 | 2026-04-15 13:52:39] Executable path : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators"
+[LOG | rank 0 | 2026-04-15 13:52:39] Executable dir  : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/."
+[LOG | rank 0 | 2026-04-15 13:52:39] Working dir     : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance"
+[LOG | rank 0 | 2026-04-15 13:52:39] Command line    : /home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators --min-level 8 --max-level 8 --executions 5 --lat-tile 3 --r-tile 16 --r-passes 1
+[LOG | rank 0 | 2026-04-15 13:52:39] MPI processes   : 1
+[LOG | rank 0 | 2026-04-15 13:52:39] MPI rank        : 0
+[LOG | rank 0 | 2026-04-15 13:52:39] Kokkos threads  : 32
+[LOG | rank 0 | 2026-04-15 13:52:39] Kokkos devices  : 1
+[LOG | rank 0 | 2026-04-15 13:52:39] ExecSpace       : Cuda
+[LOG | rank 0 | 2026-04-15 13:52:39] MemSpace        : Cuda
+[LOG | rank 0 | 2026-04-15 13:52:39] Rank 0: device id = 0, node = h12-13
+[LOG | rank 0 | 2026-04-15 13:52:39] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:39] 
+[LOG | rank 0 | 2026-04-15 13:52:39] 
+[LOG | rank 0 | 2026-04-15 13:52:39] Operator benchmark. Runs a couple of matrix-vector multiplications for various operators to get an idea of the throughput.
+[LOG | rank 0 | 2026-04-15 13:52:39] 
+[LOG | rank 0 | 2026-04-15 13:52:39] Name                           Count  Value      Default
+[LOG | rank 0 | 2026-04-15 13:52:39] ----------------------------------------------------------
+[LOG | rank 0 | 2026-04-15 13:52:39] --help                         0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:52:39] --min-level                    1      8          1
+[LOG | rank 0 | 2026-04-15 13:52:39] --max-level                    1      8          6
+[LOG | rank 0 | 2026-04-15 13:52:39] --refinement-level-subdomains  0      (not set)  0
+[LOG | rank 0 | 2026-04-15 13:52:39] --executions                   1      5          5
+[LOG | rank 0 | 2026-04-15 13:52:39] --lat-tile                     1      3          0
+[LOG | rank 0 | 2026-04-15 13:52:39] --r-tile                       1      16         0
+[LOG | rank 0 | 2026-04-15 13:52:39] --r-passes                     1      1          0
+[LOG | rank 0 | 2026-04-15 13:52:39] --check-hip                    0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:52:39] 
+[LOG | rank 0 | 2026-04-15 13:52:39] 
+[LOG | rank 0 | 2026-04-15 13:52:39] Running operator (matvec) benchmarks.
+[LOG | rank 0 | 2026-04-15 13:52:39] min_level:            8
+[LOG | rank 0 | 2026-04-15 13:52:39] max_level:            8
+[LOG | rank 0 | 2026-04-15 13:52:39] executions per level: 5
+[LOG | rank 0 | 2026-04-15 13:52:39] refinement for subdomains 0
+[LOG | rank 0 | 2026-04-15 13:52:39] 
+[LOG | rank 0 | 2026-04-15 13:52:39] EpsDivDivKerngen Kokkos (double)
+[LOG | rank 0 | 2026-04-15 13:52:39] Subdomain distribution: 
+[LOG | rank 0 | 2026-04-15 13:52:39]  - total: 10
+[LOG | rank 0 | 2026-04-15 13:52:39]  - min:   10
+[LOG | rank 0 | 2026-04-15 13:52:39]  - avg:   10
+[LOG | rank 0 | 2026-04-15 13:52:39]  - max:   10
+[LOG | rank 0 | 2026-04-15 13:52:39] 
+[LOG | rank 0 | 2026-04-15 13:52:43] [EpsilonDivDiv] tile size (x,y,r)=(3,3,16), r_passes=1
+[LOG | rank 0 | 2026-04-15 13:52:43] [EpsilonDivDiv] number of tiles (x,y,r)=(86,86,16), team_size=144, blocks=1183360
+[LOG | rank 0 | 2026-04-15 13:52:43] [EpsilonDivDiv] kernel path = fast-dirichlet-neumann
+[LOG | rank 0 | 2026-04-15 13:52:43] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:43] |      dofs | duration (s) | id | level |           timestamp | updated dofs/sec |
+[LOG | rank 0 | 2026-04-15 13:52:43] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:43] | 505284102 |    4.123e-02 |  0 |     8 | 2026-04-15 13:52:43 |        1.226e+10 |
+[LOG | rank 0 | 2026-04-15 13:52:43] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:43] dofs,duration (s),id,level,timestamp,updated dofs/sec
+[LOG | rank 0 | 2026-04-15 13:52:43] 505284102,4.123e-02,0,8,2026-04-15 13:52:43,1.226e+10
+[LOG | rank 0 | 2026-04-15 13:52:43] 
+[LOG | rank 0 | 2026-04-15 13:52:43] 
+--- (3,32,1) team=576 ---
+[LOG | rank 0 | 2026-04-15 13:52:44] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:44]           TerraNeo - Run Info          
+[LOG | rank 0 | 2026-04-15 13:52:44] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:44] Wall time start : 2026-04-15 13:52:44
+[LOG | rank 0 | 2026-04-15 13:52:44] Executable path : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators"
+[LOG | rank 0 | 2026-04-15 13:52:44] Executable dir  : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/."
+[LOG | rank 0 | 2026-04-15 13:52:44] Working dir     : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance"
+[LOG | rank 0 | 2026-04-15 13:52:44] Command line    : /home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators --min-level 8 --max-level 8 --executions 5 --lat-tile 3 --r-tile 32 --r-passes 1
+[LOG | rank 0 | 2026-04-15 13:52:44] MPI processes   : 1
+[LOG | rank 0 | 2026-04-15 13:52:44] MPI rank        : 0
+[LOG | rank 0 | 2026-04-15 13:52:44] Kokkos threads  : 32
+[LOG | rank 0 | 2026-04-15 13:52:44] Kokkos devices  : 1
+[LOG | rank 0 | 2026-04-15 13:52:44] ExecSpace       : Cuda
+[LOG | rank 0 | 2026-04-15 13:52:44] MemSpace        : Cuda
+[LOG | rank 0 | 2026-04-15 13:52:44] Rank 0: device id = 0, node = h12-13
+[LOG | rank 0 | 2026-04-15 13:52:44] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:44] 
+[LOG | rank 0 | 2026-04-15 13:52:44] 
+[LOG | rank 0 | 2026-04-15 13:52:44] Operator benchmark. Runs a couple of matrix-vector multiplications for various operators to get an idea of the throughput.
+[LOG | rank 0 | 2026-04-15 13:52:44] 
+[LOG | rank 0 | 2026-04-15 13:52:44] Name                           Count  Value      Default
+[LOG | rank 0 | 2026-04-15 13:52:44] ----------------------------------------------------------
+[LOG | rank 0 | 2026-04-15 13:52:44] --help                         0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:52:44] --min-level                    1      8          1
+[LOG | rank 0 | 2026-04-15 13:52:44] --max-level                    1      8          6
+[LOG | rank 0 | 2026-04-15 13:52:44] --refinement-level-subdomains  0      (not set)  0
+[LOG | rank 0 | 2026-04-15 13:52:44] --executions                   1      5          5
+[LOG | rank 0 | 2026-04-15 13:52:44] --lat-tile                     1      3          0
+[LOG | rank 0 | 2026-04-15 13:52:44] --r-tile                       1      32         0
+[LOG | rank 0 | 2026-04-15 13:52:44] --r-passes                     1      1          0
+[LOG | rank 0 | 2026-04-15 13:52:44] --check-hip                    0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:52:44] 
+[LOG | rank 0 | 2026-04-15 13:52:44] 
+[LOG | rank 0 | 2026-04-15 13:52:44] Running operator (matvec) benchmarks.
+[LOG | rank 0 | 2026-04-15 13:52:44] min_level:            8
+[LOG | rank 0 | 2026-04-15 13:52:44] max_level:            8
+[LOG | rank 0 | 2026-04-15 13:52:44] executions per level: 5
+[LOG | rank 0 | 2026-04-15 13:52:44] refinement for subdomains 0
+[LOG | rank 0 | 2026-04-15 13:52:44] 
+[LOG | rank 0 | 2026-04-15 13:52:44] EpsDivDivKerngen Kokkos (double)
+[LOG | rank 0 | 2026-04-15 13:52:44] Subdomain distribution: 
+[LOG | rank 0 | 2026-04-15 13:52:44]  - total: 10
+[LOG | rank 0 | 2026-04-15 13:52:44]  - min:   10
+[LOG | rank 0 | 2026-04-15 13:52:44]  - avg:   10
+[LOG | rank 0 | 2026-04-15 13:52:44]  - max:   10
+[LOG | rank 0 | 2026-04-15 13:52:44] 
+[LOG | rank 0 | 2026-04-15 13:52:47] [EpsilonDivDiv] tile size (x,y,r)=(3,3,32), r_passes=1
+[LOG | rank 0 | 2026-04-15 13:52:47] [EpsilonDivDiv] number of tiles (x,y,r)=(86,86,8), team_size=288, blocks=591680
+[LOG | rank 0 | 2026-04-15 13:52:47] [EpsilonDivDiv] kernel path = fast-dirichlet-neumann
+[LOG | rank 0 | 2026-04-15 13:52:47] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:47] |      dofs | duration (s) | id | level |           timestamp | updated dofs/sec |
+[LOG | rank 0 | 2026-04-15 13:52:47] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:47] | 505284102 |    3.830e-02 |  0 |     8 | 2026-04-15 13:52:47 |        1.319e+10 |
+[LOG | rank 0 | 2026-04-15 13:52:47] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:47] dofs,duration (s),id,level,timestamp,updated dofs/sec
+[LOG | rank 0 | 2026-04-15 13:52:47] 505284102,3.830e-02,0,8,2026-04-15 13:52:47,1.319e+10
+[LOG | rank 0 | 2026-04-15 13:52:47] 
+[LOG | rank 0 | 2026-04-15 13:52:47] 
+--- (3,64,1) team=1152 SKIP (too big) ---
+--- (4,2,1) team=64 ---
+[LOG | rank 0 | 2026-04-15 13:52:49] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:49]           TerraNeo - Run Info          
+[LOG | rank 0 | 2026-04-15 13:52:49] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:49] Wall time start : 2026-04-15 13:52:49
+[LOG | rank 0 | 2026-04-15 13:52:49] Executable path : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators"
+[LOG | rank 0 | 2026-04-15 13:52:49] Executable dir  : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/."
+[LOG | rank 0 | 2026-04-15 13:52:49] Working dir     : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance"
+[LOG | rank 0 | 2026-04-15 13:52:49] Command line    : /home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators --min-level 8 --max-level 8 --executions 5 --lat-tile 4 --r-tile 2 --r-passes 1
+[LOG | rank 0 | 2026-04-15 13:52:49] MPI processes   : 1
+[LOG | rank 0 | 2026-04-15 13:52:49] MPI rank        : 0
+[LOG | rank 0 | 2026-04-15 13:52:49] Kokkos threads  : 32
+[LOG | rank 0 | 2026-04-15 13:52:49] Kokkos devices  : 1
+[LOG | rank 0 | 2026-04-15 13:52:49] ExecSpace       : Cuda
+[LOG | rank 0 | 2026-04-15 13:52:49] MemSpace        : Cuda
+[LOG | rank 0 | 2026-04-15 13:52:49] Rank 0: device id = 0, node = h12-13
+[LOG | rank 0 | 2026-04-15 13:52:49] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:49] 
+[LOG | rank 0 | 2026-04-15 13:52:49] 
+[LOG | rank 0 | 2026-04-15 13:52:49] Operator benchmark. Runs a couple of matrix-vector multiplications for various operators to get an idea of the throughput.
+[LOG | rank 0 | 2026-04-15 13:52:49] 
+[LOG | rank 0 | 2026-04-15 13:52:49] Name                           Count  Value      Default
+[LOG | rank 0 | 2026-04-15 13:52:49] ----------------------------------------------------------
+[LOG | rank 0 | 2026-04-15 13:52:49] --help                         0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:52:49] --min-level                    1      8          1
+[LOG | rank 0 | 2026-04-15 13:52:49] --max-level                    1      8          6
+[LOG | rank 0 | 2026-04-15 13:52:49] --refinement-level-subdomains  0      (not set)  0
+[LOG | rank 0 | 2026-04-15 13:52:49] --executions                   1      5          5
+[LOG | rank 0 | 2026-04-15 13:52:49] --lat-tile                     1      4          0
+[LOG | rank 0 | 2026-04-15 13:52:49] --r-tile                       1      2          0
+[LOG | rank 0 | 2026-04-15 13:52:49] --r-passes                     1      1          0
+[LOG | rank 0 | 2026-04-15 13:52:49] --check-hip                    0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:52:49] 
+[LOG | rank 0 | 2026-04-15 13:52:49] 
+[LOG | rank 0 | 2026-04-15 13:52:49] Running operator (matvec) benchmarks.
+[LOG | rank 0 | 2026-04-15 13:52:49] min_level:            8
+[LOG | rank 0 | 2026-04-15 13:52:49] max_level:            8
+[LOG | rank 0 | 2026-04-15 13:52:49] executions per level: 5
+[LOG | rank 0 | 2026-04-15 13:52:49] refinement for subdomains 0
+[LOG | rank 0 | 2026-04-15 13:52:49] 
+[LOG | rank 0 | 2026-04-15 13:52:49] EpsDivDivKerngen Kokkos (double)
+[LOG | rank 0 | 2026-04-15 13:52:49] Subdomain distribution: 
+[LOG | rank 0 | 2026-04-15 13:52:49]  - total: 10
+[LOG | rank 0 | 2026-04-15 13:52:49]  - min:   10
+[LOG | rank 0 | 2026-04-15 13:52:49]  - avg:   10
+[LOG | rank 0 | 2026-04-15 13:52:49]  - max:   10
+[LOG | rank 0 | 2026-04-15 13:52:49] 
+[LOG | rank 0 | 2026-04-15 13:52:52] [EpsilonDivDiv] tile size (x,y,r)=(4,4,2), r_passes=1
+[LOG | rank 0 | 2026-04-15 13:52:52] [EpsilonDivDiv] number of tiles (x,y,r)=(64,64,128), team_size=32, blocks=5242880
+[LOG | rank 0 | 2026-04-15 13:52:52] [EpsilonDivDiv] kernel path = fast-dirichlet-neumann
+[LOG | rank 0 | 2026-04-15 13:52:52] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:52] |      dofs | duration (s) | id | level |           timestamp | updated dofs/sec |
+[LOG | rank 0 | 2026-04-15 13:52:52] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:52] | 505284102 |    6.769e-02 |  0 |     8 | 2026-04-15 13:52:52 |        7.464e+09 |
+[LOG | rank 0 | 2026-04-15 13:52:52] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:52] dofs,duration (s),id,level,timestamp,updated dofs/sec
+[LOG | rank 0 | 2026-04-15 13:52:52] 505284102,6.769e-02,0,8,2026-04-15 13:52:52,7.464e+09
+[LOG | rank 0 | 2026-04-15 13:52:52] 
+[LOG | rank 0 | 2026-04-15 13:52:52] 
+--- (4,4,1) team=128 ---
+[LOG | rank 0 | 2026-04-15 13:52:54] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:54]           TerraNeo - Run Info          
+[LOG | rank 0 | 2026-04-15 13:52:54] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:54] Wall time start : 2026-04-15 13:52:54
+[LOG | rank 0 | 2026-04-15 13:52:54] Executable path : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators"
+[LOG | rank 0 | 2026-04-15 13:52:54] Executable dir  : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/."
+[LOG | rank 0 | 2026-04-15 13:52:54] Working dir     : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance"
+[LOG | rank 0 | 2026-04-15 13:52:54] Command line    : /home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators --min-level 8 --max-level 8 --executions 5 --lat-tile 4 --r-tile 4 --r-passes 1
+[LOG | rank 0 | 2026-04-15 13:52:54] MPI processes   : 1
+[LOG | rank 0 | 2026-04-15 13:52:54] MPI rank        : 0
+[LOG | rank 0 | 2026-04-15 13:52:54] Kokkos threads  : 32
+[LOG | rank 0 | 2026-04-15 13:52:54] Kokkos devices  : 1
+[LOG | rank 0 | 2026-04-15 13:52:54] ExecSpace       : Cuda
+[LOG | rank 0 | 2026-04-15 13:52:54] MemSpace        : Cuda
+[LOG | rank 0 | 2026-04-15 13:52:54] Rank 0: device id = 0, node = h12-13
+[LOG | rank 0 | 2026-04-15 13:52:54] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:54] 
+[LOG | rank 0 | 2026-04-15 13:52:54] 
+[LOG | rank 0 | 2026-04-15 13:52:54] Operator benchmark. Runs a couple of matrix-vector multiplications for various operators to get an idea of the throughput.
+[LOG | rank 0 | 2026-04-15 13:52:54] 
+[LOG | rank 0 | 2026-04-15 13:52:54] Name                           Count  Value      Default
+[LOG | rank 0 | 2026-04-15 13:52:54] ----------------------------------------------------------
+[LOG | rank 0 | 2026-04-15 13:52:54] --help                         0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:52:54] --min-level                    1      8          1
+[LOG | rank 0 | 2026-04-15 13:52:54] --max-level                    1      8          6
+[LOG | rank 0 | 2026-04-15 13:52:54] --refinement-level-subdomains  0      (not set)  0
+[LOG | rank 0 | 2026-04-15 13:52:54] --executions                   1      5          5
+[LOG | rank 0 | 2026-04-15 13:52:54] --lat-tile                     1      4          0
+[LOG | rank 0 | 2026-04-15 13:52:54] --r-tile                       1      4          0
+[LOG | rank 0 | 2026-04-15 13:52:54] --r-passes                     1      1          0
+[LOG | rank 0 | 2026-04-15 13:52:54] --check-hip                    0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:52:54] 
+[LOG | rank 0 | 2026-04-15 13:52:54] 
+[LOG | rank 0 | 2026-04-15 13:52:54] Running operator (matvec) benchmarks.
+[LOG | rank 0 | 2026-04-15 13:52:54] min_level:            8
+[LOG | rank 0 | 2026-04-15 13:52:54] max_level:            8
+[LOG | rank 0 | 2026-04-15 13:52:54] executions per level: 5
+[LOG | rank 0 | 2026-04-15 13:52:54] refinement for subdomains 0
+[LOG | rank 0 | 2026-04-15 13:52:54] 
+[LOG | rank 0 | 2026-04-15 13:52:54] EpsDivDivKerngen Kokkos (double)
+[LOG | rank 0 | 2026-04-15 13:52:54] Subdomain distribution: 
+[LOG | rank 0 | 2026-04-15 13:52:54]  - total: 10
+[LOG | rank 0 | 2026-04-15 13:52:54]  - min:   10
+[LOG | rank 0 | 2026-04-15 13:52:54]  - avg:   10
+[LOG | rank 0 | 2026-04-15 13:52:54]  - max:   10
+[LOG | rank 0 | 2026-04-15 13:52:54] 
+[LOG | rank 0 | 2026-04-15 13:52:57] [EpsilonDivDiv] tile size (x,y,r)=(4,4,4), r_passes=1
+[LOG | rank 0 | 2026-04-15 13:52:57] [EpsilonDivDiv] number of tiles (x,y,r)=(64,64,64), team_size=64, blocks=2621440
+[LOG | rank 0 | 2026-04-15 13:52:57] [EpsilonDivDiv] kernel path = fast-dirichlet-neumann
+[LOG | rank 0 | 2026-04-15 13:52:57] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:57] |      dofs | duration (s) | id | level |           timestamp | updated dofs/sec |
+[LOG | rank 0 | 2026-04-15 13:52:57] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:57] | 505284102 |    5.051e-02 |  0 |     8 | 2026-04-15 13:52:57 |        1.000e+10 |
+[LOG | rank 0 | 2026-04-15 13:52:57] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:52:57] dofs,duration (s),id,level,timestamp,updated dofs/sec
+[LOG | rank 0 | 2026-04-15 13:52:57] 505284102,5.051e-02,0,8,2026-04-15 13:52:57,1.000e+10
+[LOG | rank 0 | 2026-04-15 13:52:57] 
+[LOG | rank 0 | 2026-04-15 13:52:57] 
+--- (4,8,1) team=256 ---
+[LOG | rank 0 | 2026-04-15 13:52:58] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:58]           TerraNeo - Run Info          
+[LOG | rank 0 | 2026-04-15 13:52:58] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:58] Wall time start : 2026-04-15 13:52:58
+[LOG | rank 0 | 2026-04-15 13:52:58] Executable path : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators"
+[LOG | rank 0 | 2026-04-15 13:52:58] Executable dir  : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/."
+[LOG | rank 0 | 2026-04-15 13:52:58] Working dir     : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance"
+[LOG | rank 0 | 2026-04-15 13:52:58] Command line    : /home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators --min-level 8 --max-level 8 --executions 5 --lat-tile 4 --r-tile 8 --r-passes 1
+[LOG | rank 0 | 2026-04-15 13:52:58] MPI processes   : 1
+[LOG | rank 0 | 2026-04-15 13:52:58] MPI rank        : 0
+[LOG | rank 0 | 2026-04-15 13:52:58] Kokkos threads  : 32
+[LOG | rank 0 | 2026-04-15 13:52:58] Kokkos devices  : 1
+[LOG | rank 0 | 2026-04-15 13:52:58] ExecSpace       : Cuda
+[LOG | rank 0 | 2026-04-15 13:52:58] MemSpace        : Cuda
+[LOG | rank 0 | 2026-04-15 13:52:58] Rank 0: device id = 0, node = h12-13
+[LOG | rank 0 | 2026-04-15 13:52:58] =========================================
+[LOG | rank 0 | 2026-04-15 13:52:58] 
+[LOG | rank 0 | 2026-04-15 13:52:58] 
+[LOG | rank 0 | 2026-04-15 13:52:58] Operator benchmark. Runs a couple of matrix-vector multiplications for various operators to get an idea of the throughput.
+[LOG | rank 0 | 2026-04-15 13:52:58] 
+[LOG | rank 0 | 2026-04-15 13:52:58] Name                           Count  Value      Default
+[LOG | rank 0 | 2026-04-15 13:52:58] ----------------------------------------------------------
+[LOG | rank 0 | 2026-04-15 13:52:58] --help                         0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:52:58] --min-level                    1      8          1
+[LOG | rank 0 | 2026-04-15 13:52:58] --max-level                    1      8          6
+[LOG | rank 0 | 2026-04-15 13:52:58] --refinement-level-subdomains  0      (not set)  0
+[LOG | rank 0 | 2026-04-15 13:52:58] --executions                   1      5          5
+[LOG | rank 0 | 2026-04-15 13:52:58] --lat-tile                     1      4          0
+[LOG | rank 0 | 2026-04-15 13:52:58] --r-tile                       1      8          0
+[LOG | rank 0 | 2026-04-15 13:52:58] --r-passes                     1      1          0
+[LOG | rank 0 | 2026-04-15 13:52:58] --check-hip                    0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:52:58] 
+[LOG | rank 0 | 2026-04-15 13:52:58] 
+[LOG | rank 0 | 2026-04-15 13:52:58] Running operator (matvec) benchmarks.
+[LOG | rank 0 | 2026-04-15 13:52:58] min_level:            8
+[LOG | rank 0 | 2026-04-15 13:52:58] max_level:            8
+[LOG | rank 0 | 2026-04-15 13:52:58] executions per level: 5
+[LOG | rank 0 | 2026-04-15 13:52:58] refinement for subdomains 0
+[LOG | rank 0 | 2026-04-15 13:52:58] 
+[LOG | rank 0 | 2026-04-15 13:52:58] EpsDivDivKerngen Kokkos (double)
+[LOG | rank 0 | 2026-04-15 13:52:58] Subdomain distribution: 
+[LOG | rank 0 | 2026-04-15 13:52:58]  - total: 10
+[LOG | rank 0 | 2026-04-15 13:52:58]  - min:   10
+[LOG | rank 0 | 2026-04-15 13:52:58]  - avg:   10
+[LOG | rank 0 | 2026-04-15 13:52:58]  - max:   10
+[LOG | rank 0 | 2026-04-15 13:52:58] 
+[LOG | rank 0 | 2026-04-15 13:53:02] [EpsilonDivDiv] tile size (x,y,r)=(4,4,8), r_passes=1
+[LOG | rank 0 | 2026-04-15 13:53:02] [EpsilonDivDiv] number of tiles (x,y,r)=(64,64,32), team_size=128, blocks=1310720
+[LOG | rank 0 | 2026-04-15 13:53:02] [EpsilonDivDiv] kernel path = fast-dirichlet-neumann
+[LOG | rank 0 | 2026-04-15 13:53:02] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:53:02] |      dofs | duration (s) | id | level |           timestamp | updated dofs/sec |
+[LOG | rank 0 | 2026-04-15 13:53:02] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:53:02] | 505284102 |    4.231e-02 |  0 |     8 | 2026-04-15 13:53:02 |        1.194e+10 |
+[LOG | rank 0 | 2026-04-15 13:53:02] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:53:02] dofs,duration (s),id,level,timestamp,updated dofs/sec
+[LOG | rank 0 | 2026-04-15 13:53:02] 505284102,4.231e-02,0,8,2026-04-15 13:53:02,1.194e+10
+[LOG | rank 0 | 2026-04-15 13:53:02] 
+[LOG | rank 0 | 2026-04-15 13:53:02] 
+--- (4,16,1) team=512 ---
+[LOG | rank 0 | 2026-04-15 13:53:03] =========================================
+[LOG | rank 0 | 2026-04-15 13:53:03]           TerraNeo - Run Info          
+[LOG | rank 0 | 2026-04-15 13:53:03] =========================================
+[LOG | rank 0 | 2026-04-15 13:53:03] Wall time start : 2026-04-15 13:53:03
+[LOG | rank 0 | 2026-04-15 13:53:03] Executable path : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators"
+[LOG | rank 0 | 2026-04-15 13:53:03] Executable dir  : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/."
+[LOG | rank 0 | 2026-04-15 13:53:03] Working dir     : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance"
+[LOG | rank 0 | 2026-04-15 13:53:03] Command line    : /home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators --min-level 8 --max-level 8 --executions 5 --lat-tile 4 --r-tile 16 --r-passes 1
+[LOG | rank 0 | 2026-04-15 13:53:03] MPI processes   : 1
+[LOG | rank 0 | 2026-04-15 13:53:03] MPI rank        : 0
+[LOG | rank 0 | 2026-04-15 13:53:03] Kokkos threads  : 32
+[LOG | rank 0 | 2026-04-15 13:53:03] Kokkos devices  : 1
+[LOG | rank 0 | 2026-04-15 13:53:03] ExecSpace       : Cuda
+[LOG | rank 0 | 2026-04-15 13:53:03] MemSpace        : Cuda
+[LOG | rank 0 | 2026-04-15 13:53:03] Rank 0: device id = 0, node = h12-13
+[LOG | rank 0 | 2026-04-15 13:53:03] =========================================
+[LOG | rank 0 | 2026-04-15 13:53:03] 
+[LOG | rank 0 | 2026-04-15 13:53:03] 
+[LOG | rank 0 | 2026-04-15 13:53:03] Operator benchmark. Runs a couple of matrix-vector multiplications for various operators to get an idea of the throughput.
+[LOG | rank 0 | 2026-04-15 13:53:03] 
+[LOG | rank 0 | 2026-04-15 13:53:03] Name                           Count  Value      Default
+[LOG | rank 0 | 2026-04-15 13:53:03] ----------------------------------------------------------
+[LOG | rank 0 | 2026-04-15 13:53:03] --help                         0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:53:03] --min-level                    1      8          1
+[LOG | rank 0 | 2026-04-15 13:53:03] --max-level                    1      8          6
+[LOG | rank 0 | 2026-04-15 13:53:03] --refinement-level-subdomains  0      (not set)  0
+[LOG | rank 0 | 2026-04-15 13:53:03] --executions                   1      5          5
+[LOG | rank 0 | 2026-04-15 13:53:03] --lat-tile                     1      4          0
+[LOG | rank 0 | 2026-04-15 13:53:03] --r-tile                       1      16         0
+[LOG | rank 0 | 2026-04-15 13:53:03] --r-passes                     1      1          0
+[LOG | rank 0 | 2026-04-15 13:53:03] --check-hip                    0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:53:03] 
+[LOG | rank 0 | 2026-04-15 13:53:03] 
+[LOG | rank 0 | 2026-04-15 13:53:03] Running operator (matvec) benchmarks.
+[LOG | rank 0 | 2026-04-15 13:53:03] min_level:            8
+[LOG | rank 0 | 2026-04-15 13:53:03] max_level:            8
+[LOG | rank 0 | 2026-04-15 13:53:03] executions per level: 5
+[LOG | rank 0 | 2026-04-15 13:53:03] refinement for subdomains 0
+[LOG | rank 0 | 2026-04-15 13:53:03] 
+[LOG | rank 0 | 2026-04-15 13:53:03] EpsDivDivKerngen Kokkos (double)
+[LOG | rank 0 | 2026-04-15 13:53:03] Subdomain distribution: 
+[LOG | rank 0 | 2026-04-15 13:53:03]  - total: 10
+[LOG | rank 0 | 2026-04-15 13:53:03]  - min:   10
+[LOG | rank 0 | 2026-04-15 13:53:03]  - avg:   10
+[LOG | rank 0 | 2026-04-15 13:53:03]  - max:   10
+[LOG | rank 0 | 2026-04-15 13:53:03] 
+[LOG | rank 0 | 2026-04-15 13:53:06] [EpsilonDivDiv] tile size (x,y,r)=(4,4,16), r_passes=1
+[LOG | rank 0 | 2026-04-15 13:53:06] [EpsilonDivDiv] number of tiles (x,y,r)=(64,64,16), team_size=256, blocks=655360
+[LOG | rank 0 | 2026-04-15 13:53:06] [EpsilonDivDiv] kernel path = fast-dirichlet-neumann
+[LOG | rank 0 | 2026-04-15 13:53:06] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:53:06] |      dofs | duration (s) | id | level |           timestamp | updated dofs/sec |
+[LOG | rank 0 | 2026-04-15 13:53:06] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:53:06] | 505284102 |    3.864e-02 |  0 |     8 | 2026-04-15 13:53:06 |        1.308e+10 |
+[LOG | rank 0 | 2026-04-15 13:53:06] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:53:06] dofs,duration (s),id,level,timestamp,updated dofs/sec
+[LOG | rank 0 | 2026-04-15 13:53:06] 505284102,3.864e-02,0,8,2026-04-15 13:53:06,1.308e+10
+[LOG | rank 0 | 2026-04-15 13:53:06] 
+[LOG | rank 0 | 2026-04-15 13:53:06] 
+--- (4,32,1) team=1024 ---
+[LOG | rank 0 | 2026-04-15 13:53:08] =========================================
+[LOG | rank 0 | 2026-04-15 13:53:08]           TerraNeo - Run Info          
+[LOG | rank 0 | 2026-04-15 13:53:08] =========================================
+[LOG | rank 0 | 2026-04-15 13:53:08] Wall time start : 2026-04-15 13:53:08
+[LOG | rank 0 | 2026-04-15 13:53:08] Executable path : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators"
+[LOG | rank 0 | 2026-04-15 13:53:08] Executable dir  : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/."
+[LOG | rank 0 | 2026-04-15 13:53:08] Working dir     : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance"
+[LOG | rank 0 | 2026-04-15 13:53:08] Command line    : /home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators --min-level 8 --max-level 8 --executions 5 --lat-tile 4 --r-tile 32 --r-passes 1
+[LOG | rank 0 | 2026-04-15 13:53:08] MPI processes   : 1
+[LOG | rank 0 | 2026-04-15 13:53:08] MPI rank        : 0
+[LOG | rank 0 | 2026-04-15 13:53:08] Kokkos threads  : 32
+[LOG | rank 0 | 2026-04-15 13:53:08] Kokkos devices  : 1
+[LOG | rank 0 | 2026-04-15 13:53:08] ExecSpace       : Cuda
+[LOG | rank 0 | 2026-04-15 13:53:08] MemSpace        : Cuda
+[LOG | rank 0 | 2026-04-15 13:53:08] Rank 0: device id = 0, node = h12-13
+[LOG | rank 0 | 2026-04-15 13:53:08] =========================================
+[LOG | rank 0 | 2026-04-15 13:53:08] 
+[LOG | rank 0 | 2026-04-15 13:53:08] 
+[LOG | rank 0 | 2026-04-15 13:53:08] Operator benchmark. Runs a couple of matrix-vector multiplications for various operators to get an idea of the throughput.
+[LOG | rank 0 | 2026-04-15 13:53:08] 
+[LOG | rank 0 | 2026-04-15 13:53:08] Name                           Count  Value      Default
+[LOG | rank 0 | 2026-04-15 13:53:08] ----------------------------------------------------------
+[LOG | rank 0 | 2026-04-15 13:53:08] --help                         0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:53:08] --min-level                    1      8          1
+[LOG | rank 0 | 2026-04-15 13:53:08] --max-level                    1      8          6
+[LOG | rank 0 | 2026-04-15 13:53:08] --refinement-level-subdomains  0      (not set)  0
+[LOG | rank 0 | 2026-04-15 13:53:08] --executions                   1      5          5
+[LOG | rank 0 | 2026-04-15 13:53:08] --lat-tile                     1      4          0
+[LOG | rank 0 | 2026-04-15 13:53:08] --r-tile                       1      32         0
+[LOG | rank 0 | 2026-04-15 13:53:08] --r-passes                     1      1          0
+[LOG | rank 0 | 2026-04-15 13:53:08] --check-hip                    0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:53:08] 
+[LOG | rank 0 | 2026-04-15 13:53:08] 
+[LOG | rank 0 | 2026-04-15 13:53:08] Running operator (matvec) benchmarks.
+[LOG | rank 0 | 2026-04-15 13:53:08] min_level:            8
+[LOG | rank 0 | 2026-04-15 13:53:08] max_level:            8
+[LOG | rank 0 | 2026-04-15 13:53:08] executions per level: 5
+[LOG | rank 0 | 2026-04-15 13:53:08] refinement for subdomains 0
+[LOG | rank 0 | 2026-04-15 13:53:08] 
+[LOG | rank 0 | 2026-04-15 13:53:08] EpsDivDivKerngen Kokkos (double)
+[LOG | rank 0 | 2026-04-15 13:53:08] Subdomain distribution: 
+[LOG | rank 0 | 2026-04-15 13:53:08]  - total: 10
+[LOG | rank 0 | 2026-04-15 13:53:08]  - min:   10
+[LOG | rank 0 | 2026-04-15 13:53:08]  - avg:   10
+[LOG | rank 0 | 2026-04-15 13:53:08]  - max:   10
+[LOG | rank 0 | 2026-04-15 13:53:08] 
+[LOG | rank 0 | 2026-04-15 13:53:11] [EpsilonDivDiv] tile size (x,y,r)=(4,4,32), r_passes=1
+[LOG | rank 0 | 2026-04-15 13:53:11] [EpsilonDivDiv] number of tiles (x,y,r)=(64,64,8), team_size=512, blocks=327680
+[LOG | rank 0 | 2026-04-15 13:53:11] [EpsilonDivDiv] kernel path = fast-dirichlet-neumann
+[LOG | rank 0 | 2026-04-15 13:53:11] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:53:11] |      dofs | duration (s) | id | level |           timestamp | updated dofs/sec |
+[LOG | rank 0 | 2026-04-15 13:53:11] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:53:11] | 505284102 |    3.810e-02 |  0 |     8 | 2026-04-15 13:53:11 |        1.326e+10 |
+[LOG | rank 0 | 2026-04-15 13:53:11] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:53:11] dofs,duration (s),id,level,timestamp,updated dofs/sec
+[LOG | rank 0 | 2026-04-15 13:53:11] 505284102,3.810e-02,0,8,2026-04-15 13:53:11,1.326e+10
+[LOG | rank 0 | 2026-04-15 13:53:11] 
+[LOG | rank 0 | 2026-04-15 13:53:11] 
+--- (4,64,1) team=2048 SKIP (too big) ---
+--- (8,2,1) team=256 ---
+[LOG | rank 0 | 2026-04-15 13:53:13] =========================================
+[LOG | rank 0 | 2026-04-15 13:53:13]           TerraNeo - Run Info          
+[LOG | rank 0 | 2026-04-15 13:53:13] =========================================
+[LOG | rank 0 | 2026-04-15 13:53:13] Wall time start : 2026-04-15 13:53:13
+[LOG | rank 0 | 2026-04-15 13:53:13] Executable path : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators"
+[LOG | rank 0 | 2026-04-15 13:53:13] Executable dir  : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/."
+[LOG | rank 0 | 2026-04-15 13:53:13] Working dir     : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance"
+[LOG | rank 0 | 2026-04-15 13:53:13] Command line    : /home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators --min-level 8 --max-level 8 --executions 5 --lat-tile 8 --r-tile 2 --r-passes 1
+[LOG | rank 0 | 2026-04-15 13:53:13] MPI processes   : 1
+[LOG | rank 0 | 2026-04-15 13:53:13] MPI rank        : 0
+[LOG | rank 0 | 2026-04-15 13:53:13] Kokkos threads  : 32
+[LOG | rank 0 | 2026-04-15 13:53:13] Kokkos devices  : 1
+[LOG | rank 0 | 2026-04-15 13:53:13] ExecSpace       : Cuda
+[LOG | rank 0 | 2026-04-15 13:53:13] MemSpace        : Cuda
+[LOG | rank 0 | 2026-04-15 13:53:13] Rank 0: device id = 0, node = h12-13
+[LOG | rank 0 | 2026-04-15 13:53:13] =========================================
+[LOG | rank 0 | 2026-04-15 13:53:13] 
+[LOG | rank 0 | 2026-04-15 13:53:13] 
+[LOG | rank 0 | 2026-04-15 13:53:13] Operator benchmark. Runs a couple of matrix-vector multiplications for various operators to get an idea of the throughput.
+[LOG | rank 0 | 2026-04-15 13:53:13] 
+[LOG | rank 0 | 2026-04-15 13:53:13] Name                           Count  Value      Default
+[LOG | rank 0 | 2026-04-15 13:53:13] ----------------------------------------------------------
+[LOG | rank 0 | 2026-04-15 13:53:13] --help                         0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:53:13] --min-level                    1      8          1
+[LOG | rank 0 | 2026-04-15 13:53:13] --max-level                    1      8          6
+[LOG | rank 0 | 2026-04-15 13:53:13] --refinement-level-subdomains  0      (not set)  0
+[LOG | rank 0 | 2026-04-15 13:53:13] --executions                   1      5          5
+[LOG | rank 0 | 2026-04-15 13:53:13] --lat-tile                     1      8          0
+[LOG | rank 0 | 2026-04-15 13:53:13] --r-tile                       1      2          0
+[LOG | rank 0 | 2026-04-15 13:53:13] --r-passes                     1      1          0
+[LOG | rank 0 | 2026-04-15 13:53:13] --check-hip                    0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:53:13] 
+[LOG | rank 0 | 2026-04-15 13:53:13] 
+[LOG | rank 0 | 2026-04-15 13:53:13] Running operator (matvec) benchmarks.
+[LOG | rank 0 | 2026-04-15 13:53:13] min_level:            8
+[LOG | rank 0 | 2026-04-15 13:53:13] max_level:            8
+[LOG | rank 0 | 2026-04-15 13:53:13] executions per level: 5
+[LOG | rank 0 | 2026-04-15 13:53:13] refinement for subdomains 0
+[LOG | rank 0 | 2026-04-15 13:53:13] 
+[LOG | rank 0 | 2026-04-15 13:53:13] EpsDivDivKerngen Kokkos (double)
+[LOG | rank 0 | 2026-04-15 13:53:13] Subdomain distribution: 
+[LOG | rank 0 | 2026-04-15 13:53:13]  - total: 10
+[LOG | rank 0 | 2026-04-15 13:53:13]  - min:   10
+[LOG | rank 0 | 2026-04-15 13:53:13]  - avg:   10
+[LOG | rank 0 | 2026-04-15 13:53:13]  - max:   10
+[LOG | rank 0 | 2026-04-15 13:53:13] 
+[LOG | rank 0 | 2026-04-15 13:53:16] [EpsilonDivDiv] tile size (x,y,r)=(8,8,2), r_passes=1
+[LOG | rank 0 | 2026-04-15 13:53:16] [EpsilonDivDiv] number of tiles (x,y,r)=(32,32,128), team_size=128, blocks=1310720
+[LOG | rank 0 | 2026-04-15 13:53:16] [EpsilonDivDiv] kernel path = fast-dirichlet-neumann
+[LOG | rank 0 | 2026-04-15 13:53:16] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:53:16] |      dofs | duration (s) | id | level |           timestamp | updated dofs/sec |
+[LOG | rank 0 | 2026-04-15 13:53:16] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:53:16] | 505284102 |    6.698e-02 |  0 |     8 | 2026-04-15 13:53:16 |        7.544e+09 |
+[LOG | rank 0 | 2026-04-15 13:53:16] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:53:16] dofs,duration (s),id,level,timestamp,updated dofs/sec
+[LOG | rank 0 | 2026-04-15 13:53:16] 505284102,6.698e-02,0,8,2026-04-15 13:53:16,7.544e+09
+[LOG | rank 0 | 2026-04-15 13:53:16] 
+[LOG | rank 0 | 2026-04-15 13:53:16] 
+--- (8,4,1) team=512 ---
+[LOG | rank 0 | 2026-04-15 13:53:18] =========================================
+[LOG | rank 0 | 2026-04-15 13:53:18]           TerraNeo - Run Info          
+[LOG | rank 0 | 2026-04-15 13:53:18] =========================================
+[LOG | rank 0 | 2026-04-15 13:53:18] Wall time start : 2026-04-15 13:53:18
+[LOG | rank 0 | 2026-04-15 13:53:18] Executable path : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators"
+[LOG | rank 0 | 2026-04-15 13:53:18] Executable dir  : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/."
+[LOG | rank 0 | 2026-04-15 13:53:18] Working dir     : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance"
+[LOG | rank 0 | 2026-04-15 13:53:18] Command line    : /home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators --min-level 8 --max-level 8 --executions 5 --lat-tile 8 --r-tile 4 --r-passes 1
+[LOG | rank 0 | 2026-04-15 13:53:18] MPI processes   : 1
+[LOG | rank 0 | 2026-04-15 13:53:18] MPI rank        : 0
+[LOG | rank 0 | 2026-04-15 13:53:18] Kokkos threads  : 32
+[LOG | rank 0 | 2026-04-15 13:53:18] Kokkos devices  : 1
+[LOG | rank 0 | 2026-04-15 13:53:18] ExecSpace       : Cuda
+[LOG | rank 0 | 2026-04-15 13:53:18] MemSpace        : Cuda
+[LOG | rank 0 | 2026-04-15 13:53:18] Rank 0: device id = 0, node = h12-13
+[LOG | rank 0 | 2026-04-15 13:53:18] =========================================
+[LOG | rank 0 | 2026-04-15 13:53:18] 
+[LOG | rank 0 | 2026-04-15 13:53:18] 
+[LOG | rank 0 | 2026-04-15 13:53:18] Operator benchmark. Runs a couple of matrix-vector multiplications for various operators to get an idea of the throughput.
+[LOG | rank 0 | 2026-04-15 13:53:18] 
+[LOG | rank 0 | 2026-04-15 13:53:18] Name                           Count  Value      Default
+[LOG | rank 0 | 2026-04-15 13:53:18] ----------------------------------------------------------
+[LOG | rank 0 | 2026-04-15 13:53:18] --help                         0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:53:18] --min-level                    1      8          1
+[LOG | rank 0 | 2026-04-15 13:53:18] --max-level                    1      8          6
+[LOG | rank 0 | 2026-04-15 13:53:18] --refinement-level-subdomains  0      (not set)  0
+[LOG | rank 0 | 2026-04-15 13:53:18] --executions                   1      5          5
+[LOG | rank 0 | 2026-04-15 13:53:18] --lat-tile                     1      8          0
+[LOG | rank 0 | 2026-04-15 13:53:18] --r-tile                       1      4          0
+[LOG | rank 0 | 2026-04-15 13:53:18] --r-passes                     1      1          0
+[LOG | rank 0 | 2026-04-15 13:53:18] --check-hip                    0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:53:18] 
+[LOG | rank 0 | 2026-04-15 13:53:18] 
+[LOG | rank 0 | 2026-04-15 13:53:18] Running operator (matvec) benchmarks.
+[LOG | rank 0 | 2026-04-15 13:53:18] min_level:            8
+[LOG | rank 0 | 2026-04-15 13:53:18] max_level:            8
+[LOG | rank 0 | 2026-04-15 13:53:18] executions per level: 5
+[LOG | rank 0 | 2026-04-15 13:53:18] refinement for subdomains 0
+[LOG | rank 0 | 2026-04-15 13:53:18] 
+[LOG | rank 0 | 2026-04-15 13:53:18] EpsDivDivKerngen Kokkos (double)
+[LOG | rank 0 | 2026-04-15 13:53:18] Subdomain distribution: 
+[LOG | rank 0 | 2026-04-15 13:53:18]  - total: 10
+[LOG | rank 0 | 2026-04-15 13:53:18]  - min:   10
+[LOG | rank 0 | 2026-04-15 13:53:18]  - avg:   10
+[LOG | rank 0 | 2026-04-15 13:53:18]  - max:   10
+[LOG | rank 0 | 2026-04-15 13:53:18] 
+[LOG | rank 0 | 2026-04-15 13:53:21] [EpsilonDivDiv] tile size (x,y,r)=(8,8,4), r_passes=1
+[LOG | rank 0 | 2026-04-15 13:53:21] [EpsilonDivDiv] number of tiles (x,y,r)=(32,32,64), team_size=256, blocks=655360
+[LOG | rank 0 | 2026-04-15 13:53:21] [EpsilonDivDiv] kernel path = fast-dirichlet-neumann
+[LOG | rank 0 | 2026-04-15 13:53:21] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:53:21] |      dofs | duration (s) | id | level |           timestamp | updated dofs/sec |
+[LOG | rank 0 | 2026-04-15 13:53:21] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:53:21] | 505284102 |    4.999e-02 |  0 |     8 | 2026-04-15 13:53:21 |        1.011e+10 |
+[LOG | rank 0 | 2026-04-15 13:53:21] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:53:21] dofs,duration (s),id,level,timestamp,updated dofs/sec
+[LOG | rank 0 | 2026-04-15 13:53:21] 505284102,4.999e-02,0,8,2026-04-15 13:53:21,1.011e+10
+[LOG | rank 0 | 2026-04-15 13:53:21] 
+[LOG | rank 0 | 2026-04-15 13:53:21] 
+--- (8,8,1) team=1024 ---
+[LOG | rank 0 | 2026-04-15 13:53:22] =========================================
+[LOG | rank 0 | 2026-04-15 13:53:22]           TerraNeo - Run Info          
+[LOG | rank 0 | 2026-04-15 13:53:22] =========================================
+[LOG | rank 0 | 2026-04-15 13:53:22] Wall time start : 2026-04-15 13:53:22
+[LOG | rank 0 | 2026-04-15 13:53:22] Executable path : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators"
+[LOG | rank 0 | 2026-04-15 13:53:22] Executable dir  : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/."
+[LOG | rank 0 | 2026-04-15 13:53:22] Working dir     : "/home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance"
+[LOG | rank 0 | 2026-04-15 13:53:22] Command line    : /home/hpc/iwia/iwia054h/terraneo-build/apps/benchmarks/performance/./benchmark_operators --min-level 8 --max-level 8 --executions 5 --lat-tile 8 --r-tile 8 --r-passes 1
+[LOG | rank 0 | 2026-04-15 13:53:22] MPI processes   : 1
+[LOG | rank 0 | 2026-04-15 13:53:22] MPI rank        : 0
+[LOG | rank 0 | 2026-04-15 13:53:22] Kokkos threads  : 32
+[LOG | rank 0 | 2026-04-15 13:53:22] Kokkos devices  : 1
+[LOG | rank 0 | 2026-04-15 13:53:22] ExecSpace       : Cuda
+[LOG | rank 0 | 2026-04-15 13:53:22] MemSpace        : Cuda
+[LOG | rank 0 | 2026-04-15 13:53:22] Rank 0: device id = 0, node = h12-13
+[LOG | rank 0 | 2026-04-15 13:53:22] =========================================
+[LOG | rank 0 | 2026-04-15 13:53:22] 
+[LOG | rank 0 | 2026-04-15 13:53:22] 
+[LOG | rank 0 | 2026-04-15 13:53:22] Operator benchmark. Runs a couple of matrix-vector multiplications for various operators to get an idea of the throughput.
+[LOG | rank 0 | 2026-04-15 13:53:22] 
+[LOG | rank 0 | 2026-04-15 13:53:22] Name                           Count  Value      Default
+[LOG | rank 0 | 2026-04-15 13:53:22] ----------------------------------------------------------
+[LOG | rank 0 | 2026-04-15 13:53:22] --help                         0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:53:22] --min-level                    1      8          1
+[LOG | rank 0 | 2026-04-15 13:53:22] --max-level                    1      8          6
+[LOG | rank 0 | 2026-04-15 13:53:22] --refinement-level-subdomains  0      (not set)  0
+[LOG | rank 0 | 2026-04-15 13:53:22] --executions                   1      5          5
+[LOG | rank 0 | 2026-04-15 13:53:22] --lat-tile                     1      8          0
+[LOG | rank 0 | 2026-04-15 13:53:22] --r-tile                       1      8          0
+[LOG | rank 0 | 2026-04-15 13:53:22] --r-passes                     1      1          0
+[LOG | rank 0 | 2026-04-15 13:53:22] --check-hip                    0      (not set)  
+[LOG | rank 0 | 2026-04-15 13:53:22] 
+[LOG | rank 0 | 2026-04-15 13:53:22] 
+[LOG | rank 0 | 2026-04-15 13:53:22] Running operator (matvec) benchmarks.
+[LOG | rank 0 | 2026-04-15 13:53:22] min_level:            8
+[LOG | rank 0 | 2026-04-15 13:53:22] max_level:            8
+[LOG | rank 0 | 2026-04-15 13:53:22] executions per level: 5
+[LOG | rank 0 | 2026-04-15 13:53:22] refinement for subdomains 0
+[LOG | rank 0 | 2026-04-15 13:53:22] 
+[LOG | rank 0 | 2026-04-15 13:53:22] EpsDivDivKerngen Kokkos (double)
+[LOG | rank 0 | 2026-04-15 13:53:22] Subdomain distribution: 
+[LOG | rank 0 | 2026-04-15 13:53:22]  - total: 10
+[LOG | rank 0 | 2026-04-15 13:53:22]  - min:   10
+[LOG | rank 0 | 2026-04-15 13:53:22]  - avg:   10
+[LOG | rank 0 | 2026-04-15 13:53:22]  - max:   10
+[LOG | rank 0 | 2026-04-15 13:53:22] 
+[LOG | rank 0 | 2026-04-15 13:53:25] [EpsilonDivDiv] tile size (x,y,r)=(8,8,8), r_passes=1
+[LOG | rank 0 | 2026-04-15 13:53:25] [EpsilonDivDiv] number of tiles (x,y,r)=(32,32,32), team_size=512, blocks=327680
+[LOG | rank 0 | 2026-04-15 13:53:25] [EpsilonDivDiv] kernel path = fast-dirichlet-neumann
+[LOG | rank 0 | 2026-04-15 13:53:26] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:53:26] |      dofs | duration (s) | id | level |           timestamp | updated dofs/sec |
+[LOG | rank 0 | 2026-04-15 13:53:26] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:53:26] | 505284102 |    4.192e-02 |  0 |     8 | 2026-04-15 13:53:26 |        1.205e+10 |
+[LOG | rank 0 | 2026-04-15 13:53:26] +-----------+--------------+----+-------+---------------------+------------------+
+[LOG | rank 0 | 2026-04-15 13:53:26] dofs,duration (s),id,level,timestamp,updated dofs/sec
+[LOG | rank 0 | 2026-04-15 13:53:26] 505284102,4.192e-02,0,8,2026-04-15 13:53:26,1.205e+10
+[LOG | rank 0 | 2026-04-15 13:53:26] 
+[LOG | rank 0 | 2026-04-15 13:53:26] 
+--- (8,16,1) team=2048 SKIP (too big) ---
+--- (8,32,1) team=4096 SKIP (too big) ---
+--- (8,64,1) team=8192 SKIP (too big) ---
+=== Done ===
+=== JOB_STATISTICS ===
+=== current date     : Wed Apr 15 13:53:26 CEST 2026
+= Job-ID             : 369729 on helma
+= Job-Name           : mat_sw
+= Job-Command        : /home/hpc/iwia/iwia054h/terraneo/apps/benchmarks/performance/sweep_scripts/sweep_scripts/run_matrix_sweep.sh
+= Initial workdir    : /home/hpc/iwia/iwia054h/terraneo/apps/benchmarks/performance/sweep_scripts/sweep_scripts
+= Queue/Partition    : h100
+= Slurm account      : iwia with QOS=normal
+= Requested resources: cpu=32,mem=175G,node=1,billing=32,gres/gpu=1,gres/gpu:h100=1 for 00:20:00
+= Elapsed runtime    : 00:02:07
+= Total RAM usage    : 0.6 GiB of assigned 175 GiB (0.3%)
+= Node list          : h12-13
+= Subm/Elig/Start/End: 2026-04-15T13:51:19 / 2026-04-15T13:51:19 / 2026-04-15T13:51:19 / 2026-04-15T13:53:26
+======================
+=== Quota infos ======
+    Path                 Used     SoftQ    HardQ    Gracetime  Filec    FileQ    FiHaQ    FileGrace    
+    /home/hpc              76.3G   104.9G   209.7G        N/A     210K     500K   1,000K        N/A    
+======================
+=== GPU utilization ==
+gpu_name, gpu_bus_id, pid, gpu_utilization [%], mem_utilization [%], max_memory_usage [MiB], time [ms]
+NVIDIA H100, 00000000:A6:00.0, 83336, 30 %, 2 %, 10144 MiB, 8277 ms
+NVIDIA H100, 00000000:A6:00.0, 83430, 8 %, 1 %, 10144 MiB, 5246 ms
+NVIDIA H100, 00000000:A6:00.0, 83529, 14 %, 2 %, 10144 MiB, 4667 ms
+NVIDIA H100, 00000000:A6:00.0, 83620, 0 %, 0 %, 10144 MiB, 4422 ms
+NVIDIA H100, 00000000:A6:00.0, 83706, 0 %, 0 %, 10144 MiB, 4287 ms
+NVIDIA H100, 00000000:A6:00.0, 83796, 0 %, 0 %, 10144 MiB, 4332 ms
+NVIDIA H100, 00000000:A6:00.0, 83887, 3 %, 0 %, 10144 MiB, 4652 ms
+NVIDIA H100, 00000000:A6:00.0, 83978, 2 %, 0 %, 10144 MiB, 4377 ms
+NVIDIA H100, 00000000:A6:00.0, 84064, 5 %, 2 %, 10144 MiB, 4256 ms
+NVIDIA H100, 00000000:A6:00.0, 84146, 0 %, 0 %, 10144 MiB, 4239 ms
+NVIDIA H100, 00000000:A6:00.0, 84245, 0 %, 0 %, 10144 MiB, 4294 ms
+NVIDIA H100, 00000000:A6:00.0, 84318, 2 %, 1 %, 10144 MiB, 4263 ms
+NVIDIA H100, 00000000:A6:00.0, 84423, 8 %, 2 %, 10144 MiB, 4458 ms
+NVIDIA H100, 00000000:A6:00.0, 84494, 0 %, 0 %, 10144 MiB, 4359 ms
+NVIDIA H100, 00000000:A6:00.0, 84597, 0 %, 0 %, 10144 MiB, 4283 ms
+NVIDIA H100, 00000000:A6:00.0, 84669, 1 %, 0 %, 10144 MiB, 4246 ms
+NVIDIA H100, 00000000:A6:00.0, 84772, 6 %, 2 %, 10144 MiB, 4251 ms
+NVIDIA H100, 00000000:A6:00.0, 84843, 0 %, 0 %, 10144 MiB, 4395 ms
+NVIDIA H100, 00000000:A6:00.0, 84946, 0 %, 0 %, 10144 MiB, 4299 ms
+NVIDIA H100, 00000000:A6:00.0, 85018, 0 %, 0 %, 10144 MiB, 4279 ms
+NVIDIA H100, 00000000:A6:00.0, 85121, 5 %, 2 %, 10144 MiB, 4224 ms
+NVIDIA H100, 00000000:A6:00.0, 85192, 0 %, 0 %, 10144 MiB, 4246 ms
+NVIDIA H100, 00000000:A6:00.0, 85301, 0 %, 0 %, 10144 MiB, 4406 ms
+NVIDIA H100, 00000000:A6:00.0, 85373, 0 %, 0 %, 10144 MiB, 4312 ms
+NVIDIA H100, 00000000:A6:00.0, 85462, 3 %, 1 %, 10144 MiB, 4270 ms

@@ -20,10 +20,10 @@ struct TwoToOneTablesDevice
     Kokkos::View< double* >    asm_w;
     Kokkos::View< int* >       cls_offsets; // CSR offsets (n_classes + 1)
     Kokkos::View< int*[4] >    cls_members;
-    Kokkos::View< int*[4] >    con_dst;
-    Kokkos::View< int*[4][4] > con_src; // (entry, parent, index-component)
-    Kokkos::View< double*[4] > con_w;
-    Kokkos::View< int* >       con_np;
+    Kokkos::View< int*[4] > con_dst; // one per hanging copy
+    Kokkos::View< int* >    con_off; // CSR offsets (n_hanging + 1)
+    Kokkos::View< int*[4] > con_par; // flat genuine parents
+    Kokkos::View< double* > con_wt;  // flat weights
 };
 
 namespace detail {
@@ -66,29 +66,20 @@ inline TwoToOneTablesDevice upload_2to1_tables( const TwoToOneTables& t )
         Kokkos::deep_copy( d.cls_offsets, h );
     }
 
-    const std::size_t nc = t.con_np.size();
-    d.con_src            = Kokkos::View< int*[4][4] >( "amr2to1_con_src", nc );
-    d.con_w              = Kokkos::View< double*[4] >( "amr2to1_con_w", nc );
-    d.con_np             = Kokkos::View< int* >( "amr2to1_con_np", nc );
+    d.con_par = detail::upload_idx4( t.con_par, "amr2to1_con_par" );
+    d.con_off = Kokkos::View< int* >( "amr2to1_con_off", t.con_off.size() );
     {
-        auto hs = Kokkos::create_mirror_view( d.con_src );
-        auto hw = Kokkos::create_mirror_view( d.con_w );
-        auto hn = Kokkos::create_mirror_view( d.con_np );
-        for ( std::size_t i = 0; i < nc; ++i )
-        {
-            hn( i ) = t.con_np[i];
-            for ( int p = 0; p < 4; ++p )
-            {
-                hs( i, p, 0 ) = t.con_src[i][p].s;
-                hs( i, p, 1 ) = t.con_src[i][p].x;
-                hs( i, p, 2 ) = t.con_src[i][p].y;
-                hs( i, p, 3 ) = t.con_src[i][p].r;
-                hw( i, p )    = t.con_w[i][p];
-            }
-        }
-        Kokkos::deep_copy( d.con_src, hs );
-        Kokkos::deep_copy( d.con_w, hw );
-        Kokkos::deep_copy( d.con_np, hn );
+        auto h = Kokkos::create_mirror_view( d.con_off );
+        for ( std::size_t i = 0; i < t.con_off.size(); ++i )
+            h( i ) = t.con_off[i];
+        Kokkos::deep_copy( d.con_off, h );
+    }
+    d.con_wt = Kokkos::View< double* >( "amr2to1_con_wt", t.con_wt.size() );
+    {
+        auto h = Kokkos::create_mirror_view( d.con_wt );
+        for ( std::size_t i = 0; i < t.con_wt.size(); ++i )
+            h( i ) = t.con_wt[i];
+        Kokkos::deep_copy( d.con_wt, h );
     }
     return d;
 }
@@ -145,23 +136,77 @@ inline void apply_exchange_device( const TwoToOneTablesDevice& t,
     Kokkos::fence();
 }
 
+// Device CLASS-SUM only: assemble coincident copies, but do NOT fold hanging DoFs into their parents.
+// Intended for the smoother DIAGONAL: folding the hanging block-diagonal into parents (with the linear
+// constraint weight, as assemble_distributed does) grossly inflates the parent diagonal in high-viscosity
+// bands -- the true diag(C^T A C) self-term is w^2 and is largely cancelled by the negative parent-hanging
+// cross term, so the parent's own assembled diagonal A_pp is a much closer, smooth, deterministic estimate.
+template < typename ScalarT >
+inline void apply_class_sum_device( const TwoToOneTablesDevice&              t,
+                                    const grid::Grid4DDataScalar< ScalarT >& field )
+{
+    const auto f    = field;
+    const auto co   = t.cls_offsets;
+    const auto cm   = t.cls_members;
+    const int  ncls = std::max( 0, static_cast< int >( co.extent( 0 ) ) - 1 );
+    Kokkos::View< ScalarT* > cls_tmp( "amr2to1_cls_only_tmp", ncls );
+    Kokkos::parallel_for( "amr2to1_cls_gather_only", ncls, KOKKOS_LAMBDA( const int c ) {
+        ScalarT v = 0;
+        for ( int m = co( c ); m < co( c + 1 ); ++m )
+            v += f( cm( m, 0 ), cm( m, 1 ), cm( m, 2 ), cm( m, 3 ) );
+        cls_tmp( c ) = v;
+    } );
+    Kokkos::parallel_for( "amr2to1_cls_bcast_only", ncls, KOKKOS_LAMBDA( const int c ) {
+        for ( int m = co( c ); m < co( c + 1 ); ++m )
+            f( cm( m, 0 ), cm( m, 1 ), cm( m, 2 ), cm( m, 3 ) ) = cls_tmp( c );
+    } );
+    Kokkos::fence();
+}
+
+template < typename ScalarT, int VecDim >
+inline void apply_class_sum_device( const TwoToOneTablesDevice&                   t,
+                                    const grid::Grid4DDataVec< ScalarT, VecDim >& field )
+{
+    for ( int d = 0; d < VecDim; ++d )
+        apply_class_sum_device( t, field.comp_[d] );
+}
+
+// Broadcast each class's canonical (first-member) value to all its coincident copies. Used to make a
+// per-node label (e.g. a coloring) consistent across copies so a probe vector is a clean e_i.
+template < typename ScalarT >
+inline void apply_class_broadcast_device( const TwoToOneTablesDevice&              t,
+                                          const grid::Grid4DDataScalar< ScalarT >& field )
+{
+    const auto f    = field;
+    const auto co   = t.cls_offsets;
+    const auto cm   = t.cls_members;
+    const int  ncls = std::max( 0, static_cast< int >( co.extent( 0 ) ) - 1 );
+    Kokkos::parallel_for( "amr2to1_cls_bcast_canon", ncls, KOKKOS_LAMBDA( const int c ) {
+        const int     m0 = co( c );
+        const ScalarT v  = f( cm( m0, 0 ), cm( m0, 1 ), cm( m0, 2 ), cm( m0, 3 ) );
+        for ( int m = m0 + 1; m < co( c + 1 ); ++m )
+            f( cm( m, 0 ), cm( m, 1 ), cm( m, 2 ), cm( m, 3 ) ) = v;
+    } );
+    Kokkos::fence();
+}
+
 // Device hanging-node constraint: gather interpolations, then overwrite the hanging DoFs.
 template < typename ScalarT >
 inline void apply_constraint_device( const TwoToOneTablesDevice& t,
                                      const grid::Grid4DDataScalar< ScalarT >& field )
 {
-    const auto f  = field;
-    const auto d  = t.con_dst;
-    const auto s  = t.con_src;
-    const auto w  = t.con_w;
-    const auto np = t.con_np;
+    const auto f   = field;
+    const auto d   = t.con_dst;
+    const auto off = t.con_off;
+    const auto par = t.con_par;
+    const auto w   = t.con_wt;
     Kokkos::View< ScalarT* > tmp( "amr2to1_con_tmp", d.extent( 0 ) );
     Kokkos::parallel_for(
         "amr2to1_con_gather", d.extent( 0 ), KOKKOS_LAMBDA( const int i ) {
             ScalarT v = 0;
-            for ( int p = 0; p < np( i ); ++p )
-                v += static_cast< ScalarT >( w( i, p ) ) *
-                     f( s( i, p, 0 ), s( i, p, 1 ), s( i, p, 2 ), s( i, p, 3 ) );
+            for ( int p = off( i ); p < off( i + 1 ); ++p )
+                v += static_cast< ScalarT >( w( p ) ) *
+                     f( par( p, 0 ), par( p, 1 ), par( p, 2 ), par( p, 3 ) );
             tmp( i ) = v;
         } );
     Kokkos::parallel_for(
@@ -187,6 +232,42 @@ inline void apply_constraint_device( const TwoToOneTablesDevice& t,
 {
     for ( int d = 0; d < VecDim; ++d )
         apply_constraint_device( t, field.comp_[d] );
+}
+
+// Transpose of apply_constraint_device (C^T): C sets  h = W*parents  (overwrite hanging, leave parents),
+// so C^T folds each hanging DoF's value ADDITIVELY back into its parents (parents += w*h) and zeroes the
+// hanging slot (hanging is not a free DoF). This is the fine-grid piece needed to make the geometric
+// RestrictionVecConstant the exact transpose of  C_fine o ProlongationVecConstant.
+template < typename ScalarT >
+inline void apply_constraint_transpose_device( const TwoToOneTablesDevice&              t,
+                                               const grid::Grid4DDataScalar< ScalarT >& field )
+{
+    const auto f   = field;
+    const auto d   = t.con_dst;
+    const auto off = t.con_off;
+    const auto par = t.con_par;
+    const auto w   = t.con_wt;
+    Kokkos::View< ScalarT* > tmp( "amr2to1_cont_tmp", d.extent( 0 ) );
+    Kokkos::parallel_for( // read hanging values, then zero the hanging slot
+        "amr2to1_cont_read", d.extent( 0 ), KOKKOS_LAMBDA( const int i ) {
+            tmp( i )                              = f( d( i, 0 ), d( i, 1 ), d( i, 2 ), d( i, 3 ) );
+            f( d( i, 0 ), d( i, 1 ), d( i, 2 ), d( i, 3 ) ) = 0;
+        } );
+    Kokkos::parallel_for( // fold each hanging value additively into its parents (atomic: parents shared)
+        "amr2to1_cont_scatter", d.extent( 0 ), KOKKOS_LAMBDA( const int i ) {
+            for ( int p = off( i ); p < off( i + 1 ); ++p )
+                Kokkos::atomic_add( &f( par( p, 0 ), par( p, 1 ), par( p, 2 ), par( p, 3 ) ),
+                                    static_cast< ScalarT >( w( p ) ) * tmp( i ) );
+        } );
+    Kokkos::fence();
+}
+
+template < typename ScalarT, int VecDim >
+inline void apply_constraint_transpose_device( const TwoToOneTablesDevice&                   t,
+                                               const grid::Grid4DDataVec< ScalarT, VecDim >& field )
+{
+    for ( int d = 0; d < VecDim; ++d )
+        apply_constraint_transpose_device( t, field.comp_[d] );
 }
 
 // deep-copy helpers so solve-side code can treat scalar and SoA-vector grids uniformly
