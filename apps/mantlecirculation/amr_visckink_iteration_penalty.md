@@ -120,8 +120,14 @@ radial *face* hanging coincident with the jump that is unique.)
 ## 5. Experiments in flight (to confirm §4)
 
 - **537750 — naked CG** (`solve_naked`, visckink, LDR=3, unpreconditioned CG on CᵀAC, no MG):
-  operator-conditioning probe. If adaptive-CG ≈ uniform-CG at matched dofs → the operator is
-  well-conditioned and the penalty lives in the **MG coarse correction**, not the operator.
+  operator-conditioning probe. **RESULT (DONE):** uniform L0/L1/L2 = 168/306/**630**; adaptive
+  R0/R1/R2 = 168/306/**648** (R2 has 20480 hanging; R0/R1 flood to uniform so match exactly).
+  Adaptive R2 (648, 363618 dofs, finest=subdiv2) ≈ uniform L2 (630, 665730 dofs, same finest h) —
+  **1.03×**. Naked-CG κ is set by `h_min`, and adaptive R2's finest elements have the same `h_min`
+  as uniform L2, so they *should* match, and do. **⇒ the CᵀAC operator with hanging at contrast-10
+  is as well-conditioned as uniform; the hanging interface adds ~nothing to κ.** Since the same mesh
+  goes 9→21 only *under the MG*, the ~2× penalty is confirmed to live in the **MG coarse-grid
+  correction**, not the operator. (Confirms §4.)
 - **537788 — mild-k control** (`test_adaptive_mg_gpu` now with **S_rad=2** radial hanging but the
   *mild* `2+sin z` coefficient): isolates radial-face hanging *from* the jump. If it stays 7/8 →
   radial-face hanging alone is fine and the jump is required (⇒ §4). If it shows a penalty at mild k
