@@ -273,6 +273,7 @@ template < typename ScalarT, int VecDim >
 inline void assemble_distributed( const DistributedAdaptiveMesh& mesh,
                                   const grid::Grid4DDataVec< ScalarT, VecDim >& field )
 {
+    terra::util::Timer _t( "continuity_assemble_distributed" ); // host-staged class-sum + hanging fold (restriction)
     for ( int d = 0; d < VecDim; ++d )
         assemble_distributed( mesh, field.comp_[d] );
 }

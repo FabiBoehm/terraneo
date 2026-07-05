@@ -11,6 +11,7 @@
 #include "../../kokkos/kokkos_wrapper.hpp"
 #include "../grid_types.hpp"
 #include "adaptive_exchange.hpp"
+#include "util/timer.hpp" // time the hanging-node continuity operators (C, C^T, assembly exchange)
 
 namespace terra::grid::shell::amr {
 
@@ -222,6 +223,7 @@ template < typename ScalarT, int VecDim >
 inline void apply_exchange_device( const TwoToOneTablesDevice& t,
                                    const grid::Grid4DDataVec< ScalarT, VecDim >& field )
 {
+    terra::util::Timer _t( "continuity_exchange" ); // C^T assembly (class-sum + hanging fold + broadcast)
     for ( int d = 0; d < VecDim; ++d )
         apply_exchange_device( t, field.comp_[d] );
 }
@@ -230,6 +232,7 @@ template < typename ScalarT, int VecDim >
 inline void apply_constraint_device( const TwoToOneTablesDevice& t,
                                      const grid::Grid4DDataVec< ScalarT, VecDim >& field )
 {
+    terra::util::Timer _t( "continuity_constraint" ); // C: hanging DoF = interp of coarse parents
     for ( int d = 0; d < VecDim; ++d )
         apply_constraint_device( t, field.comp_[d] );
 }
@@ -266,6 +269,7 @@ template < typename ScalarT, int VecDim >
 inline void apply_constraint_transpose_device( const TwoToOneTablesDevice&                   t,
                                                const grid::Grid4DDataVec< ScalarT, VecDim >& field )
 {
+    terra::util::Timer _t( "continuity_constraint_T" ); // C^T: fold hanging value back into parents
     for ( int d = 0; d < VecDim; ++d )
         apply_constraint_transpose_device( t, field.comp_[d] );
 }

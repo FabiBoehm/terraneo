@@ -203,6 +203,48 @@ class AdaptiveRestriction
     VectorQ1Vec< double, 3 >                                        fine_tmp_;
 };
 
+// GALERKIN coarse operator: A_c[L] = R[L] o A[L+1] o P[L] (one-level Galerkin = the exact coarse-space
+// action of the next-finer operator, replacing the rediscretized/folded DCA coarse operator). Used as a
+// drop-in operator type for the Multigrid so the coarse correction sees P^T A P instead of C^T A_loc[k_L] C
+// at the 2:1 interface. Leaf mode wraps the finest operator so the MG can use one operator type throughout.
+class GalerkinOp
+{
+  public:
+    using SrcVectorType = VectorQ1Vec< double, 3 >;
+    using DstVectorType = VectorQ1Vec< double, 3 >;
+    using ScalarType    = double;
+
+    explicit GalerkinOp( Wrapper& op ) : leaf_( true ), op_( &op ) {}
+    GalerkinOp( AdaptiveProlongation& P, AdaptiveRestriction& R, Wrapper& fine_op,
+                const grid::shell::DistributedDomain& fdom,
+                const Grid4DDataScalar< grid::NodeOwnershipFlag >& fmask, int lvl )
+    : leaf_( false ), P_( &P ), R_( &R ), fine_op_( &fine_op )
+    , t1_( "gk1_" + std::to_string( lvl ), fdom, fmask )
+    , t2_( "gk2_" + std::to_string( lvl ), fdom, fmask )
+    {}
+
+    void apply_impl( const SrcVectorType& x, DstVectorType& y )
+    {
+        if ( leaf_ )
+        {
+            op_->apply_impl( x, y );
+            return;
+        }
+        linalg::assign( t1_, 0.0 );
+        P_->apply_impl( x, t1_ );         // prolong x_L -> level L+1
+        fine_op_->apply_impl( t1_, t2_ ); // apply the finer operator A[L+1]
+        R_->apply_impl( t2_, y );         // restrict to level L  => y = R A[L+1] P x
+    }
+
+  private:
+    bool                  leaf_     = false;
+    Wrapper*              op_       = nullptr; // leaf
+    AdaptiveProlongation* P_        = nullptr; // composite
+    AdaptiveRestriction*  R_        = nullptr;
+    Wrapper*              fine_op_  = nullptr;
+    VectorQ1Vec< double > t1_, t2_;
+};
+
 // Inverse-diagonal (Jacobi) preconditioner for the MG coarse solver (LDR=2 level). Without it the coarse
 // PCG is unpreconditioned and dominates the runtime on the big meshes.
 template < linalg::OperatorLike OperatorT >
@@ -227,6 +269,118 @@ struct Res
     double                l2 = 0, relres = 0;
     std::vector< double > indicator; // per block: max_K k - min_K k (viscosity gradient)
 };
+
+// EXACT diagonal of the CONSTRAINED operator diag(C^T A C), assembled from element matrices with the 2:1
+// hanging constraint applied at element level (the standard FE hanging-node treatment). Replaces the fold
+// approximation (assemble_distributed of the block diagonal), which folds the hanging self-term with weight
+// w (not w^2) and DROPS the parent-hanging and hanging-hanging cross terms -- every dropped/wrong term is a
+// stiffness entry ~k, so at contrast 10 the parent diagonal is ~10x wrong exactly at the kink interface.
+// Device kernel (the operator's coords/radii/k views are device-resident). Assumes a DIRECT (<=1-level)
+// 2:1 interface, so a hanging node has <= 4 genuine parents. Wedge-node connectivity per kernel_helpers.hpp.
+template < typename Op, typename MeshT, typename MaskT >
+static void assemble_constrained_diagonal( Op& op, const MeshT& mesh, const MaskT& mask,
+                                           VectorQ1Vec< double >& diag )
+{
+    const auto& dom     = mesh.domain;
+    const auto& td      = mesh.t_local_d;
+    const auto& di      = dom.domain_info();
+    const int   hex_lat = di.subdomain_num_nodes_per_side_laterally() - 1;
+    const int   hex_rad = di.subdomain_num_nodes_radially() - 1;
+    const int   nsub    = static_cast< int >( dom.subdomains().size() );
+
+    // hang(s,x,y,r) = CSR row of that hanging copy in the constraint table, or -1 for a free node.
+    VectorQ1Scalar< double > hang( "cdiag_hang", dom, mask );
+    linalg::assign( hang, -1.0 );
+    auto hg = hang.grid_data();
+    auto cd = td.con_dst;
+    Kokkos::parallel_for(
+        "cdiag_sethang", cd.extent( 0 ),
+        KOKKOS_LAMBDA( const int i ) { hg( cd( i, 0 ), cd( i, 1 ), cd( i, 2 ), cd( i, 3 ) ) = (double) i; } );
+    Kokkos::fence();
+
+    linalg::assign( diag, 0.0 );
+    auto d0  = diag.grid_data().comp_[0];
+    auto d1  = diag.grid_data().comp_[1];
+    auto d2  = diag.grid_data().comp_[2];
+    auto co  = td.con_off;
+    auto cp  = td.con_par;
+    auto cw  = td.con_wt;
+    auto opv = op; // capture the operator functor by value (shallow Kokkos views)
+
+    Kokkos::parallel_for(
+        "cdiag_assemble",
+        Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >( { 0, 0, 0, 0 }, { nsub, hex_lat, hex_lat, hex_rad } ),
+        KOKKOS_LAMBDA( const int sd, const int xc, const int yc, const int rc ) {
+            const int offx[2][6] = { { 0, 1, 0, 0, 1, 0 }, { 1, 0, 1, 1, 0, 1 } };
+            const int offy[2][6] = { { 0, 0, 1, 0, 0, 1 }, { 1, 1, 0, 1, 1, 0 } };
+            const int offr[2][6] = { { 0, 0, 0, 1, 1, 1 }, { 0, 0, 0, 1, 1, 1 } };
+            for ( int wg = 0; wg < 2; ++wg )
+            {
+                const auto A = opv.assemble_local_matrix( sd, xc, yc, rc, wg ); // 18x18, index dim*6+node
+                int        np[6], qs[6][4], qx[6][4], qy[6][4], qr[6][4];
+                double     qw[6][4];
+                for ( int n = 0; n < 6; ++n )
+                {
+                    const int gx = xc + offx[wg][n], gy = yc + offy[wg][n], gr = rc + offr[wg][n];
+                    const int hi = (int) hg( sd, gx, gy, gr );
+                    if ( hi < 0 )
+                    {
+                        np[n] = 1;
+                        qs[n][0] = sd; qx[n][0] = gx; qy[n][0] = gy; qr[n][0] = gr; qw[n][0] = 1.0;
+                    }
+                    else
+                    {
+                        int c = 0;
+                        for ( int p = co( hi ); p < co( hi + 1 ) && c < 4; ++p )
+                        {
+                            qs[n][c] = cp( p, 0 ); qx[n][c] = cp( p, 1 ); qy[n][c] = cp( p, 2 );
+                            qr[n][c] = cp( p, 3 ); qw[n][c] = cw( p ); ++c;
+                        }
+                        np[n] = c;
+                    }
+                }
+                for ( int d = 0; d < 3; ++d )
+                    for ( int a = 0; a < 6; ++a )
+                        for ( int b = 0; b < 6; ++b )
+                        {
+                            const double Aab = A( d * 6 + a, d * 6 + b );
+                            if ( Aab == 0.0 )
+                                continue;
+                            for ( int ia = 0; ia < np[a]; ++ia )
+                                for ( int ib = 0; ib < np[b]; ++ib )
+                                    if ( qs[a][ia] == qs[b][ib] && qx[a][ia] == qx[b][ib] &&
+                                         qy[a][ia] == qy[b][ib] && qr[a][ia] == qr[b][ib] )
+                                    {
+                                        const double c2 = qw[a][ia] * qw[b][ib] * Aab;
+                                        if ( d == 0 )
+                                            Kokkos::atomic_add( &d0( qs[a][ia], qx[a][ia], qy[a][ia], qr[a][ia] ), c2 );
+                                        else if ( d == 1 )
+                                            Kokkos::atomic_add( &d1( qs[a][ia], qx[a][ia], qy[a][ia], qr[a][ia] ), c2 );
+                                        else
+                                            Kokkos::atomic_add( &d2( qs[a][ia], qx[a][ia], qy[a][ia], qr[a][ia] ), c2 );
+                                    }
+                        }
+            }
+        } );
+    Kokkos::fence();
+    // reconcile genuine copies shared across subdomains/diamonds (class-sum + broadcast). Hanging copies
+    // hold 0 (we only scattered onto genuine parents), so the exchange's linear hanging-fold adds nothing.
+    apply_exchange_device( td, diag.grid_data() );
+
+    // Hanging DoFs are eliminated (slaved to their parents); they were never scattered to, so they are 0.
+    // invert_entries(0) -> Inf and Chebyshev would emit NaN. Set them to 1.0 (identity, as for boundary DoFs).
+    auto ch = td.con_dst;
+    auto e0 = diag.grid_data().comp_[0];
+    auto e1 = diag.grid_data().comp_[1];
+    auto e2 = diag.grid_data().comp_[2];
+    Kokkos::parallel_for(
+        "cdiag_hangset", ch.extent( 0 ), KOKKOS_LAMBDA( const int i ) {
+            e0( ch( i, 0 ), ch( i, 1 ), ch( i, 2 ), ch( i, 3 ) ) = 1.0;
+            e1( ch( i, 0 ), ch( i, 1 ), ch( i, 2 ), ch( i, 3 ) ) = 1.0;
+            e2( ch( i, 0 ), ch( i, 1 ), ch( i, 2 ), ch( i, 3 ) ) = 1.0;
+        } );
+    Kokkos::fence();
+}
 
 // Build an LDR-multigrid on `forest` (levels min_ldr..ldr_fine, same forest at coarser intra-block grids),
 // use it as the FGMRES preconditioner for the manufactured tanh-kink problem at steepness S, and report
@@ -282,25 +436,16 @@ static Res solve_level( MPI_Comm comm, const AdaptiveForest& forest, int ldr_fin
                                                   grid::shell::ShellBoundaryFlag::BOUNDARY ) );
     }
 
-    // Inverse diagonal for the Chebyshev smoother. Take the block-local element diagonal and CLASS-SUM only
-    // (apply_class_sum_device) -- do NOT fold the hanging DoFs' block diagonal into their parents. The old
-    // path (assemble_distributed) folded them with the linear constraint weight, which inflates a parent's
-    // diagonal by ~Σ w·A_hh; A_hh scales with the local viscosity, so in the k=10 kink band the parent
-    // diagonal was ~10x too large, mis-scaling Chebyshev right at the 2:1 interface (the coefficient-amplified
-    // adaptive penalty). The true diag(C^T A C) parent self-term is w^2 and is largely cancelled by the
-    // negative parent-hanging cross term, so the parent's own assembled A_pp is far closer. Uniform meshes are
-    // unchanged (no hanging => class-sum-only == assemble_distributed).
+    // Inverse diagonal for the Chebyshev smoother = EXACT diag(C^T A C) assembled from element matrices with
+    // the hanging constraint applied at element level (assemble_constrained_diagonal). Replaces the fold
+    // (assemble_distributed of the block diagonal), which uses w not w^2 for the hanging self-term and drops
+    // the parent-hanging / hanging-hanging cross terms -- all ~k, hence ~10x wrong at parents in the k=10 band.
     std::vector< VectorQ1Vec< double > > inv_diag;
     inv_diag.reserve( nlev );
     for ( int L = 0; L < nlev; ++L )
     {
         inv_diag.emplace_back( "invd_" + std::to_string( L ), mesh[L].domain, mask[L] );
-        VectorQ1Vec< double > ones( "ones_" + std::to_string( L ), mesh[L].domain, mask[L] );
-        linalg::assign( ones, 1.0 );
-        A_loc[L]->set_diagonal( true );
-        linalg::apply( *A_loc[L], ones, inv_diag[L] );
-        A_loc[L]->set_diagonal( false );
-        assemble_distributed( mesh[L], inv_diag[L].grid_data() );
+        assemble_constrained_diagonal( *A_loc[L], mesh[L], mask[L], inv_diag[L] );
         kernels::common::assign_masked_else_keep_old( inv_diag[L].grid_data(), 1.0, bmask[L],
                                                       grid::shell::ShellBoundaryFlag::BOUNDARY );
         linalg::invert_entries( inv_diag[L] );
@@ -314,7 +459,7 @@ static Res solve_level( MPI_Comm comm, const AdaptiveForest& forest, int ldr_fin
     {
         cheby_tmps[L].emplace_back( "ct0_" + std::to_string( L ), mesh[L].domain, mask[L] );
         cheby_tmps[L].emplace_back( "ct1_" + std::to_string( L ), mesh[L].domain, mask[L] );
-        smoothers.emplace_back( /*order=*/8, inv_diag[L], cheby_tmps[L], /*prepost=*/6 ); // DISCRIMINATOR: strong smoother
+        smoothers.emplace_back( /*order=*/8, inv_diag[L], cheby_tmps[L], /*prepost=*/6 ); // STRONG smoother test
     }
 
     std::vector< AdaptiveProlongation > P;
@@ -324,6 +469,204 @@ static Res solve_level( MPI_Comm comm, const AdaptiveForest& forest, int ldr_fin
     {
         P.emplace_back( mesh[L + 1], mesh[L] );
         R.emplace_back( mesh[L], mesh[L + 1] );
+    }
+
+    // TRANSPOSE-CONSISTENCY CHECK: for the two-grid MG to be variational, P must be the exact transpose
+    // of R, i.e. <P u, v>_fine == <u, R v>_coarse for arbitrary u (coarse), v (fine). A nonzero rel.diff
+    // on the ADAPTIVE mesh (uniform = control, should be ~machine zero) means the C_coarse/C_fine/assemble
+    // composition is NOT a transpose pair -> a non-variational two-grid method, benign at mild contrast but
+    // amplified at high contrast. Runs per transfer level; cheap (2 applies + 2 dots).
+    {
+        auto fill_generic = [&]( VectorQ1Vec< double >& f, const grid::shell::DistributedDomain& dm, int seed ) {
+            auto c0 = f.grid_data().comp_[0];
+            auto c1 = f.grid_data().comp_[1];
+            auto c2 = f.grid_data().comp_[2];
+            Kokkos::parallel_for(
+                "tc_fill", grid::shell::local_domain_md_range_policy_nodes( dm ),
+                KOKKOS_LAMBDA( const int s, const int x, const int y, const int r ) {
+                    auto h = [&]( int d ) {
+                        return (double) ( ( ( s * 131 + x * 17 + y * 19 + r * 23 + d * 29 + seed * 7 ) % 1000 ) ) /
+                                   1000.0 -
+                               0.5;
+                    };
+                    c0( s, x, y, r ) = h( 0 );
+                    c1( s, x, y, r ) = h( 1 );
+                    c2( s, x, y, r ) = h( 2 );
+                } );
+            Kokkos::fence();
+        };
+        auto raw_dot = [&]( VectorQ1Vec< double >& a, VectorQ1Vec< double >& b,
+                            const grid::shell::DistributedDomain& dm ) {
+            auto a0 = a.grid_data().comp_[0]; auto a1 = a.grid_data().comp_[1]; auto a2 = a.grid_data().comp_[2];
+            auto b0 = b.grid_data().comp_[0]; auto b1 = b.grid_data().comp_[1]; auto b2 = b.grid_data().comp_[2];
+            double sum = 0.0;
+            Kokkos::parallel_reduce(
+                "tc_rawdot", grid::shell::local_domain_md_range_policy_nodes( dm ),
+                KOKKOS_LAMBDA( const int s, const int x, const int y, const int r, double& acc ) {
+                    acc += a0( s, x, y, r ) * b0( s, x, y, r ) + a1( s, x, y, r ) * b1( s, x, y, r ) +
+                           a2( s, x, y, r ) * b2( s, x, y, r );
+                },
+                sum );
+            Kokkos::fence();
+            return sum;
+        };
+        for ( int L = 0; L < nlev - 1; ++L )
+        {
+            VectorQ1Vec< double > u( "tc_u", mesh[L].domain, mask[L] );
+            VectorQ1Vec< double > Rv( "tc_Rv", mesh[L].domain, mask[L] );
+            VectorQ1Vec< double > v( "tc_v", mesh[L + 1].domain, mask[L + 1] );
+            VectorQ1Vec< double > Pu( "tc_Pu", mesh[L + 1].domain, mask[L + 1] );
+            fill_generic( u, mesh[L].domain, 1 );
+            fill_generic( v, mesh[L + 1].domain, 2 );
+            // P assumes a CONSISTENT primal coarse input (shared copies equal); make u consistent before
+            // applying P, else Pu is garbage at block-boundary nodes and the transpose relation fails
+            // spuriously. v is a dual (residual) -> leave it per-copy; R assembles it.
+            for ( int d = 0; d < 3; ++d )
+                apply_class_broadcast_device( mesh[L].t_local_d, u.grid_data().comp_[d] );
+            linalg::assign( Pu, 0.0 ); // prolongation's geometric scatter is Add mode
+            linalg::assign( Rv, 0.0 );
+            P[L].apply_impl( u, Pu );
+            R[L].apply_impl( v, Rv );
+            const double ml = dot( Pu, v ), mr = dot( u, Rv );                                // owned-masked
+            const double rl = raw_dot( Pu, v, mesh[L + 1].domain ), rr = raw_dot( u, Rv, mesh[L].domain ); // raw
+            if ( mpi::rank( comm ) == 0 )
+                std::printf( "    [%s transpose L%d->%d] masked rd=%.2e (%.4e/%.4e) | RAW rd=%.2e (%.4e/%.4e)\n",
+                             tag.c_str(), L, L + 1, std::fabs( ml - mr ) / std::max( std::fabs( ml ), 1e-300 ), ml, mr,
+                             std::fabs( rl - rr ) / std::max( std::fabs( rl ), 1e-300 ), rl, rr );
+
+            // (A) PARTITION OF UNITY of the hanging constraint on the FINE mesh (host tables). Each hanging
+            // row's weights must sum to exactly 1 -- else C is not an interpolation (constants not reproduced,
+            // the coarse space loses order-1 consistency at the interface). Also histogram the parent-count so
+            // we can see the geometry is what we expect (radial edge midpoint = 2 parents@0.5; face = 4@0.25).
+            {
+                const auto& ht     = mesh[L + 1].t_local;
+                const int   nrows  = static_cast< int >( ht.con_dst.size() );
+                double      worst  = 0.0;
+                std::map< int, int > np_hist;
+                for ( int i = 0; i < nrows; ++i )
+                {
+                    double sw = 0.0;
+                    for ( int p = ht.con_off[i]; p < ht.con_off[i + 1]; ++p )
+                        sw += ht.con_wt[p];
+                    worst = std::max( worst, std::fabs( sw - 1.0 ) );
+                    ++np_hist[ht.con_off[i + 1] - ht.con_off[i]];
+                }
+                if ( mpi::rank( comm ) == 0 && nrows > 0 )
+                {
+                    std::printf( "    [%s POU L%d] fine hanging rows %d  worst|Sum(w)-1| %.2e  parents{",
+                                 tag.c_str(), L + 1, nrows, worst );
+                    for ( auto& [np, cnt] : np_hist )
+                        std::printf( " %dx%d", np, cnt );
+                    std::printf( " }\n" );
+                }
+            }
+
+            // (B) CONSTANT REPRODUCTION of the full prolongation chain C_fine o S o C_coarse: a correct
+            // order-1 interpolation maps the coarse constant 1 to the fine constant 1 at every node. The
+            // transpose check (P=R^T) cannot see a wrong-but-symmetric P; this can. Owned-masked L2 of
+            // (P*1 - 1); genuine nodes test the geometric stencil, hanging nodes test Sum(con_wt)=1.
+            {
+                VectorQ1Vec< double > one_c( "pou_1c", mesh[L].domain, mask[L] );
+                VectorQ1Vec< double > Pone( "pou_P1", mesh[L + 1].domain, mask[L + 1] );
+                VectorQ1Vec< double > one_f( "pou_1f", mesh[L + 1].domain, mask[L + 1] );
+                VectorQ1Vec< double > dev( "pou_dv", mesh[L + 1].domain, mask[L + 1] );
+                linalg::assign( one_c, 1.0 ); // consistent coarse constant (all copies equal)
+                linalg::assign( one_f, 1.0 );
+                linalg::assign( Pone, 0.0 );
+                P[L].apply_impl( one_c, Pone );
+                linalg::lincomb( dev, { 1.0, -1.0 }, { Pone, one_f } );
+                const double l2dev = std::sqrt( std::fabs( dot( dev, dev ) ) );
+                const double l2one = std::sqrt( std::fabs( dot( one_f, one_f ) ) );
+                if ( mpi::rank( comm ) == 0 )
+                    std::printf( "    [%s CONST L%d->%d] ||P*1 - 1||/||1|| = %.2e\n", tag.c_str(), L, L + 1,
+                                 l2dev / std::max( l2one, 1e-300 ) );
+            }
+        }
+    }
+
+    // ---- DIRECT TWO-GRID COARSE-GRID-CORRECTION test: do P and R, working TOGETHER, remove a smooth error?
+    // Take a globally smooth (kink-free) error e on the finest level, apply ONE EXACT coarse-grid correction
+    // e <- e - P (A_{F-1})^-1 R A e between levels F and F-1, and measure the A-norm contraction
+    // ||e_after||_A / ||e_before||_A. A correct CGC kills smooth error (<<1). Then split the leftover by
+    // radius: reduction uniform-like AWAY from RK but stalling in a thin band AT RK => coefficient-blind
+    // coarse space (P/R correct, kink unrepresentable); stalling everywhere => a real P-R interaction bug.
+    {
+        constexpr double PI  = 3.14159265358979323846;
+        constexpr double BW  = 0.03; // interface band half-width for the localization
+        const auto&      domF = mesh[F].domain;
+        const auto&      domC = mesh[F - 1].domain;
+        VectorQ1Vec< double > e( "cgc_e", domF, mask[F] ), Ae( "cgc_Ae", domF, mask[F] ), ef( "cgc_ef", domF, mask[F] );
+        VectorQ1Vec< double > ea( "cgc_ea", domF, mask[F] ), Aea( "cgc_Aea", domF, mask[F] ), ein( "cgc_ein", domF, mask[F] );
+        VectorQ1Vec< double > rc( "cgc_rc", domC, mask[F - 1] ), ec( "cgc_ec", domC, mask[F - 1] );
+
+        auto cF = coords[F];
+        auto rF = radii_g[F];
+        auto e0 = e.grid_data().comp_[0];
+        auto e1 = e.grid_data().comp_[1];
+        auto e2 = e.grid_data().comp_[2];
+        Kokkos::parallel_for(
+            "cgc_fill", grid::shell::local_domain_md_range_policy_nodes( domF ),
+            KOKKOS_LAMBDA( const int s, const int x, const int y, const int r ) {
+                const dense::Vec< double, 3 > c   = grid::shell::coords( s, x, y, r, cF, rF );
+                const double                  rn  = Kokkos::sqrt( c( 0 ) * c( 0 ) + c( 1 ) * c( 1 ) + c( 2 ) * c( 2 ) );
+                const double                  env = Kokkos::sin( PI * ( rn - R0 ) / ( R1 - R0 ) ); // smooth, 0 at both radii
+                e0( s, x, y, r ) = env * DX;
+                e1( s, x, y, r ) = env * DY;
+                e2( s, x, y, r ) = env * DZ;
+            } );
+        Kokkos::fence();
+        apply_constraint_device( mesh[F].t_local_d, e.grid_data() ); // conforming
+        kernels::common::assign_masked_else_keep_old( e.grid_data(), 0.0, bmask[F],
+                                                      grid::shell::ShellBoundaryFlag::BOUNDARY ); // zero Dirichlet
+        apply_constraint_device( mesh[F].t_local_d, e.grid_data() );
+
+        linalg::apply( *A[F], e, Ae );
+        const double eb = std::sqrt( std::fabs( dot( e, Ae ) ) ); // ||e||_A before
+
+        linalg::assign( rc, 0.0 );
+        R[F - 1].apply_impl( Ae, rc ); // restrict the residual A e
+        std::vector< VectorQ1Vec< double > > cgtmp;
+        for ( int i = 0; i < 4; ++i )
+            cgtmp.emplace_back( "cgc_ct" + std::to_string( i ), domC, mask[F - 1] );
+        auto                                       cgtab = std::make_shared< util::Table >();
+        linalg::solvers::IterativeSolverParameters cgp{ 5000, 1e-11, 1e-14 }; // EXACT coarse solve (isolate the space)
+        linalg::solvers::PCG< Wrapper >            cgs( cgp, cgtab, cgtmp );
+        cgs.set_tag( "cgc_coarse" );
+        linalg::assign( ec, 0.0 );
+        linalg::solvers::solve( cgs, *A[F - 1], ec, rc );
+        const int cg_it = static_cast< int >( cgtab->query_rows_equals( "tag", "cgc_coarse" ).rows().size() ) - 1;
+
+        linalg::assign( ef, 0.0 );
+        P[F - 1].apply_impl( ec, ef );                    // prolong the coarse correction
+        linalg::lincomb( ea, { 1.0, -1.0 }, { e, ef } );  // e_after = e - P A^-1 R A e
+        apply_constraint_device( mesh[F].t_local_d, ea.grid_data() );
+        linalg::apply( *A[F], ea, Aea );
+        const double eaN = std::sqrt( std::fabs( dot( ea, Aea ) ) ); // ||e||_A after
+
+        // localize the leftover: L2 of e_after inside |rn-RK|<BW vs total (owned-masked via zeroing outside).
+        amr_deep_copy( ein.grid_data(), ea.grid_data() );
+        auto i0 = ein.grid_data().comp_[0];
+        auto i1 = ein.grid_data().comp_[1];
+        auto i2 = ein.grid_data().comp_[2];
+        Kokkos::parallel_for(
+            "cgc_band", grid::shell::local_domain_md_range_policy_nodes( domF ),
+            KOKKOS_LAMBDA( const int s, const int x, const int y, const int r ) {
+                const dense::Vec< double, 3 > c  = grid::shell::coords( s, x, y, r, cF, rF );
+                const double                  rn = Kokkos::sqrt( c( 0 ) * c( 0 ) + c( 1 ) * c( 1 ) + c( 2 ) * c( 2 ) );
+                if ( Kokkos::fabs( rn - RK ) >= BW )
+                {
+                    i0( s, x, y, r ) = 0.0;
+                    i1( s, x, y, r ) = 0.0;
+                    i2( s, x, y, r ) = 0.0;
+                }
+            } );
+        Kokkos::fence();
+        const double l2_band  = std::sqrt( std::fabs( dot( ein, ein ) ) );
+        const double l2_total = std::sqrt( std::fabs( dot( ea, ea ) ) );
+        if ( mpi::rank( comm ) == 0 )
+            std::printf( "    [%s CGC] ||e||_A: %.4e -> %.4e  contraction %.3f  (coarseCG %d)  leftover in |r-RK|<%.2f: %.1f%%\n",
+                         tag.c_str(), eb, eaN, eaN / std::max( eb, 1e-300 ), cg_it, BW,
+                         100.0 * l2_band / std::max( l2_total, 1e-300 ) );
     }
 
     std::vector< VectorQ1Vec< double > > tmp_r, tmp_e, tmp_all;
@@ -345,14 +688,13 @@ static Res solve_level( MPI_Comm comm, const AdaptiveForest& forest, int ldr_fin
     for ( int i = 0; i < 4; ++i )
         coarse_tmps.emplace_back( "cst_" + std::to_string( i ), mesh[0].domain, mask[0] );
     auto coarse_table = std::make_shared< util::Table >();
-    linalg::solvers::IterativeSolverParameters coarse_params{ 300, 1e-8, 1e-14 };
-    using CoarsePrec = InverseDiagonalPreconditioner< Wrapper >;
-    linalg::solvers::PCG< Wrapper, CoarsePrec > coarse_solver( coarse_params, coarse_table, coarse_tmps,
-                                                               CoarsePrec( inv_diag[0] ) );
+    linalg::solvers::IterativeSolverParameters coarse_params{ 500, 1e-8, 1e-14 }; // raised cap: was capping at ~300/Vcyc
+    // UNPRECONDITIONED coarse CG (matches the benchmark; drops the bad fold-diagonal preconditioner).
+    linalg::solvers::PCG< Wrapper > coarse_solver( coarse_params, coarse_table, coarse_tmps );
     coarse_solver.set_tag( "mg_coarse" );
 
     using MG = linalg::solvers::Multigrid< Wrapper, AdaptiveProlongation, AdaptiveRestriction, Smoother,
-                                           linalg::solvers::PCG< Wrapper, CoarsePrec > >;
+                                           linalg::solvers::PCG< Wrapper > >;
     MG mg( P, R, A_c, tmp_r, tmp_e, tmp_all, smoothers, smoothers, coarse_solver, 1, 1e-16 );
 
     // ---- manufactured RHS on the finest level (Dirichlet lifting) --------------------------------------
@@ -412,6 +754,11 @@ static Res solve_level( MPI_Comm comm, const AdaptiveForest& forest, int ldr_fin
     res.l2     = l2;
     res.relres = relres;
     res.iters  = static_cast< int >( table->query_rows_equals( "tag", tag ).rows().size() ) - 1;
+    // total coarse-CG iterations across all V-cycles in this solve, and the per-V-cycle average
+    // (~one coarse solve per outer FGMRES iteration). A per-Vcyc value near the 300 cap => the
+    // unpreconditioned coarse solve is NOT converging to 1e-8.
+    const long   coarse_rows = static_cast< long >( coarse_table->query_rows_equals( "tag", "mg_coarse" ).rows().size() );
+    const double coarse_per  = res.iters > 0 ? static_cast< double >( coarse_rows ) / res.iters : 0.0;
 
     const int nsub = static_cast< int >( dom.subdomains().size() );
     auto      kh   = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace{}, k[F].grid_data() );
@@ -431,8 +778,9 @@ static Res solve_level( MPI_Comm comm, const AdaptiveForest& forest, int ldr_fin
         res.indicator[s] = mx - mn;
     }
     if ( mpi::rank( comm ) == 0 )
-        std::printf( "    [%-16s] dofs %9ld  FGMRES %4d  L2 %.6e  relres %.2e  hanging %zu\n", tag.c_str(),
-                     res.dofs, res.iters, l2, relres, mesh[F].t_local.con_dst.size() );
+        std::printf( "    [%-16s] dofs %9ld  FGMRES %4d  coarseCG %6ld (~%5.0f/Vcyc)  L2 %.6e  relres %.2e  hanging %zu\n",
+                     tag.c_str(), res.dofs, res.iters, coarse_rows, coarse_per, l2, relres,
+                     mesh[F].t_local.con_dst.size() );
     return res;
 }
 
@@ -540,11 +888,13 @@ int main( int argc, char** argv )
     {
         auto table = std::make_shared< util::Table >();
 
-        const int    LDR = 3, S_lat = 2, S_rad = 2, M = 8; // smaller grid for the naked-CG diagnostic (single level)
+        const int    LDR = 4, S_lat = 2, S_rad = 2, M = 8; // finest LDR=4 => 3-level MG (LDR 2->3->4)
         const int    NU = 2;   // uniform levels 0..NU (L2=subdiv2: the fair same-resolution baseline for R2)
         const int    NA = 2;   // adaptive rounds 0..NA (R2 subdiv2 is localized, stays tractable)
-        const double FRAC = 0.30;
-        const std::vector< double > steepness = { 8.0 }; // NAKED-CG DIAGNOSTIC: is the ~2x penalty in the operator or the MG?
+        const double FRAC = 0.28; // TEST: lower threshold => refine a WIDER band, pushing the 2:1 hanging
+                                  // interface OUTWARD into the near-constant-viscosity region, away from RK.
+                                  // (0.15 & 0.22 refined whole domain -> uniform; 0.30 = 2.9M/71680 hanging/10 it.)
+        const std::vector< double > steepness = { 8.0 }; // TEST: unpreconditioned coarse CG -- does it move the 21?
 
         struct Row { double S; long u_dofs, a_dofs; int u_it, a_it; double u_l2, a_l2; };
         std::vector< Row > summary;
@@ -560,7 +910,7 @@ int main( int argc, char** argv )
                 AdaptiveForest f( NU, S_lat, S_rad );
                 for ( int lvl = 0; lvl <= NU; ++lvl )
                 {
-                    u_last = solve_naked( MPI_COMM_WORLD, f, LDR, S_rad, S, table,
+                    u_last = solve_level( MPI_COMM_WORLD, f, LDR, S_rad, S, table,
                                           "S" + std::to_string( (int) S ) + "_uni_L" + std::to_string( lvl ) );
                     CHECK( u_last.relres < 1e-6 );
                     if ( lvl < NU )
@@ -570,6 +920,12 @@ int main( int argc, char** argv )
                         f.balance_2to1();
                     }
                 }
+                // COARSEST-GRID diagnostic: solve the BOTTOM MG level (LDR=2) of this uniform hierarchy
+                // standalone with unpreconditioned CG. This is exactly the coarse-grid operator the V-cycle
+                // bottoms out on. Compare its CG count vs the adaptive coarsest grid below -- if adaptive's
+                // coarsest grid needs many more CG iters, the coarse grid itself is the MG bottleneck.
+                solve_naked( MPI_COMM_WORLD, f, /*ldr=*/2, S_rad, S, table,
+                             "S" + std::to_string( (int) S ) + "_coarse_uni" );
             }
 
             // ---- ADAPTIVE sweep (viscosity-gradient indicator, refines at the kink) ----
@@ -578,7 +934,7 @@ int main( int argc, char** argv )
                 for ( int round = 0; round <= NA; ++round )
                 {
                     auto leaves = f.leaves();
-                    a_last = solve_naked( MPI_COMM_WORLD, f, LDR, S_rad, S, table,
+                    a_last = solve_level( MPI_COMM_WORLD, f, LDR, S_rad, S, table,
                                           "S" + std::to_string( (int) S ) + "_ada_R" + std::to_string( round ) );
                     CHECK( a_last.relres < 1e-6 );
                     if ( round == NA )
@@ -615,6 +971,12 @@ int main( int argc, char** argv )
                     f.balance_2to1();
                     CHECK( f.validate() );
                 }
+                // COARSEST-GRID diagnostic: the ADAPTIVE R2 forest meshed at LDR=2 = the bottom MG level the
+                // R2 V-cycle bottoms out on (with its 2:1 hanging band). Solve it standalone with the same
+                // unpreconditioned CG as the uniform coarsest grid above. CG_ada >> CG_uni => the coarsest
+                // grid is the penalty; CG_ada ~ CG_uni => the coarsest grid is fine, penalty is in transfers.
+                solve_naked( MPI_COMM_WORLD, f, /*ldr=*/2, S_rad, S, table,
+                             "S" + std::to_string( (int) S ) + "_coarse_ada" );
             }
 
             summary.push_back( { S, u_last.dofs, a_last.dofs, u_last.iters, a_last.iters, u_last.l2, a_last.l2 } );
@@ -622,17 +984,17 @@ int main( int argc, char** argv )
 
         if ( mpi::rank( MPI_COMM_WORLD ) == 0 )
         {
-            std::printf( "\n===== SUMMARY: naked CG, viscosity tanh-kink, uniform vs adaptive (finest of each) =====\n" );
-            std::printf( "   S  | uniform: dofs   CG   L2err   | adaptive: dofs   CG   L2err   | L2 gain  dof ratio\n" );
+            std::printf( "\n===== SUMMARY: MG-FGMRES (unprec coarse CG), tanh-kink, uniform vs adaptive =====\n" );
+            std::printf( "   S  | uniform: dofs   FG   L2err   | adaptive: dofs   FG   L2err   | L2 gain  dof ratio\n" );
             for ( const auto& r : summary )
                 std::printf( "  %3.0f | %9ld %4d %.3e | %9ld %4d %.3e | %6.2fx  %5.2fx\n", r.S, r.u_dofs, r.u_it,
                              r.u_l2, r.a_dofs, r.a_it, r.a_l2, r.u_l2 / r.a_l2, (double) r.u_dofs / (double) r.a_dofs );
         }
         for ( const auto& r : summary )
         {
-            CHECK( r.a_l2 <= r.u_l2 * 1.5 );            // adaptive not worse than uniform
-            CHECK( r.u_it > 0 && r.u_it < 20000 );      // naked CG converged
-            CHECK( r.a_it > 0 && r.a_it < 20000 );
+            CHECK( r.a_l2 <= r.u_l2 * 1.5 );          // adaptive not worse than uniform
+            CHECK( r.u_it > 0 && r.u_it < 100 );      // MG-FGMRES converged (small count)
+            CHECK( r.a_it > 0 && r.a_it < 100 );
         }
     }
 

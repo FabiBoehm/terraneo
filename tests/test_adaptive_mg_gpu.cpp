@@ -107,7 +107,10 @@ struct KInterpolator
     void operator()( const int s, const int x, const int y, const int r ) const
     {
         const dense::Vec< double, 3 > c = grid::shell::coords( s, x, y, r, grid_, radii_ );
-        data_( s, x, y, r )             = 2 + Kokkos::sin( c( 2 ) );
+        // 4-LEVEL DEPTH TEST: contrast-10 radial tanh kink at r=0.75 (like the visckink S=8), so the
+        // coefficient jump sits on the hanging interface -- does the 4-level MG show the ~2x penalty?
+        const double rn = Kokkos::sqrt( c( 0 ) * c( 0 ) + c( 1 ) * c( 1 ) + c( 2 ) * c( 2 ) );
+        data_( s, x, y, r ) = 1.0 + 9.0 * 0.5 * ( 1.0 + Kokkos::tanh( 8.0 * ( rn - 0.75 ) ) );
     }
 };
 

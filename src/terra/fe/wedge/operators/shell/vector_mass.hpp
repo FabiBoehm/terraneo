@@ -76,6 +76,42 @@ class VectorMass
         }
     }
 
+    // Consistent 6x6 element mass matrix M_wedge(i,j) = int_K phi_i phi_j dV for one wedge of the hex cell.
+    // Same quadrature/geometry as operator(); exposed so a-posteriori estimators can form the element residual
+    // A_K u_h - M_K f without re-deriving the wedge mass. Node ordering matches the wedge FE (shape(i,.)).
+    KOKKOS_INLINE_FUNCTION dense::Mat< ScalarT, num_nodes_per_wedge, num_nodes_per_wedge >
+        assemble_local_matrix( const int local_subdomain_id, const int x_cell, const int y_cell, const int r_cell,
+                               const int wedge ) const
+    {
+        dense::Vec< ScalarT, 3 > wedge_phy_surf[num_wedges_per_hex_cell][num_nodes_per_wedge_surface] = {};
+        wedge_surface_physical_coords( wedge_phy_surf, grid_, local_subdomain_id, x_cell, y_cell );
+
+        constexpr auto           num_quad_points = quadrature::quad_felippa_3x2_num_quad_points;
+        dense::Vec< ScalarT, 3 > quad_points[num_quad_points];
+        ScalarT                  quad_weights[num_quad_points];
+        quadrature::quad_felippa_3x2_quad_points( quad_points );
+        quadrature::quad_felippa_3x2_quad_weights( quad_weights );
+
+        ScalarT det_jac_lat[num_wedges_per_hex_cell][num_quad_points] = {};
+        jacobian_lat_determinant( det_jac_lat, wedge_phy_surf, quad_points );
+
+        const ScalarT r_1    = radii_( local_subdomain_id, r_cell );
+        const ScalarT r_2    = radii_( local_subdomain_id, r_cell + 1 );
+        const ScalarT grad_r = grad_forward_map_rad( r_1, r_2 );
+
+        dense::Mat< ScalarT, num_nodes_per_wedge, num_nodes_per_wedge > A = {};
+        for ( int q = 0; q < num_quad_points; q++ )
+        {
+            const ScalarT r = forward_map_rad( r_1, r_2, quad_points[q]( 2 ) );
+            for ( int i = 0; i < num_nodes_per_wedge; i++ )
+                for ( int j = 0; j < num_nodes_per_wedge; j++ )
+                    A( i, j ) += quad_weights[q] *
+                                 ( shape( i, quad_points[q] ) * shape( j, quad_points[q] ) * r * r * grad_r *
+                                   det_jac_lat[wedge][q] );
+        }
+        return A;
+    }
+
     KOKKOS_INLINE_FUNCTION void
         operator()( const int local_subdomain_id, const int x_cell, const int y_cell, const int r_cell ) const
     {
