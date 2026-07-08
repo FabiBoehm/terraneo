@@ -351,7 +351,7 @@ Result<> run( const Parameters& prm )
 
     // ----- Initial Stokes solve -----
     logroot << "\n--------- Initial Stokes solve -----------------\n" << std::endl;
-    stokes.solve( dT, prm.physics_parameters.compressible, /*log_convergence=*/true );
+    stokes.solve( T, prm.physics_parameters.compressible, /*log_convergence=*/true );
 
     log_hbm( "after first Stokes solve (peak)" );
 
@@ -580,7 +580,7 @@ Result<> run( const Parameters& prm )
             stokes.update_viscosity( T );
 
             // --- Stokes solve ---
-            stokes.solve( dT, prm.physics_parameters.compressible, /*log_convergence=*/( picard == num_picard - 1 ) );
+            stokes.solve( T, prm.physics_parameters.compressible, /*log_convergence=*/( picard == num_picard - 1 ) );
 
         } // end Picard loop
 
