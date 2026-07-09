@@ -37,6 +37,7 @@ template < typename ScalarType >
 void initialize_temperature_fields(
     linalg::VectorQ1Scalar< ScalarType >&                           T,
     linalg::VectorFVScalar< ScalarType >&                           T_fct,
+    grid::Grid2DDataScalar< ScalarType >&                           T_ref,
     const fv::hex::DirichletBCs< ScalarType >&                      fct_bcs,
     const grid::shell::DistributedDomain&                           domain,
     const grid::Grid3DDataVec< ScalarType, 3 >&                     coords_shell,
@@ -49,7 +50,44 @@ void initialize_temperature_fields(
     using util::logroot;
     const auto& init_temp = prm.physics_parameters.initial_temperature;
 
-    if ( init_temp.profile == InitialTemperatureProfile::CONDUCTIVE )
+    if ( init_temp.profile == InitialTemperatureProfile::FROM_FILE )
+    {
+        util::logroot << "Reading reference temperature from: '" << init_temp.Tref_profile_csv_path << "'" << std::endl;
+
+        // Read and populate reference temperature profile
+        T_ref = shell::interpolate_radial_profile_into_subdomains_from_csv(
+            init_temp.Tref_profile_csv_path,
+            init_temp.Tref_profile_radii_key,
+            init_temp.Tref_profile_temperature_key,
+            coords_radii,
+            1.0 / prm.mesh_parameters.mantle_thickness_m,
+            1.0 / prm.boundary_parameters.delta_T_K );
+
+        // Broadcast to Q1 nodes
+        Kokkos::parallel_for(
+            "initial temperature from profile",
+            grid::shell::local_domain_md_range_policy_nodes( domain ),
+            RadialProfileToQ1{ T_ref, T.grid_data() } );
+        Kokkos::fence();
+
+        // Add noise
+        //        Kokkos::parallel_for(
+        //            "noise to Q1 temperature",
+        //            grid::shell::local_domain_md_range_policy_nodes( domain ),
+        //            NoiseAdder{
+        //                prm.boundary_parameters.temperature_min,
+        //                prm.boundary_parameters.temperature_max,
+        //                coords_shell,
+        //                coords_radii,
+        //                T.grid_data(),
+        //                ownership_mask } );
+        //        Kokkos::fence();
+
+        // Project Q1 -> FV
+        fv::hex::l2_project_fe_to_fv( T_fct, T, domain, coords_shell, coords_radii );
+    }
+
+    else if ( init_temp.profile == InitialTemperatureProfile::CONDUCTIVE )
     {
         const bool has_sph_2 =
             ( init_temp.sph_degree_l_2 > 0 && init_temp.sph_factor_2 != 0.0 && init_temp.sph_epsilon != 0.0 );
@@ -151,6 +189,7 @@ void initialize_temperature_fields(
     // Project T_fct → Q1 T so downstream consumers (Stokes RHS, output, Nusselt
     // diagnostic) see a consistent Q1 representation.  Allocate the L2 scratch
     // locally — this is a one-shot setup call, not a hot loop.
+    if ( init_temp.profile != InitialTemperatureProfile::FROM_FILE )
     {
         std::vector< linalg::VectorQ1Scalar< ScalarType > > init_l2_tmps;
         init_l2_tmps.reserve( 5 );
@@ -162,19 +201,33 @@ void initialize_temperature_fields(
     }
 }
 
-/// Spherical steady-state conduction profile  T_ref(r) = r_min·r_max/r − r_min.
+template < typename ScalarType >
+void subtract_radial_profile(
+    linalg::VectorQ1Scalar< ScalarType >&       dst,
+    const linalg::VectorQ1Scalar< ScalarType >& src,
+    const grid::Grid2DDataScalar< ScalarType >& profile,
+    const grid::shell::DistributedDomain&       domain )
+{
+    Kokkos::parallel_for(
+        "subtract_radial_profile",
+        grid::shell::local_domain_md_range_policy_nodes( domain ),
+        SubtractRadialProfile{ profile, src.grid_data(), dst.grid_data() } );
+    Kokkos::fence();
+}
+
+/// Spherical steady-state conduction profile  T_cond(r) = r_min·r_max/r − r_min.
 /// Used as the reference temperature for the Nusselt-number diagnostic and
 /// added to XDMF output for visualisation.
 template < typename ScalarType >
 void compute_reference_conductive_profile(
-    linalg::VectorQ1Scalar< ScalarType >&       T_ref,
+    linalg::VectorQ1Scalar< ScalarType >&       T_cond,
     const grid::shell::DistributedDomain&       domain,
     const grid::Grid3DDataVec< ScalarType, 3 >& coords_shell,
     const grid::Grid2DDataScalar< ScalarType >& coords_radii,
     const Parameters&                           prm )
 {
     Kokkos::parallel_for(
-        "conductive profile T_ref",
+        "conductive profile T_cond",
         grid::shell::local_domain_md_range_policy_nodes( domain ),
         ConductiveProfileInterpolator{
             domain.domain_info().radii().front(),
@@ -183,7 +236,7 @@ void compute_reference_conductive_profile(
             prm.boundary_parameters.temperature_min,
             coords_shell,
             coords_radii,
-            T_ref.grid_data(),
+            T_cond.grid_data(),
             {},
             false } );
     Kokkos::fence();
