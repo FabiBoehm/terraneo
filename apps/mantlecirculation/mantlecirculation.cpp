@@ -167,6 +167,9 @@ Result<> run( const Parameters& prm )
 
     // Set up the prognostic Q1 temperature.
     VectorQ1Scalar< ScalarType > T( "T", ( *domains[velocity_level] ), ownership_mask_data[velocity_level] );
+    VectorQ1Scalar< ScalarType > Tdev( "Tdev", ( *domains[velocity_level] ), ownership_mask_data[velocity_level] );
+
+    Grid2DDataScalar< ScalarType > T_ref;
 
     // Finite-volume functions/vectors.
 
@@ -245,6 +248,7 @@ Result<> run( const Parameters& prm )
     initialize_temperature_fields(
         T,
         T_fct,
+        T_ref,
         fct_bcs,
         ( *domains[velocity_level] ),
         coords_shell[velocity_level],
@@ -282,7 +286,7 @@ Result<> run( const Parameters& prm )
 
     const auto coords_scale_factor =
         prm.mesh_parameters.mantle_thickness_m /
-        prm.mesh_parameters.radius_surface_m; // Used to rescale output coords to be on unit sphere
+        prm.mesh_parameters.radius_surface_m; // Used to rescale output coords to unit sphere
 
     xdmf_output.emplace(
         prm.io_parameters.outdir + "/" + prm.io_parameters.xdmf_dir,
@@ -292,12 +296,12 @@ Result<> run( const Parameters& prm )
         coords_scale_factor );
 
     // Reference conductive temperature profile (also used for the Nusselt number).
-    VectorQ1Scalar< ScalarType > T_ref( "T_ref", ( *domains[velocity_level] ), ownership_mask_data[velocity_level] );
+    VectorQ1Scalar< ScalarType > T_cond( "T_cond", ( *domains[velocity_level] ), ownership_mask_data[velocity_level] );
     compute_reference_conductive_profile(
-        T_ref, ( *domains[velocity_level] ), coords_shell[velocity_level], coords_radii[velocity_level], prm );
+        T_cond, ( *domains[velocity_level] ), coords_shell[velocity_level], coords_radii[velocity_level], prm );
 
-    xdmf_output->add( T_ref.grid_data() );
     xdmf_output->add( T.grid_data() );                 // Temperature
+    xdmf_output->add( Tdev.grid_data() );              // Temperature deviation
     xdmf_output->add( u.block_1().grid_data() );       // Velocity
     xdmf_output->add( stokes.eta_fine().grid_data() ); // Viscosity
     xdmf_output->add( stokes.density().grid_data() );  // Density
@@ -334,6 +338,9 @@ Result<> run( const Parameters& prm )
         }
     }
 
+    // Update Tdev
+    subtract_radial_profile( Tdev, T, T_ref, *domains[velocity_level] );
+
     // Setting XDMF file padding width according to max_timesteps.
     xdmf_output->set_pad_width(
         std::to_string( prm.time_stepping_parameters.timestep_initial + prm.time_stepping_parameters.max_timesteps - 1 )
@@ -351,7 +358,8 @@ Result<> run( const Parameters& prm )
 
     // ----- Initial Stokes solve -----
     logroot << "\n--------- Initial Stokes solve -----------------\n" << std::endl;
-    stokes.solve( T, prm.physics_parameters.compressible, /*log_convergence=*/true );
+
+    stokes.solve( Tdev, prm.physics_parameters.compressible, /*log_convergence=*/true );
 
     log_hbm( "after first Stokes solve (peak)" );
 
@@ -439,6 +447,7 @@ Result<> run( const Parameters& prm )
             prm,
             prm.time_stepping_parameters.timestep_initial,
             T.grid_data(),
+            Tdev.grid_data(),
             u.block_1().grid_data(),
             stokes.eta_fine().grid_data(),
             stokes.density().grid_data(),
@@ -523,7 +532,7 @@ Result<> run( const Parameters& prm )
         const auto Nu_top_0 = compute_nusselt(
             ( *domains[velocity_level] ),
             T,
-            T_ref,
+            T_cond,
             coords_shell[velocity_level],
             coords_radii[velocity_level],
             boundary_mask_data[velocity_level],
@@ -576,11 +585,14 @@ Result<> run( const Parameters& prm )
             // --- Energy solve (polymorphic dispatch) ---
             energy->step( dt, /*print_convergence=*/( picard == num_picard - 1 ) );
 
+            // Update Tdev
+            subtract_radial_profile( Tdev, T, T_ref, *domains[velocity_level] );
+
             // Update viscosity from the new temperature field.
             stokes.update_viscosity( T );
 
             // --- Stokes solve ---
-            stokes.solve( T, prm.physics_parameters.compressible, /*log_convergence=*/( picard == num_picard - 1 ) );
+            stokes.solve( Tdev, prm.physics_parameters.compressible, /*log_convergence=*/( picard == num_picard - 1 ) );
 
         } // end Picard loop
 
@@ -599,6 +611,7 @@ Result<> run( const Parameters& prm )
                 prm,
                 timestep,
                 T.grid_data(),
+                Tdev.grid_data(),
                 u.block_1().grid_data(),
                 stokes.eta_fine().grid_data(),
                 stokes.density().grid_data(),
@@ -652,7 +665,7 @@ Result<> run( const Parameters& prm )
             const auto Nu_top = compute_nusselt(
                 ( *domains[velocity_level] ),
                 T,
-                T_ref,
+                T_cond,
                 coords_shell[velocity_level],
                 coords_radii[velocity_level],
                 boundary_mask_data[velocity_level],
