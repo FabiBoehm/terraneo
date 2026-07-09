@@ -368,13 +368,17 @@ grid::Grid2DDataScalar< ProfileOutDataType > interpolate_radial_profile_into_sub
 /// @param key_values name of the value column
 /// @param coords_radii radii of each node for all local subdomains - see \ref terra::grid::shell::subdomain_shell_radii(),
 ///                     the output grid data will have the same extents
+/// @param radii_scale constant scaling factor for the radii read from file, defaults to 1
+/// @param values_scale constant scaling factor for the physical quantity read from file, default to 1
 /// @return Kokkos::View with the same dimensions of coords_radii, populated with interpolated values per subdomain
 template < std::floating_point GridDataType, std::floating_point ProfileOutDataType = double >
 grid::Grid2DDataScalar< ProfileOutDataType > interpolate_radial_profile_into_subdomains_from_csv(
     const std::string&                            filename,
     const std::string&                            key_radii,
     const std::string&                            key_values,
-    const grid::Grid2DDataScalar< GridDataType >& coords_radii )
+    const grid::Grid2DDataScalar< GridDataType >& coords_radii,
+    const ProfileOutDataType                      radii_scale  = 1.0,
+    const ProfileOutDataType                      values_scale = 1.0 )
 {
     auto profile_table_result = util::read_table_from_csv( filename );
     if ( profile_table_result.is_err() )
@@ -384,8 +388,14 @@ grid::Grid2DDataScalar< ProfileOutDataType > interpolate_radial_profile_into_sub
     }
     const auto& profile_table = profile_table_result.unwrap();
 
-    const auto profile_radii  = profile_table.column_as_vector< double >( key_radii );
-    const auto profile_values = profile_table.column_as_vector< double >( key_values );
+    auto profile_radii  = profile_table.column_as_vector< double >( key_radii );
+    auto profile_values = profile_table.column_as_vector< double >( key_values );
+
+    // Scale radii and values from file
+    for ( auto& r : profile_radii )
+        r *= radii_scale;
+    for ( auto& v : profile_values )
+        v *= values_scale;
 
     return interpolate_radial_profile_into_subdomains(
         "radial_profile_" + key_values, coords_radii, profile_radii, profile_values );

@@ -135,12 +135,18 @@ enum class InitialTemperatureProfile
 {
     POWER_LAW,
     CONDUCTIVE,
+    FROM_FILE
 };
 
 struct InitialTemperatureParameters
 {
     /// Selector for the initial-temperature distribution — see InitialTemperatureProfile.
-    InitialTemperatureProfile profile = InitialTemperatureProfile::POWER_LAW;
+    InitialTemperatureProfile profile = InitialTemperatureProfile::FROM_FILE;
+
+    // Reference temperature from file
+    std::string Tref_profile_csv_path        = "TemperatureProfile_3800K.csv";
+    std::string Tref_profile_radii_key       = "radius";
+    std::string Tref_profile_temperature_key = "temperature";
 
     /// Spherical-harmonic perturbation degree l of the first harmonic (l >= 0). Set 0 to
     /// disable the SH perturbation entirely (then sph_epsilon is ignored).
@@ -173,7 +179,7 @@ struct PhysicsParameters
 
     double thermal_diffusivity_dim    = 1.0;
     double thermal_diffusivity_nondim = 1.0;
-    double characteristic_velocity    = 1e-10; // characteristic diffusive velocity
+    double characteristic_velocity    = 1e-10; // diffusive velocity
 
     double reference_density      = 4500;
     double surface_density_dim    = 3300;
@@ -360,7 +366,7 @@ inline void nondimensionalise( Parameters& prm )
 
     // --- Domain ---
 
-    // Nondimensionalise radii with mantle thickness -- rescale to unit sphere for output
+    // Nondimensionalise radii with mantle thickness -- rescaled to unit sphere for output
     mesh.mantle_thickness_m = mesh.radius_surface_m - mesh.radius_cmb_m;
     mesh.radius_max         = mesh.radius_surface_m / mesh.mantle_thickness_m;
     mesh.radius_min         = mesh.radius_cmb_m / mesh.mantle_thickness_m;
@@ -614,16 +620,21 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
     std::map< std::string, InitialTemperatureProfile > init_temp_profile_map{
         { "power-law", InitialTemperatureProfile::POWER_LAW },
         { "conductive", InitialTemperatureProfile::CONDUCTIVE },
-    };
+        { "from-file", InitialTemperatureProfile::FROM_FILE } };
 
     add_option_with_default(
         app, "--initial-temperature-profile", parameters.physics_parameters.initial_temperature.profile )
         ->transform( CLI::CheckedTransformer( init_temp_profile_map, CLI::ignore_case ) )
-        ->default_val( "power-law" )
+        ->default_val( "from-file" )
         ->group( "Initial Temperature" )
         ->description(
+            "'from-file': read custom temperature profile from file."
             "'power-law': T = ((r_max-r)/(r_max-r_min))^5 + random noise (default). "
             "'conductive': T_ref = (r_min*r_max/r - r_min)/(r_max - r_min), with optional spherical harmonic perturbation." );
+
+    add_option_with_default(
+        app, "--temperature-profile-path", parameters.physics_parameters.initial_temperature.Tref_profile_csv_path )
+        ->group( "Initial Temperature" );
 
     add_option_with_default(
         app, "--initial-temperature-sph-degree", parameters.physics_parameters.initial_temperature.sph_degree_l )
