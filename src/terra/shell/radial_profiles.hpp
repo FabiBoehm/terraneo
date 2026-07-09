@@ -127,13 +127,33 @@ RadialProfiles< ScalarType > radial_profiles(
         auto host_cnt = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), radial_profiles.radial_cnt_ );
 
         MPI_Allreduce(
-            MPI_IN_PLACE, host_min.data(), host_min.size(), mpi::mpi_datatype< ScalarType >(), MPI_MIN, MPI_COMM_WORLD );
+            MPI_IN_PLACE,
+            host_min.data(),
+            host_min.size(),
+            mpi::mpi_datatype< ScalarType >(),
+            MPI_MIN,
+            MPI_COMM_WORLD );
         MPI_Allreduce(
-            MPI_IN_PLACE, host_max.data(), host_max.size(), mpi::mpi_datatype< ScalarType >(), MPI_MAX, MPI_COMM_WORLD );
+            MPI_IN_PLACE,
+            host_max.data(),
+            host_max.size(),
+            mpi::mpi_datatype< ScalarType >(),
+            MPI_MAX,
+            MPI_COMM_WORLD );
         MPI_Allreduce(
-            MPI_IN_PLACE, host_sum.data(), host_sum.size(), mpi::mpi_datatype< ScalarType >(), MPI_SUM, MPI_COMM_WORLD );
+            MPI_IN_PLACE,
+            host_sum.data(),
+            host_sum.size(),
+            mpi::mpi_datatype< ScalarType >(),
+            MPI_SUM,
+            MPI_COMM_WORLD );
         MPI_Allreduce(
-            MPI_IN_PLACE, host_cnt.data(), host_cnt.size(), mpi::mpi_datatype< ScalarType >(), MPI_SUM, MPI_COMM_WORLD );
+            MPI_IN_PLACE,
+            host_cnt.data(),
+            host_cnt.size(),
+            mpi::mpi_datatype< ScalarType >(),
+            MPI_SUM,
+            MPI_COMM_WORLD );
 
         Kokkos::deep_copy( radial_profiles.radial_min_, host_min );
         Kokkos::deep_copy( radial_profiles.radial_max_, host_max );
@@ -183,8 +203,11 @@ RadialProfiles< ScalarType > radial_profiles(
 /// @param radii Vector of shell radii. Can for instance be obtained from the DomainInfo.
 /// @return Table with columns: tag, shell_idx, radius, min, max, avg, cnt.
 template < typename ScalarType >
-util::Table
-    radial_profiles_to_table( const RadialProfiles< ScalarType >& radial_profiles, const std::vector< double >& radii )
+util::Table radial_profiles_to_table(
+    const RadialProfiles< ScalarType >& radial_profiles,
+    const std::vector< double >&        radii,
+    const ScalarType                    field_scale  = 1.0,
+    const std::string                   radial_label = "radius" )
 {
     if ( radii.size() != radial_profiles.radial_min_.extent( 0 ) ||
          radii.size() != radial_profiles.radial_max_.extent( 0 ) ||
@@ -206,18 +229,19 @@ util::Table
         Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), radial_profiles.radial_avg_ );
 
     util::Table table;
-    for ( int r = 0; r < radii.size(); r++ )
+    for ( int r = static_cast< int >( radii.size() ) - 1; r >= 0; r-- )
     {
         table.add_row(
             { { "tag", "radial_profiles" },
               { "shell_idx", r },
-              { "radius", radii[r] },
-              { "min", radial_profiles_host_min( r ) },
-              { "max", radial_profiles_host_max( r ) },
-              { "sum", radial_profiles_host_sum( r ) },
-              { "avg", radial_profiles_host_avg( r ) },
+              { radial_label, radii[r] },
+              { "min", radial_profiles_host_min( r ) * field_scale },
+              { "max", radial_profiles_host_max( r ) * field_scale },
+              { "sum", radial_profiles_host_sum( r ) * field_scale },
+              { "avg", radial_profiles_host_avg( r ) * field_scale },
               { "cnt", radial_profiles_host_cnt( r ) } } );
     }
+    table.set_column_order( { radial_label, "avg", "min", "max", "cnt", "sum", "shell_idx", "tag" } );
     return table;
 }
 
@@ -344,13 +368,17 @@ grid::Grid2DDataScalar< ProfileOutDataType > interpolate_radial_profile_into_sub
 /// @param key_values name of the value column
 /// @param coords_radii radii of each node for all local subdomains - see \ref terra::grid::shell::subdomain_shell_radii(),
 ///                     the output grid data will have the same extents
+/// @param radii_scale constant scaling factor for the radii read from file, defaults to 1
+/// @param values_scale constant scaling factor for the physical quantity read from file, default to 1
 /// @return Kokkos::View with the same dimensions of coords_radii, populated with interpolated values per subdomain
 template < std::floating_point GridDataType, std::floating_point ProfileOutDataType = double >
 grid::Grid2DDataScalar< ProfileOutDataType > interpolate_radial_profile_into_subdomains_from_csv(
     const std::string&                            filename,
     const std::string&                            key_radii,
     const std::string&                            key_values,
-    const grid::Grid2DDataScalar< GridDataType >& coords_radii )
+    const grid::Grid2DDataScalar< GridDataType >& coords_radii,
+    const ProfileOutDataType                      radii_scale  = 1.0,
+    const ProfileOutDataType                      values_scale = 1.0 )
 {
     auto profile_table_result = util::read_table_from_csv( filename );
     if ( profile_table_result.is_err() )
@@ -360,8 +388,14 @@ grid::Grid2DDataScalar< ProfileOutDataType > interpolate_radial_profile_into_sub
     }
     const auto& profile_table = profile_table_result.unwrap();
 
-    const auto profile_radii  = profile_table.column_as_vector< double >( key_radii );
-    const auto profile_values = profile_table.column_as_vector< double >( key_values );
+    auto profile_radii  = profile_table.column_as_vector< double >( key_radii );
+    auto profile_values = profile_table.column_as_vector< double >( key_values );
+
+    // Scale radii and values from file
+    for ( auto& r : profile_radii )
+        r *= radii_scale;
+    for ( auto& v : profile_values )
+        v *= values_scale;
 
     return interpolate_radial_profile_into_subdomains(
         "radial_profile_" + key_values, coords_radii, profile_radii, profile_values );

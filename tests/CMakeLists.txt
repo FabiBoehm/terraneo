@@ -111,6 +111,8 @@ add_terra_test(test_xdmf_writer)
 add_terra_test(test_ev_rotation)
 add_terra_test(test_ev_advection_diffusion)
 
+add_terra_test(test_shear_heating)
+
 # Adding target for all the tests.
 get_property(ALL_TERRA_TESTS GLOBAL PROPERTY TERRA_TEST_TARGETS)
 add_custom_target(tests DEPENDS ${ALL_TERRA_TESTS})

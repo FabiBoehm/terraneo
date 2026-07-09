@@ -23,5 +23,7 @@ target_sources(terra
         epsilon_divdiv_stokes.hpp
         zero.hpp
         kmass.hpp
+        shear_heating_simple.hpp
         )
 
+add_subdirectory(optimized_laplace)

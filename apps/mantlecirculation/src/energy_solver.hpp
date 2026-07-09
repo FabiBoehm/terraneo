@@ -23,6 +23,7 @@
 #include "linalg/solvers/fgmres_lowmem.hpp"
 #include "linalg/vector_fv.hpp"
 #include "linalg/vector_q1.hpp"
+#include "parameters.hpp"
 #include "util/logging.hpp"
 #include "util/table.hpp"
 #include "util/timer.hpp"
@@ -43,7 +44,7 @@ class EnergySolver
     virtual ~EnergySolver() = default;
 
     /// CFL/stability-bound dt for the scheme at the current velocity field.
-    virtual ScalarType compute_dt() = 0;
+    virtual ScalarType compute_dt( const int timestep ) = 0;
 
     /// Take one timestep.  `print_convergence` controls whether per-step
     /// solver tables are printed (typically only on the final Picard pass).
@@ -83,6 +84,22 @@ class EnergySolver
     virtual linalg::VectorQ1Scalar< ScalarType >* h_w_diag_view() { return nullptr; }
 };
 
+template < typename ScalarType >
+ScalarType ramp_dt( const ScalarType dt, const int timestep, const int ramp_steps )
+{
+    constexpr ScalarType ramp_scale_start = 1e-4;
+    constexpr ScalarType ramp_scale_end   = 0.5;
+
+    if ( timestep > ramp_steps )
+        return dt;
+
+    const ScalarType scale =
+        ramp_scale_start *
+        std::pow( ramp_scale_end / ramp_scale_start, static_cast< ScalarType >( timestep - 1 ) / ( ramp_steps - 1 ) );
+
+    return scale * dt;
+}
+
 /// Implicit Galerkin SUPG advection-diffusion energy solve.
 ///
 /// Operator: A = M + dt · (K_diff + K_adv + K_supg), Dirichlet rows treated
@@ -91,23 +108,23 @@ class EnergySolver
 template < typename ScalarType >
 class SUPGSolver : public EnergySolver< ScalarType >
 {
-    using AD       = fe::wedge::operators::shell::UnsteadyAdvectionDiffusionSUPGKerngen< ScalarType >;
-    using TempMass = fe::wedge::operators::shell::Mass< ScalarType >;
+    using AD          = fe::wedge::operators::shell::UnsteadyAdvectionDiffusionSUPGKerngen< ScalarType >;
+    using TempMass    = fe::wedge::operators::shell::Mass< ScalarType >;
     using DiagSolverT = linalg::solvers::DiagonalSolver< AD >;
     using FGMRESType  = linalg::solvers::FGMRES< AD, DiagSolverT >;
 
   public:
     SUPGSolver(
-        const std::shared_ptr< grid::shell::DistributedDomain >&            domain,
-        const grid::Grid3DDataVec< ScalarType, 3 >&                         coords_shell,
-        const grid::Grid2DDataScalar< ScalarType >&                         coords_radii,
-        const grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag >&     boundary_mask,
-        const grid::Grid4DDataScalar< grid::NodeOwnershipFlag >&            ownership_mask,
-        const linalg::VectorQ1Vec< ScalarType, 3 >&                         velocity,
-        linalg::VectorQ1Scalar< ScalarType >&                               T,
-        ScalarType                                                          h,
-        const Parameters&                                                   prm,
-        std::shared_ptr< util::Table >                                      table )
+        const std::shared_ptr< grid::shell::DistributedDomain >&        domain,
+        const grid::Grid3DDataVec< ScalarType, 3 >&                     coords_shell,
+        const grid::Grid2DDataScalar< ScalarType >&                     coords_radii,
+        const grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag >& boundary_mask,
+        const grid::Grid4DDataScalar< grid::NodeOwnershipFlag >&        ownership_mask,
+        const linalg::VectorQ1Vec< ScalarType, 3 >&                     velocity,
+        linalg::VectorQ1Scalar< ScalarType >&                           T,
+        ScalarType                                                      h,
+        const Parameters&                                               prm,
+        std::shared_ptr< util::Table >                                  table )
     : domain_( domain )
     , coords_shell_( coords_shell )
     , coords_radii_( coords_radii )
@@ -131,16 +148,35 @@ class SUPGSolver : public EnergySolver< ScalarType >
         util::logroot << "Setting up SUPG energy solver ..." << std::endl;
 
         A_ = std::make_unique< AD >(
-            *domain_, coords_shell_, coords_radii_, boundary_mask_, velocity_,
-            prm_.physics_parameters.diffusivity, ScalarType( 0 ), /*treat_boundary=*/true );
+            *domain_,
+            coords_shell_,
+            coords_radii_,
+            boundary_mask_,
+            velocity_,
+            prm_.physics_parameters.thermal_diffusivity_nondim,
+            ScalarType( 0 ),
+            /*treat_boundary=*/true );
 
         A_neumann_ = std::make_unique< AD >(
-            *domain_, coords_shell_, coords_radii_, boundary_mask_, velocity_,
-            prm_.physics_parameters.diffusivity, ScalarType( 0 ), /*treat_boundary=*/false );
+            *domain_,
+            coords_shell_,
+            coords_radii_,
+            boundary_mask_,
+            velocity_,
+            prm_.physics_parameters.thermal_diffusivity_nondim,
+            ScalarType( 0 ),
+            /*treat_boundary=*/false );
 
         A_neumann_diag_ = std::make_unique< AD >(
-            *domain_, coords_shell_, coords_radii_, boundary_mask_, velocity_,
-            prm_.physics_parameters.diffusivity, ScalarType( 0 ), /*treat_boundary=*/false, /*diagonal=*/true );
+            *domain_,
+            coords_shell_,
+            coords_radii_,
+            boundary_mask_,
+            velocity_,
+            prm_.physics_parameters.thermal_diffusivity_nondim,
+            ScalarType( 0 ),
+            /*treat_boundary=*/false,
+            /*diagonal=*/true );
 
         M_ = std::make_unique< TempMass >( *domain_, coords_shell_, coords_radii_, false );
 
@@ -173,17 +209,41 @@ class SUPGSolver : public EnergySolver< ScalarType >
         util::logroot << "SUPG energy solver ready." << std::endl;
     }
 
-    ScalarType compute_dt() override
+    ScalarType compute_dt( const int timestep ) override
     {
         // SUPG: implicit diffusion, dt only constrained by advection CFL.
-        const auto max_vel = kernels::common::max_vector_magnitude( velocity_.grid_data() );
-        const auto dt_advection = ( max_vel > ScalarType( 1e-12 ) ) ? ( h_ / max_vel ) : ScalarType( 1e-3 );
-        const auto dt = prm_.time_stepping_parameters.dt_scaling * dt_advection;
+        const auto max_vel      = kernels::common::max_vector_magnitude( velocity_.grid_data() );
+        const auto dt_advection = h_ / max_vel;
+        const auto dt_cfl       = prm_.time_stepping_parameters.dt_scaling * dt_advection;
+        const auto dt           = std::clamp(
+            ramp_dt( dt_cfl, timestep, prm_.time_stepping_parameters.initial_dt_ramp_steps ),
+            prm_.time_stepping_parameters.dt_min,
+            prm_.time_stepping_parameters.dt_max );
 
         util::logroot << "Computing dt (SUPG advection CFL) ..." << std::endl;
-        util::logroot << "    max_vel:                       " << max_vel << std::endl;
-        util::logroot << "    h:                             " << h_ << std::endl;
-        util::logroot << "=>  dt (= dt_scaling * h/v_max):   " << dt << std::endl;
+        util::logroot << "    max_vel (cm/a) :             " << max_vel * prm_.physics_parameters.calc_cm_per_year
+                      << std::endl;
+        util::logroot << "    h (m) :                      " << h_ * prm_.mesh_parameters.radius_surface_m << std::endl;
+        util::logroot << "    cfl timestep size (= dt_scaling * h/v_max): "
+                      << dt_cfl * prm_.physics_parameters.calc_time_Ma << " Ma" << std::endl;
+        if ( dt_cfl > prm_.time_stepping_parameters.dt_max )
+        {
+            util::logroot << "....limiting maximum timestep size to " << prm_.time_stepping_parameters.dt_max_Ma
+                          << " Ma....." << std::endl;
+        }
+        else if ( dt_cfl < prm_.time_stepping_parameters.dt_min )
+        {
+            util::logroot << "....limiting minimum timestep size to " << prm_.time_stepping_parameters.dt_min_Ma
+                          << " Ma....." << std::endl;
+        }
+        if ( timestep <= prm_.time_stepping_parameters.initial_dt_ramp_steps )
+        {
+            util::logroot << "....enforcing exponential ramp-up in first "
+                          << prm_.time_stepping_parameters.initial_dt_ramp_steps << " timesteps....." << std::endl;
+        }
+        util::logroot << "-------------------------------------------------" << std::endl;
+        util::logroot << "=>   dt: " << dt * prm_.physics_parameters.calc_time_Ma << " Ma.\n" << std::endl;
+
         return dt;
     }
 
@@ -193,10 +253,7 @@ class SUPGSolver : public EnergySolver< ScalarType >
             Kokkos::deep_copy( T_backup_.grid_data(), T_.grid_data() );
     }
 
-    void restore_for_picard() override
-    {
-        Kokkos::deep_copy( T_.grid_data(), T_backup_.grid_data() );
-    }
+    void restore_for_picard() override { Kokkos::deep_copy( T_.grid_data(), T_backup_.grid_data() ); }
 
     void step( ScalarType dt, bool print_convergence ) override
     {
@@ -227,8 +284,8 @@ class SUPGSolver : public EnergySolver< ScalarType >
             {
                 auto       g_grid    = g_.grid_data();
                 auto       mask      = boundary_mask_;
-                const auto T_cmb_val = static_cast< ScalarType >( prm_.boundary_conditions_parameters.temperature_cmb );
-                const auto T_top_val = static_cast< ScalarType >( prm_.boundary_conditions_parameters.temperature_surface );
+                const auto T_cmb_val = static_cast< ScalarType >( prm_.boundary_parameters.temperature_max );
+                const auto T_top_val = static_cast< ScalarType >( prm_.boundary_parameters.temperature_min );
                 Kokkos::parallel_for(
                     "supg_dirichlet_g",
                     grid::shell::local_domain_md_range_policy_nodes( *domain_ ),
@@ -244,8 +301,7 @@ class SUPGSolver : public EnergySolver< ScalarType >
 
             // Eliminate Dirichlet BCs from RHS.
             fe::strong_algebraic_dirichlet_enforcement_poisson_like(
-                *A_neumann_, *A_neumann_diag_, g_, tmp_, q_,
-                boundary_mask_, grid::shell::ShellBoundaryFlag::BOUNDARY );
+                *A_neumann_, *A_neumann_diag_, g_, tmp_, q_, boundary_mask_, grid::shell::ShellBoundaryFlag::BOUNDARY );
 
             // Solve (M + dt · A) T^{n+1} = q.
             solve( *solver_, *A_, T_, q_ );
@@ -261,24 +317,24 @@ class SUPGSolver : public EnergySolver< ScalarType >
 
   private:
     // Borrowed inputs.
-    std::shared_ptr< grid::shell::DistributedDomain >                       domain_;
-    const grid::Grid3DDataVec< ScalarType, 3 >&                             coords_shell_;
-    const grid::Grid2DDataScalar< ScalarType >&                             coords_radii_;
-    const grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag >&         boundary_mask_;
-    const grid::Grid4DDataScalar< grid::NodeOwnershipFlag >&                ownership_mask_;
-    const linalg::VectorQ1Vec< ScalarType, 3 >&                             velocity_;
-    linalg::VectorQ1Scalar< ScalarType >&                                   T_;
-    ScalarType                                                              h_;
-    const Parameters&                                                       prm_;
-    std::shared_ptr< util::Table >                                          table_;
+    std::shared_ptr< grid::shell::DistributedDomain >               domain_;
+    const grid::Grid3DDataVec< ScalarType, 3 >&                     coords_shell_;
+    const grid::Grid2DDataScalar< ScalarType >&                     coords_radii_;
+    const grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag >& boundary_mask_;
+    const grid::Grid4DDataScalar< grid::NodeOwnershipFlag >&        ownership_mask_;
+    const linalg::VectorQ1Vec< ScalarType, 3 >&                     velocity_;
+    linalg::VectorQ1Scalar< ScalarType >&                           T_;
+    ScalarType                                                      h_;
+    const Parameters&                                               prm_;
+    std::shared_ptr< util::Table >                                  table_;
 
     // Owned state.
-    std::unique_ptr< AD >                                                   A_, A_neumann_, A_neumann_diag_;
-    std::unique_ptr< TempMass >                                             M_;
-    std::unique_ptr< FGMRESType >                                           solver_;
-    linalg::VectorQ1Scalar< ScalarType >                                    g_, tmp_, q_, diag_;
-    linalg::VectorQ1Scalar< ScalarType >                                    T_backup_;
-    std::vector< linalg::VectorQ1Scalar< ScalarType > >                     tmp_gmres_;
+    std::unique_ptr< AD >                               A_, A_neumann_, A_neumann_diag_;
+    std::unique_ptr< TempMass >                         M_;
+    std::unique_ptr< FGMRESType >                       solver_;
+    linalg::VectorQ1Scalar< ScalarType >                g_, tmp_, q_, diag_;
+    linalg::VectorQ1Scalar< ScalarType >                T_backup_;
+    std::vector< linalg::VectorQ1Scalar< ScalarType > > tmp_gmres_;
 };
 
 /// Implicit Galerkin energy solve with explicit lagged entropy-viscosity
@@ -287,9 +343,9 @@ class SUPGSolver : public EnergySolver< ScalarType >
 template < typename ScalarType >
 class EVSolver : public EnergySolver< ScalarType >
 {
-    using AD_EV     = fe::wedge::operators::shell::UnsteadyAdvectionDiffusionSUPGKerngen< ScalarType >;
-    using TempMass  = fe::wedge::operators::shell::Mass< ScalarType >;
-    using EVDiffOp  = fe::wedge::operators::shell::WedgeConstantDivKGrad< ScalarType >;
+    using AD_EV       = fe::wedge::operators::shell::UnsteadyAdvectionDiffusionSUPGKerngen< ScalarType >;
+    using TempMass    = fe::wedge::operators::shell::Mass< ScalarType >;
+    using EVDiffOp    = fe::wedge::operators::shell::WedgeConstantDivKGrad< ScalarType >;
     using DiagSolverT = linalg::solvers::DiagonalSolver< AD_EV >;
     using FGMRESDouble = linalg::solvers::FGMRES< AD_EV, DiagSolverT >;
     // Reduced-precision Krylov basis variant (operator stays double). FP16 storage
@@ -299,16 +355,16 @@ class EVSolver : public EnergySolver< ScalarType >
 
   public:
     EVSolver(
-        const std::shared_ptr< grid::shell::DistributedDomain >&            domain,
-        const grid::Grid3DDataVec< ScalarType, 3 >&                         coords_shell,
-        const grid::Grid2DDataScalar< ScalarType >&                         coords_radii,
-        const grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag >&     boundary_mask,
-        const grid::Grid4DDataScalar< grid::NodeOwnershipFlag >&            ownership_mask,
-        const linalg::VectorQ1Vec< ScalarType, 3 >&                         velocity,
-        linalg::VectorQ1Scalar< ScalarType >&                               T,
-        ScalarType                                                          h,
-        const Parameters&                                                   prm,
-        std::shared_ptr< util::Table >                                      table )
+        const std::shared_ptr< grid::shell::DistributedDomain >&        domain,
+        const grid::Grid3DDataVec< ScalarType, 3 >&                     coords_shell,
+        const grid::Grid2DDataScalar< ScalarType >&                     coords_radii,
+        const grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag >& boundary_mask,
+        const grid::Grid4DDataScalar< grid::NodeOwnershipFlag >&        ownership_mask,
+        const linalg::VectorQ1Vec< ScalarType, 3 >&                     velocity,
+        linalg::VectorQ1Scalar< ScalarType >&                           T,
+        ScalarType                                                      h,
+        const Parameters&                                               prm,
+        std::shared_ptr< util::Table >                                  table )
     : domain_( domain )
     , coords_shell_( coords_shell )
     , coords_radii_( coords_radii )
@@ -349,22 +405,41 @@ class EVSolver : public EnergySolver< ScalarType >
         const auto num_sub = static_cast< long long >( domain_->subdomains().size() );
         const auto nx_c    = domain_->domain_info().subdomain_num_nodes_per_side_laterally() - 1;
         const auto nr_c    = domain_->domain_info().subdomain_num_nodes_radially() - 1;
-        nu_h_wedge_ = grid::Grid5DDataScalar< ScalarType >(
+        nu_h_wedge_        = grid::Grid5DDataScalar< ScalarType >(
             "nu_h_wedge", num_sub, nx_c, nx_c, nr_c, fe::wedge::num_wedges_per_hex_cell );
 
         A_ = std::make_unique< AD_EV >(
-            *domain_, coords_shell_, coords_radii_, boundary_mask_, velocity_,
-            prm_.physics_parameters.diffusivity, ScalarType( 0 ), /*treat_boundary=*/true );
+            *domain_,
+            coords_shell_,
+            coords_radii_,
+            boundary_mask_,
+            velocity_,
+            prm_.physics_parameters.thermal_diffusivity_nondim,
+            ScalarType( 0 ),
+            /*treat_boundary=*/true );
         A_->set_supg_enabled( false );
 
         A_neumann_ = std::make_unique< AD_EV >(
-            *domain_, coords_shell_, coords_radii_, boundary_mask_, velocity_,
-            prm_.physics_parameters.diffusivity, ScalarType( 0 ), /*treat_boundary=*/false );
+            *domain_,
+            coords_shell_,
+            coords_radii_,
+            boundary_mask_,
+            velocity_,
+            prm_.physics_parameters.thermal_diffusivity_nondim,
+            ScalarType( 0 ),
+            /*treat_boundary=*/false );
         A_neumann_->set_supg_enabled( false );
 
         A_neumann_diag_ = std::make_unique< AD_EV >(
-            *domain_, coords_shell_, coords_radii_, boundary_mask_, velocity_,
-            prm_.physics_parameters.diffusivity, ScalarType( 0 ), /*treat_boundary=*/false, /*diagonal=*/true );
+            *domain_,
+            coords_shell_,
+            coords_radii_,
+            boundary_mask_,
+            velocity_,
+            prm_.physics_parameters.thermal_diffusivity_nondim,
+            ScalarType( 0 ),
+            /*treat_boundary=*/false,
+            /*diagonal=*/true );
         A_neumann_diag_->set_supg_enabled( false );
 
         M_ = std::make_unique< TempMass >( *domain_, coords_shell_, coords_radii_, false );
@@ -376,7 +451,7 @@ class EVSolver : public EnergySolver< ScalarType >
         log_hbm( "EV: + nu_h_wedge (1 Grid5D per-wedge field; kappa is a scalar)" );
         A_kappa_ = std::make_unique< EVDiffOp >(
             *domain_, coords_shell_, coords_radii_,
-            static_cast< ScalarType >( prm_.physics_parameters.diffusivity ) );
+            static_cast< ScalarType >( prm_.physics_parameters.thermal_diffusivity_nondim ) );
 
         // Global lumped mass M_lumped = M · 1, used to invert the global
         // Galerkin K·T into a Q1-nodal lap field per timestep:
@@ -390,8 +465,7 @@ class EVSolver : public EnergySolver< ScalarType >
 
         // ν_h read by reference; the underlying view is updated in place
         // each step by compute_nu_h.
-        A_evdiff_ = std::make_unique< EVDiffOp >(
-            *domain_, coords_shell_, coords_radii_, nu_h_wedge_ );
+        A_evdiff_ = std::make_unique< EVDiffOp >( *domain_, coords_shell_, coords_radii_, nu_h_wedge_ );
 
         A_neumann_diag_->dt() = ScalarType( 1e-4 );
         linalg::assign( diag_, ScalarType( 0 ) );
@@ -438,24 +512,48 @@ class EVSolver : public EnergySolver< ScalarType >
         ev_params_.alpha_max = static_cast< ScalarType >( prm_.energy_solver_parameters.ev_alpha_max );
         ev_params_.alpha_E   = static_cast< ScalarType >( prm_.energy_solver_parameters.ev_alpha_E );
 
-        util::logroot << "EV energy solver ready  (α_max=" << ev_params_.alpha_max
-                      << ", α_E=" << ev_params_.alpha_E << ")" << std::endl;
+        util::logroot << "EV energy solver ready  (α_max=" << ev_params_.alpha_max << ", α_E=" << ev_params_.alpha_E
+                      << ")" << std::endl;
     }
 
     linalg::VectorQ1Scalar< ScalarType >* nu_h_nodal_view() override { return nu_h_nodal_diag_.get(); }
-    linalg::VectorQ1Scalar< ScalarType >* lap_diag_view()    override { return lap_diag_.get(); }
-    linalg::VectorQ1Scalar< ScalarType >* h_w_diag_view()    override { return h_w_nodal_diag_.get(); }
+    linalg::VectorQ1Scalar< ScalarType >* lap_diag_view() override { return lap_diag_.get(); }
+    linalg::VectorQ1Scalar< ScalarType >* h_w_diag_view() override { return h_w_nodal_diag_.get(); }
 
-    ScalarType compute_dt() override
+    ScalarType compute_dt( const int timestep ) override
     {
-        const auto max_vel = kernels::common::max_vector_magnitude( velocity_.grid_data() );
-        const auto dt_advection = ( max_vel > ScalarType( 1e-12 ) ) ? ( h_ / max_vel ) : ScalarType( 1e-3 );
-        const auto dt = prm_.time_stepping_parameters.dt_scaling * dt_advection;
+        const auto max_vel      = kernels::common::max_vector_magnitude( velocity_.grid_data() );
+        const auto dt_advection = h_ / max_vel;
+        const auto dt_cfl       = prm_.time_stepping_parameters.dt_scaling * dt_advection;
+        const auto dt           = std::clamp(
+            ramp_dt( dt_cfl, timestep, prm_.time_stepping_parameters.initial_dt_ramp_steps ),
+            prm_.time_stepping_parameters.dt_min,
+            prm_.time_stepping_parameters.dt_max );
 
         util::logroot << "Computing dt (EV advection CFL) ..." << std::endl;
-        util::logroot << "    max_vel:                       " << max_vel << std::endl;
-        util::logroot << "    h:                             " << h_ << std::endl;
-        util::logroot << "=>  dt (= dt_scaling * h/v_max):   " << dt << std::endl;
+        util::logroot << "    max_vel (cm/a) :             " << max_vel * prm_.physics_parameters.calc_cm_per_year
+                      << std::endl;
+        util::logroot << "    h (m) :                      " << h_ * prm_.mesh_parameters.radius_surface_m << std::endl;
+        util::logroot << "    cfl timestep size (= dt_scaling * h/v_max): "
+                      << dt_cfl * prm_.physics_parameters.calc_time_Ma << " Ma " << std::endl;
+        if ( dt_cfl > prm_.time_stepping_parameters.dt_max )
+        {
+            util::logroot << "....limiting maximum timestep size to " << prm_.time_stepping_parameters.dt_max_Ma
+                          << " Ma....." << std::endl;
+        }
+        else if ( dt_cfl < prm_.time_stepping_parameters.dt_min )
+        {
+            util::logroot << "....limiting minimum timestep size to " << prm_.time_stepping_parameters.dt_min_Ma
+                          << " Ma....." << std::endl;
+        }
+        if ( timestep <= prm_.time_stepping_parameters.initial_dt_ramp_steps )
+        {
+            util::logroot << "....enforcing exponential ramp-up in first "
+                          << prm_.time_stepping_parameters.initial_dt_ramp_steps << " timesteps....." << std::endl;
+        }
+        util::logroot << "-------------------------------------------------" << std::endl;
+        util::logroot << "=>   dt: " << dt * prm_.physics_parameters.calc_time_Ma << " Ma.\n" << std::endl;
+
         return dt;
     }
 
@@ -480,13 +578,14 @@ class EVSolver : public EnergySolver< ScalarType >
 
     void restore_for_picard() override
     {
-        Kokkos::deep_copy( T_.grid_data(),      T_backup_.grid_data() );
+        Kokkos::deep_copy( T_.grid_data(), T_backup_.grid_data() );
         Kokkos::deep_copy( T_prev_.grid_data(), T_prev_backup_.grid_data() );
     }
 
     void dump_diagnostics( int timestep, const std::string& outdir ) override
     {
-        if ( !prm_.energy_solver_parameters.ev_dump_nu_h ) return;
+        if ( !prm_.energy_solver_parameters.ev_dump_nu_h )
+            return;
 
         // Reduce min/max/mean of nu_h_wedge_ over locally-owned cells.  Cells
         // are not shared between MPI ranks, so a global all-reduce on the
@@ -505,9 +604,11 @@ class EVSolver : public EnergySolver< ScalarType >
             KOKKOS_LAMBDA( int s, int x, int y, int r, int w,
                            ScalarType& mn, ScalarType& mx, ScalarType& sm, long long& cnt ) {
                 const ScalarType v = nu( s, x, y, r, w );
-                if ( v < mn ) mn = v;
-                if ( v > mx ) mx = v;
-                sm  += v;
+                if ( v < mn )
+                    mn = v;
+                if ( v > mx )
+                    mx = v;
+                sm += v;
                 cnt += 1;
             },
             Kokkos::Min< ScalarType >( local_min ),
@@ -517,11 +618,11 @@ class EVSolver : public EnergySolver< ScalarType >
         Kokkos::fence();
 
         ScalarType g_min = local_min, g_max = local_max, g_sum = local_sum;
-        long long  g_n   = local_n;
+        long long  g_n = local_n;
         MPI_Allreduce( MPI_IN_PLACE, &g_min, 1, mpi::mpi_datatype< ScalarType >(), MPI_MIN, MPI_COMM_WORLD );
         MPI_Allreduce( MPI_IN_PLACE, &g_max, 1, mpi::mpi_datatype< ScalarType >(), MPI_MAX, MPI_COMM_WORLD );
         MPI_Allreduce( MPI_IN_PLACE, &g_sum, 1, mpi::mpi_datatype< ScalarType >(), MPI_SUM, MPI_COMM_WORLD );
-        MPI_Allreduce( MPI_IN_PLACE, &g_n,   1, MPI_LONG_LONG,                      MPI_SUM, MPI_COMM_WORLD );
+        MPI_Allreduce( MPI_IN_PLACE, &g_n, 1, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD );
 
         const ScalarType g_mean = ( g_n > 0 ) ? ( g_sum / static_cast< ScalarType >( g_n ) ) : ScalarType( 0 );
 
@@ -530,7 +631,7 @@ class EVSolver : public EnergySolver< ScalarType >
         if ( rank == 0 )
         {
             const std::string path = outdir + "/nu_h_stats.csv";
-            std::ofstream out( path, std::ios::app );
+            std::ofstream     out( path, std::ios::app );
             if ( out.tellp() == 0 )
             {
                 out << "timestep,nu_h_min,nu_h_max,nu_h_mean,n_wedges\n";
@@ -555,11 +656,10 @@ class EVSolver : public EnergySolver< ScalarType >
                 "ev_nu_h_diag_scatter",
                 grid::shell::local_domain_md_range_policy_cells( *domain_ ),
                 KOKKOS_LAMBDA( int s, int xc, int yc, int rc ) {
-                    constexpr int hex_off_x[8] = { 0, 1, 0, 1, 0, 1, 0, 1 };
-                    constexpr int hex_off_y[8] = { 0, 0, 1, 1, 0, 0, 1, 1 };
-                    constexpr int hex_off_r[8] = { 0, 0, 0, 0, 1, 1, 1, 1 };
-                    const ScalarType cell_avg =
-                        ScalarType( 0.5 ) * ( nu( s, xc, yc, rc, 0 ) + nu( s, xc, yc, rc, 1 ) );
+                    constexpr int    hex_off_x[8] = { 0, 1, 0, 1, 0, 1, 0, 1 };
+                    constexpr int    hex_off_y[8] = { 0, 0, 1, 1, 0, 0, 1, 1 };
+                    constexpr int    hex_off_r[8] = { 0, 0, 0, 0, 1, 1, 1, 1 };
+                    const ScalarType cell_avg = ScalarType( 0.5 ) * ( nu( s, xc, yc, rc, 0 ) + nu( s, xc, yc, rc, 1 ) );
                     for ( int k = 0; k < 8; ++k )
                     {
                         Kokkos::atomic_add(
@@ -573,13 +673,11 @@ class EVSolver : public EnergySolver< ScalarType >
             // Additive halo exchange so seam nodes get contributions from all
             // ranks that touch them.
             communication::shell::pack_send_and_recv_local_subdomain_boundaries(
-                *domain_, diag_v,  *diag_send_, *diag_recv_ );
-            communication::shell::unpack_and_reduce_local_subdomain_boundaries(
-                *domain_, diag_v,  *diag_recv_ );
+                *domain_, diag_v, *diag_send_, *diag_recv_ );
+            communication::shell::unpack_and_reduce_local_subdomain_boundaries( *domain_, diag_v, *diag_recv_ );
             communication::shell::pack_send_and_recv_local_subdomain_boundaries(
                 *domain_, count_v, *diag_send_, *diag_recv_ );
-            communication::shell::unpack_and_reduce_local_subdomain_boundaries(
-                *domain_, count_v, *diag_recv_ );
+            communication::shell::unpack_and_reduce_local_subdomain_boundaries( *domain_, count_v, *diag_recv_ );
 
             // Pointwise divide.
             Kokkos::parallel_for(
@@ -589,7 +687,8 @@ class EVSolver : public EnergySolver< ScalarType >
                     { diag_v.extent( 0 ), diag_v.extent( 1 ), diag_v.extent( 2 ), diag_v.extent( 3 ) } ),
                 KOKKOS_LAMBDA( int s, int x, int y, int r ) {
                     const ScalarType c = count_v( s, x, y, r );
-                    if ( c > ScalarType( 0 ) ) diag_v( s, x, y, r ) /= c;
+                    if ( c > ScalarType( 0 ) )
+                        diag_v( s, x, y, r ) /= c;
                 } );
             Kokkos::fence();
         }
@@ -619,13 +718,14 @@ class EVSolver : public EnergySolver< ScalarType >
                         if ( util::has_flag( own_v( s, x, y, r_target ), grid::NodeOwnershipFlag::OWNED ) )
                         {
                             const ScalarType a = Kokkos::abs( lap_v( s, x, y, r_target ) );
-                            if ( a > m ) m = a;
+                            if ( a > m )
+                                m = a;
                         }
                     },
                     Kokkos::Max< ScalarType >( local_max ) );
                 Kokkos::fence();
-                MPI_Allreduce( MPI_IN_PLACE, &local_max, 1,
-                               mpi::mpi_datatype< ScalarType >(), MPI_MAX, MPI_COMM_WORLD );
+                MPI_Allreduce(
+                    MPI_IN_PLACE, &local_max, 1, mpi::mpi_datatype< ScalarType >(), MPI_MAX, MPI_COMM_WORLD );
                 return local_max;
             };
 
@@ -643,10 +743,11 @@ class EVSolver : public EnergySolver< ScalarType >
                     out << "timestep,lap_max_cmb,lap_max_cmb_plus1,ratio_cmb,"
                            "lap_max_surf,lap_max_surf_minus1,ratio_surf\n";
                 }
-                const ScalarType r_cmb  = ( lap_max_cmb_p1  > 0 ) ? ( lap_max_cmb     / lap_max_cmb_p1 )  : ScalarType( 0 );
-                const ScalarType r_surf = ( lap_max_surf_m1 > 0 ) ? ( lap_max_surf    / lap_max_surf_m1 ) : ScalarType( 0 );
-                out << timestep << "," << lap_max_cmb << "," << lap_max_cmb_p1 << "," << r_cmb << ","
-                    << lap_max_surf << "," << lap_max_surf_m1 << "," << r_surf << "\n";
+                const ScalarType r_cmb = ( lap_max_cmb_p1 > 0 ) ? ( lap_max_cmb / lap_max_cmb_p1 ) : ScalarType( 0 );
+                const ScalarType r_surf =
+                    ( lap_max_surf_m1 > 0 ) ? ( lap_max_surf / lap_max_surf_m1 ) : ScalarType( 0 );
+                out << timestep << "," << lap_max_cmb << "," << lap_max_cmb_p1 << "," << r_cmb << "," << lap_max_surf
+                    << "," << lap_max_surf_m1 << "," << r_surf << "\n";
             }
         }
 
@@ -667,14 +768,23 @@ class EVSolver : public EnergySolver< ScalarType >
                 "ev_h_w_stats",
                 Kokkos::MDRangePolicy< Kokkos::Rank< 5, Kokkos::Iterate::Right, Kokkos::Iterate::Right > >(
                     { 0, 0, 0, 0, 0 },
-                    { h_w_v.extent( 0 ), h_w_v.extent( 1 ), h_w_v.extent( 2 ),
-                      h_w_v.extent( 3 ), h_w_v.extent( 4 ) } ),
-                KOKKOS_LAMBDA( int s, int x, int y, int r, int w,
-                               ScalarType& mn, ScalarType& mx, ScalarType& sm, long long& cnt ) {
+                    { h_w_v.extent( 0 ), h_w_v.extent( 1 ), h_w_v.extent( 2 ), h_w_v.extent( 3 ), h_w_v.extent( 4 ) } ),
+                KOKKOS_LAMBDA(
+                    int         s,
+                    int         x,
+                    int         y,
+                    int         r,
+                    int         w,
+                    ScalarType& mn,
+                    ScalarType& mx,
+                    ScalarType& sm,
+                    long long&  cnt ) {
                     const ScalarType v = h_w_v( s, x, y, r, w );
-                    if ( v < mn ) mn = v;
-                    if ( v > mx ) mx = v;
-                    sm  += v;
+                    if ( v < mn )
+                        mn = v;
+                    if ( v > mx )
+                        mx = v;
+                    sm += v;
                     cnt += 1;
                 },
                 Kokkos::Min< ScalarType >( hw_min ),
@@ -685,17 +795,17 @@ class EVSolver : public EnergySolver< ScalarType >
             MPI_Allreduce( MPI_IN_PLACE, &hw_min, 1, mpi::mpi_datatype< ScalarType >(), MPI_MIN, MPI_COMM_WORLD );
             MPI_Allreduce( MPI_IN_PLACE, &hw_max, 1, mpi::mpi_datatype< ScalarType >(), MPI_MAX, MPI_COMM_WORLD );
             MPI_Allreduce( MPI_IN_PLACE, &hw_sum, 1, mpi::mpi_datatype< ScalarType >(), MPI_SUM, MPI_COMM_WORLD );
-            MPI_Allreduce( MPI_IN_PLACE, &hw_n,   1, MPI_LONG_LONG,                      MPI_SUM, MPI_COMM_WORLD );
+            MPI_Allreduce( MPI_IN_PLACE, &hw_n, 1, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD );
             const ScalarType hw_mean = ( hw_n > 0 ) ? ( hw_sum / static_cast< ScalarType >( hw_n ) ) : ScalarType( 0 );
 
             // Per-radial-cell dr stats.  radii_v(s, i) gives shell-boundary
             // radii; dr(s, i) = radii(s, i+1) - radii(s, i).  Same min/max/mean
             // semantics across owned subdomain cells.
-            ScalarType dr_min = std::numeric_limits< ScalarType >::max();
-            ScalarType dr_max = std::numeric_limits< ScalarType >::lowest();
-            ScalarType dr_sum = 0;
-            long long  dr_n   = 0;
-            const auto radii_v = coords_radii_;
+            ScalarType dr_min    = std::numeric_limits< ScalarType >::max();
+            ScalarType dr_max    = std::numeric_limits< ScalarType >::lowest();
+            ScalarType dr_sum    = 0;
+            long long  dr_n      = 0;
+            const auto radii_v   = coords_radii_;
             const int  n_r_cells = static_cast< int >( radii_v.extent( 1 ) ) - 1;
             const int  n_sub     = static_cast< int >( radii_v.extent( 0 ) );
             Kokkos::parallel_reduce(
@@ -703,9 +813,11 @@ class EVSolver : public EnergySolver< ScalarType >
                 Kokkos::MDRangePolicy< Kokkos::Rank< 2, Kokkos::Iterate::Right, Kokkos::Iterate::Right > >( { 0, 0 }, { n_sub, n_r_cells } ),
                 KOKKOS_LAMBDA( int s, int i, ScalarType& mn, ScalarType& mx, ScalarType& sm, long long& cnt ) {
                     const ScalarType v = radii_v( s, i + 1 ) - radii_v( s, i );
-                    if ( v < mn ) mn = v;
-                    if ( v > mx ) mx = v;
-                    sm  += v;
+                    if ( v < mn )
+                        mn = v;
+                    if ( v > mx )
+                        mx = v;
+                    sm += v;
                     cnt += 1;
                 },
                 Kokkos::Min< ScalarType >( dr_min ),
@@ -725,12 +837,9 @@ class EVSolver : public EnergySolver< ScalarType >
                 std::ofstream     out( path, std::ios::trunc );
                 out << "h_w_min,h_w_max,h_w_mean,dr_min,dr_max,dr_mean,h_w_mean_over_dr_mean,n_wedges,n_dr\n";
                 const ScalarType ratio = ( dr_mean > 0 ) ? ( hw_mean / dr_mean ) : ScalarType( 0 );
-                out << hw_min << "," << hw_max << "," << hw_mean << ","
-                    << dr_min << "," << dr_max << "," << dr_mean << "," << ratio << ","
-                    << hw_n << "," << dr_n << "\n";
-                util::logroot << "[EV diag] h_w_mean=" << hw_mean
-                              << "  dr_mean=" << dr_mean
-                              << "  ratio=" << ratio
+                out << hw_min << "," << hw_max << "," << hw_mean << "," << dr_min << "," << dr_max << "," << dr_mean
+                    << "," << ratio << "," << hw_n << "," << dr_n << "\n";
+                util::logroot << "[EV diag] h_w_mean=" << hw_mean << "  dr_mean=" << dr_mean << "  ratio=" << ratio
                               << "  (>=1.3 confirms hypothesis 2)" << std::endl;
             }
             geom_stats_written_ = true;
@@ -754,10 +863,9 @@ class EVSolver : public EnergySolver< ScalarType >
             linalg::invert_entries( diag_ );
         }
 
-        const ScalarType gamma =
-            prm_.physics_parameters.constant_internal_heating
-                ? static_cast< ScalarType >( prm_.physics_parameters.constant_internal_heating_value )
-                : ScalarType( 0 );
+        const ScalarType gamma = prm_.physics_parameters.internal_heating ?
+                                     static_cast< ScalarType >( prm_.physics_parameters.internal_heating_rate ) :
+                                     ScalarType( 0 );
 
         for ( int i = 0; i < prm_.time_stepping_parameters.energy_substeps; ++i )
         {
@@ -798,7 +906,8 @@ class EVSolver : public EnergySolver< ScalarType >
                                 return;
                             }
                             const ScalarType m = m_v( s, x, y, r );
-                            lap_v( s, x, y, r ) = ( m > ScalarType( 0 ) ) ? ( lap_v( s, x, y, r ) / m ) : ScalarType( 0 );
+                            lap_v( s, x, y, r ) =
+                                ( m > ScalarType( 0 ) ) ? ( lap_v( s, x, y, r ) / m ) : ScalarType( 0 );
                         } );
                     Kokkos::fence();
                 }
@@ -807,9 +916,18 @@ class EVSolver : public EnergySolver< ScalarType >
                 const auto stats = fe::wedge::operators::shell::compute_entropy_stats(
                     T_, ownership_mask_, *domain_, coords_shell_, coords_radii_, ev_params_ );
                 fe::wedge::operators::shell::compute_nu_h(
-                    nu_h_wedge_, T_, T_prev_, velocity_, lap_T_.grid_data(),
-                    *domain_, coords_shell_, coords_radii_,
-                    dt, stats, ev_params_, gamma );
+                    nu_h_wedge_,
+                    T_,
+                    T_prev_,
+                    velocity_,
+                    lap_T_.grid_data(),
+                    *domain_,
+                    coords_shell_,
+                    coords_radii_,
+                    dt,
+                    stats,
+                    ev_params_,
+                    gamma );
             }
             if ( i == 0 )
             {
@@ -842,8 +960,8 @@ class EVSolver : public EnergySolver< ScalarType >
             {
                 auto       g_grid    = g_.grid_data();
                 auto       mask      = boundary_mask_;
-                const auto T_cmb_val = static_cast< ScalarType >( prm_.boundary_conditions_parameters.temperature_cmb );
-                const auto T_top_val = static_cast< ScalarType >( prm_.boundary_conditions_parameters.temperature_surface );
+                const auto T_cmb_val = static_cast< ScalarType >( prm_.boundary_parameters.temperature_max );
+                const auto T_top_val = static_cast< ScalarType >( prm_.boundary_parameters.temperature_min );
                 Kokkos::parallel_for(
                     "ev_dirichlet_g",
                     grid::shell::local_domain_md_range_policy_nodes( *domain_ ),
@@ -858,8 +976,7 @@ class EVSolver : public EnergySolver< ScalarType >
             }
 
             fe::strong_algebraic_dirichlet_enforcement_poisson_like(
-                *A_neumann_, *A_neumann_diag_, g_, tmp_, q_,
-                boundary_mask_, grid::shell::ShellBoundaryFlag::BOUNDARY );
+                *A_neumann_, *A_neumann_diag_, g_, tmp_, q_, boundary_mask_, grid::shell::ShellBoundaryFlag::BOUNDARY );
 
             // 7) Solve (M + dt · A_galerkin) T^{n+1} = q.
             if ( use_float_basis_ )
@@ -877,16 +994,16 @@ class EVSolver : public EnergySolver< ScalarType >
     }
 
   private:
-    std::shared_ptr< grid::shell::DistributedDomain >                       domain_;
-    const grid::Grid3DDataVec< ScalarType, 3 >&                             coords_shell_;
-    const grid::Grid2DDataScalar< ScalarType >&                             coords_radii_;
-    const grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag >&         boundary_mask_;
-    const grid::Grid4DDataScalar< grid::NodeOwnershipFlag >&                ownership_mask_;
-    const linalg::VectorQ1Vec< ScalarType, 3 >&                             velocity_;
-    linalg::VectorQ1Scalar< ScalarType >&                                   T_;
-    ScalarType                                                              h_;
-    const Parameters&                                                       prm_;
-    std::shared_ptr< util::Table >                                          table_;
+    std::shared_ptr< grid::shell::DistributedDomain >               domain_;
+    const grid::Grid3DDataVec< ScalarType, 3 >&                     coords_shell_;
+    const grid::Grid2DDataScalar< ScalarType >&                     coords_radii_;
+    const grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag >& boundary_mask_;
+    const grid::Grid4DDataScalar< grid::NodeOwnershipFlag >&        ownership_mask_;
+    const linalg::VectorQ1Vec< ScalarType, 3 >&                     velocity_;
+    linalg::VectorQ1Scalar< ScalarType >&                           T_;
+    ScalarType                                                      h_;
+    const Parameters&                                               prm_;
+    std::shared_ptr< util::Table >                                  table_;
 
     std::unique_ptr< AD_EV >                                                A_, A_neumann_, A_neumann_diag_;
     std::unique_ptr< TempMass >                                             M_;
@@ -908,21 +1025,21 @@ class EVSolver : public EnergySolver< ScalarType >
     std::vector< BasisVecT >                                                basis_gmres_;
 
     // Q1-nodal diagnostic field (only allocated when ev_dump_nu_h is on).
-    std::unique_ptr< linalg::VectorQ1Scalar< ScalarType > >                 nu_h_nodal_diag_;
-    std::unique_ptr< linalg::VectorQ1Scalar< ScalarType > >                 nu_h_count_diag_;
+    std::unique_ptr< linalg::VectorQ1Scalar< ScalarType > >                                    nu_h_nodal_diag_;
+    std::unique_ptr< linalg::VectorQ1Scalar< ScalarType > >                                    nu_h_count_diag_;
     std::unique_ptr< communication::shell::SubdomainNeighborhoodSendRecvBuffer< ScalarType > > diag_send_, diag_recv_;
 
     // Hypothesis-2/3 diagnostic fields (only allocated when ev_dump_nu_h is on).
-    grid::Grid5DDataScalar< ScalarType >                                    h_w_wedge_;
-    std::unique_ptr< linalg::VectorQ1Scalar< ScalarType > >                 h_w_nodal_diag_;
-    std::unique_ptr< linalg::VectorQ1Scalar< ScalarType > >                 h_w_count_diag_;
-    std::unique_ptr< linalg::VectorQ1Scalar< ScalarType > >                 lap_diag_;
-    bool                                                                    geom_stats_written_ = false;
+    grid::Grid5DDataScalar< ScalarType >                    h_w_wedge_;
+    std::unique_ptr< linalg::VectorQ1Scalar< ScalarType > > h_w_nodal_diag_;
+    std::unique_ptr< linalg::VectorQ1Scalar< ScalarType > > h_w_count_diag_;
+    std::unique_ptr< linalg::VectorQ1Scalar< ScalarType > > lap_diag_;
+    bool                                                    geom_stats_written_ = false;
 
     // Locked-by-Picard flag: false at the start of each timestep (set by
     // snapshot_for_picard), set to true once substep-0 has computed ν_h so
     // subsequent Picard iterations of the same step skip the recompute.
-    bool                                                                    nu_h_locked_for_step_ = false;
+    bool nu_h_locked_for_step_ = false;
 };
 
 /// Explicit FCT energy update on the FV mesh, with L2 projection onto Q1 at
@@ -933,18 +1050,18 @@ class FCTSolver : public EnergySolver< ScalarType >
 {
   public:
     FCTSolver(
-        const std::shared_ptr< grid::shell::DistributedDomain >&                domain,
-        const grid::Grid3DDataVec< ScalarType, 3 >&                             coords_shell,
-        const grid::Grid2DDataScalar< ScalarType >&                             coords_radii,
-        const grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag >&         boundary_mask,
-        const grid::Grid4DDataScalar< grid::NodeOwnershipFlag >&                ownership_mask,
-        const linalg::VectorQ1Vec< ScalarType, 3 >&                             velocity,
-        linalg::VectorQ1Scalar< ScalarType >&                                   T,
-        linalg::VectorFVScalar< ScalarType >&                                   T_fct,
-        const linalg::VectorFVVec< ScalarType, 3 >&                             fv_cell_centers,
-        const fv::hex::DirichletBCs< ScalarType >&                              fct_bcs,
-        const Parameters&                                                       prm,
-        std::shared_ptr< util::Table >                                          table )
+        const std::shared_ptr< grid::shell::DistributedDomain >&        domain,
+        const grid::Grid3DDataVec< ScalarType, 3 >&                     coords_shell,
+        const grid::Grid2DDataScalar< ScalarType >&                     coords_radii,
+        const grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag >& boundary_mask,
+        const grid::Grid4DDataScalar< grid::NodeOwnershipFlag >&        ownership_mask,
+        const linalg::VectorQ1Vec< ScalarType, 3 >&                     velocity,
+        linalg::VectorQ1Scalar< ScalarType >&                           T,
+        linalg::VectorFVScalar< ScalarType >&                           T_fct,
+        const linalg::VectorFVVec< ScalarType, 3 >&                     fv_cell_centers,
+        const fv::hex::DirichletBCs< ScalarType >&                      fct_bcs,
+        const Parameters&                                               prm,
+        std::shared_ptr< util::Table >                                  table )
     : domain_( domain )
     , coords_shell_( coords_shell )
     , coords_radii_( coords_radii )
@@ -970,8 +1087,7 @@ class FCTSolver : public EnergySolver< ScalarType >
         l2_proj_tmps_.reserve( num_l2_proj_tmps );
         for ( int i = 0; i < num_l2_proj_tmps; ++i )
         {
-            l2_proj_tmps_.emplace_back(
-                "fct_l2_proj_tmp_" + std::to_string( i ), *domain_, ownership_mask );
+            l2_proj_tmps_.emplace_back( "fct_l2_proj_tmp_" + std::to_string( i ), *domain_, ownership_mask );
         }
     }
 
@@ -981,21 +1097,25 @@ class FCTSolver : public EnergySolver< ScalarType >
             Kokkos::deep_copy( T_fct_backup_.grid_data(), T_fct_.grid_data() );
     }
 
-    void restore_for_picard() override
-    {
-        Kokkos::deep_copy( T_fct_.grid_data(), T_fct_backup_.grid_data() );
-    }
+    void restore_for_picard() override { Kokkos::deep_copy( T_fct_.grid_data(), T_fct_backup_.grid_data() ); }
 
-    ScalarType compute_dt() override
+    ScalarType compute_dt( const int timestep ) override
     {
         const auto dt_stable = fv::hex::operators::compute_dt_stable(
-            *domain_, velocity_, fv_cell_centers_.grid_data(),
-            coords_shell_, coords_radii_, prm_.physics_parameters.diffusivity );
-        const auto dt = prm_.time_stepping_parameters.dt_scaling * dt_stable;
+            *domain_,
+            velocity_,
+            fv_cell_centers_.grid_data(),
+            coords_shell_,
+            coords_radii_,
+            prm_.physics_parameters.thermal_diffusivity_nondim );
+        const auto dt =
+            std::min( prm_.time_stepping_parameters.dt_scaling * dt_stable, prm_.time_stepping_parameters.dt_max );
 
         util::logroot << "Computing dt (FCT stable) ..." << std::endl;
-        util::logroot << "    dt_stable:                     " << dt_stable << std::endl;
-        util::logroot << "=>  dt (= dt_stable * dt_scaling): " << dt << std::endl;
+        util::logroot << "    dt_stable:                     " << dt_stable * prm_.physics_parameters.calc_time_Ma
+                      << " Ma" << std::endl;
+        util::logroot << "=>  dt (= dt_stable * dt_scaling): " << dt * prm_.physics_parameters.calc_time_Ma << " Ma"
+                      << std::endl;
         return dt;
     }
 
@@ -1013,19 +1133,27 @@ class FCTSolver : public EnergySolver< ScalarType >
 
                 {
                     util::Timer timer_fct_source_step( "fct_explicit_step_updating_source_term" );
-                    if ( prm_.physics_parameters.constant_internal_heating )
+                    if ( prm_.physics_parameters.internal_heating )
                     {
-                        linalg::assign( T_source_, prm_.physics_parameters.constant_internal_heating_value );
+                        linalg::assign( T_source_, prm_.physics_parameters.internal_heating_rate );
                     }
                     timer_fct_source_step.stop();
 
                     util::Timer timer_fct_step( "fct_explicit_step" );
                     fv::hex::operators::fct_explicit_step(
-                        *domain_, T_fct_, velocity_, fv_cell_centers_.grid_data(),
-                        coords_shell_, coords_radii_, dt, fv_fct_bufs_,
-                        prm_.physics_parameters.diffusivity, T_source_.grid_data(),
+                        *domain_,
+                        T_fct_,
+                        velocity_,
+                        fv_cell_centers_.grid_data(),
+                        coords_shell_,
+                        coords_radii_,
+                        dt,
+                        fv_fct_bufs_,
+                        prm_.physics_parameters.thermal_diffusivity_nondim,
+                        T_source_.grid_data(),
                         /*subtract_divergence=*/true,
-                        boundary_mask_, fct_bcs_ );
+                        boundary_mask_,
+                        fct_bcs_ );
                     timer_fct_step.stop();
                 }
 
@@ -1038,14 +1166,13 @@ class FCTSolver : public EnergySolver< ScalarType >
         // Project T_fct -> Q1 T once after all substeps.
         {
             util::Timer timer_fct_projection( "fct_l2_projection" );
-            fv::hex::l2_project_fv_to_fe(
-                T_, T_fct_, *domain_, coords_shell_, coords_radii_, l2_proj_tmps_ );
+            fv::hex::l2_project_fv_to_fe_lumped( T_, T_fct_, *domain_, coords_shell_, coords_radii_, l2_proj_tmps_ );
 
             // Enforce Dirichlet BCs on the Q1 temperature.
             auto       T_grid    = T_.grid_data();
             auto       mask      = boundary_mask_;
-            const auto T_cmb_val = static_cast< ScalarType >( prm_.boundary_conditions_parameters.temperature_cmb );
-            const auto T_top_val = static_cast< ScalarType >( prm_.boundary_conditions_parameters.temperature_surface );
+            const auto T_cmb_val = static_cast< ScalarType >( prm_.boundary_parameters.temperature_min );
+            const auto T_top_val = static_cast< ScalarType >( prm_.boundary_parameters.temperature_max );
             Kokkos::parallel_for(
                 "enforce_T_dirichlet_bcs",
                 grid::shell::local_domain_md_range_policy_nodes( *domain_ ),
@@ -1061,23 +1188,23 @@ class FCTSolver : public EnergySolver< ScalarType >
     }
 
   private:
-    std::shared_ptr< grid::shell::DistributedDomain >                       domain_;
-    const grid::Grid3DDataVec< ScalarType, 3 >&                             coords_shell_;
-    const grid::Grid2DDataScalar< ScalarType >&                             coords_radii_;
-    const grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag >&         boundary_mask_;
-    const linalg::VectorQ1Vec< ScalarType, 3 >&                             velocity_;
-    linalg::VectorQ1Scalar< ScalarType >&                                   T_;
-    linalg::VectorFVScalar< ScalarType >&                                   T_fct_;
-    const linalg::VectorFVVec< ScalarType, 3 >&                             fv_cell_centers_;
-    const fv::hex::DirichletBCs< ScalarType >&                              fct_bcs_;
-    const Parameters&                                                       prm_;
-    std::shared_ptr< util::Table >                                          table_;
+    std::shared_ptr< grid::shell::DistributedDomain >               domain_;
+    const grid::Grid3DDataVec< ScalarType, 3 >&                     coords_shell_;
+    const grid::Grid2DDataScalar< ScalarType >&                     coords_radii_;
+    const grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag >& boundary_mask_;
+    const linalg::VectorQ1Vec< ScalarType, 3 >&                     velocity_;
+    linalg::VectorQ1Scalar< ScalarType >&                           T_;
+    linalg::VectorFVScalar< ScalarType >&                           T_fct_;
+    const linalg::VectorFVVec< ScalarType, 3 >&                     fv_cell_centers_;
+    const fv::hex::DirichletBCs< ScalarType >&                      fct_bcs_;
+    const Parameters&                                               prm_;
+    std::shared_ptr< util::Table >                                  table_;
 
     // Owned scratch.
-    linalg::VectorFVScalar< ScalarType >                                    T_source_;
-    linalg::VectorFVScalar< ScalarType >                                    T_fct_backup_;
-    fv::hex::operators::FVFCTBuffers< ScalarType >                          fv_fct_bufs_;
-    std::vector< linalg::VectorQ1Scalar< ScalarType > >                     l2_proj_tmps_;
+    linalg::VectorFVScalar< ScalarType >                T_source_;
+    linalg::VectorFVScalar< ScalarType >                T_fct_backup_;
+    fv::hex::operators::FVFCTBuffers< ScalarType >      fv_fct_bufs_;
+    std::vector< linalg::VectorQ1Scalar< ScalarType > > l2_proj_tmps_;
 };
 
 } // namespace terra::mantlecirculation
