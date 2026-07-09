@@ -66,6 +66,7 @@ inline Result<> write_xdmf(
     const Parameters&                              prm,
     const int                                      timestep,
     Grid4DDataScalar< ScalarType >&                Temperature_data,
+    Grid4DDataScalar< ScalarType >&                TemperatureDev_data,
     Grid4DDataVec< ScalarType, 3 >&                Velocity_data,
     Grid4DDataScalar< ScalarType >&                Viscosity_data,
     Grid4DDataScalar< ScalarType >&                Density_data,
@@ -77,6 +78,7 @@ inline Result<> write_xdmf(
     {
         // Redimensionalise ...
         scale( Temperature_data, prm.boundary_parameters.delta_T_K );
+        scale( TemperatureDev_data, prm.boundary_parameters.delta_T_K );
         scale( Velocity_data, prm.physics_parameters.calc_cm_per_year );
         scale( Viscosity_data, prm.physics_parameters.viscosity_parameters.reference_viscosity );
         scale( Density_data, prm.physics_parameters.reference_density );
@@ -88,6 +90,7 @@ inline Result<> write_xdmf(
         scale( Velocity_data, 1.0 / prm.physics_parameters.calc_cm_per_year );
         scale( Viscosity_data, 1.0 / prm.physics_parameters.viscosity_parameters.reference_viscosity );
         scale( Density_data, 1.0 / prm.physics_parameters.reference_density );
+        // no need to rescale TemperatureDev, will be recomputed anyway.
 
         // Redim, write and nondim pressure
         if ( xdmf_output_pressure )

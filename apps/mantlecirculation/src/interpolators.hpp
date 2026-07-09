@@ -63,10 +63,38 @@ struct InitialConditionInterpolator
     }
 };
 
+// Interpolate from custom radial profile to Q1 field
+struct RadialProfileToQ1
+{
+    Grid2DDataScalar< ScalarType > profile_;
+    Grid4DDataScalar< ScalarType > data_;
+
+    KOKKOS_INLINE_FUNCTION
+    void operator()( const int id, const int x, const int y, const int r ) const
+    {
+        data_( id, x, y, r ) = profile_( id, r );
+    }
+};
+
+// Subtracts laterally constant profile data from Grid4DDataScalar.
+// Computes src_(id, x, y, r) - profile_(id, r) = dst_(id, x, y, r).
+struct SubtractRadialProfile
+{
+    Grid2DDataScalar< ScalarType > profile_;
+    Grid4DDataScalar< ScalarType > src_;
+    Grid4DDataScalar< ScalarType > dst_;
+
+    KOKKOS_INLINE_FUNCTION
+    void operator()( const int id, const int x, const int y, const int r ) const
+    {
+        dst_( id, x, y, r ) = src_( id, x, y, r ) - profile_( id, r );
+    }
+};
+
 /// Initial condition for Q1 temperature (conductive profile + spherical harmonic perturbation):
-/// T = T_ref(r) + eps * Y_l^m(theta, phi)
-/// where T_ref is the steady-state spherical conduction solution:
-///   T_ref(r) = r_min * r_max / r  -  r_min
+/// T = T_cond(r) + eps * Y_l^m(theta, phi)
+/// where T_cond is the steady-state spherical conduction solution:
+///   T_cond(r) = r_min * r_max / r  -  r_min
 struct ConductiveProfileInterpolator
 {
     ScalarType                     r_min_, r_max_, eps_;
@@ -90,9 +118,9 @@ struct ConductiveProfileInterpolator
             return;
         }
 
-        const ScalarType T_ref = ( r_min_ * r_max_ / radius - r_min_ ) / ( r_max_ - r_min_ ) + T_min_;
+        const ScalarType T_cond = ( r_min_ * r_max_ / radius - r_min_ ) / ( r_max_ - r_min_ ) + T_min_;
 
-        ScalarType T_val = T_ref;
+        ScalarType T_val = T_cond;
         if ( has_sph_ )
         {
             T_val += eps_ * sph_coeffs_( sd, x, y );
