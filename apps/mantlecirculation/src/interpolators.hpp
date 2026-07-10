@@ -313,4 +313,49 @@ struct DensityInit
     }
 };
 
+/// @brief Nodal adiabatic (compression) heating source for the TALA energy
+/// equation.
+///
+/// Fills a Q1 scalar field with
+///
+///     S_adiab = prefactor · Di · α · ρ̄ · (u·n) · T
+///
+/// where n = coords.normalized() is the outward radial (anti-gravity) unit
+/// vector, u·n the radial velocity, ρ̄ the reference density, T the temperature,
+/// Di the dissipation number and α the thermal expansivity. The nodal field is
+/// meant to be L²-projected onto the RHS via the mass matrix (like the constant
+/// internal-heating source) and interpolated into the entropy-viscosity
+/// residual.
+///
+/// The physically-correct prefactor is −1: rising material (u·n > 0) does work
+/// against gravity and cools, so it must contribute negatively to DT/Dt. The
+/// prefactor is left configurable to calibrate against this branch's exact
+/// nondimensionalisation / temperature-offset convention.
+struct AdiabaticHeatingSource
+{
+    Grid3DDataVec< ScalarType, 3 > grid_;
+    Grid2DDataScalar< ScalarType > radii_;
+    Grid4DDataVec< ScalarType, 3 > u_;
+    Grid4DDataScalar< ScalarType > T_;
+    Grid4DDataScalar< ScalarType > rho_;
+    Grid4DDataScalar< ScalarType > dst_;
+    ScalarType                     dissipation_number_;
+    ScalarType                     thermal_expansivity_;
+    ScalarType                     prefactor_ = ScalarType( -1 );
+
+    KOKKOS_INLINE_FUNCTION
+    void operator()( const int id, const int x, const int y, const int r ) const
+    {
+        const dense::Vec< ScalarType, 3 > coords = grid::shell::coords( id, x, y, r, grid_, radii_ );
+        const auto                        n      = coords.normalized();
+
+        ScalarType u_r = ScalarType( 0 );
+        for ( int d = 0; d < 3; ++d )
+            u_r += u_( id, x, y, r, d ) * n( d );
+
+        dst_( id, x, y, r ) = prefactor_ * dissipation_number_ * thermal_expansivity_ * rho_( id, x, y, r ) * u_r *
+                              T_( id, x, y, r );
+    }
+};
+
 } // namespace terra::mantlecirculation

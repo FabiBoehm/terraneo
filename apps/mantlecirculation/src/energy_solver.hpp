@@ -9,6 +9,7 @@
 #include "fe/strong_algebraic_dirichlet_enforcement.hpp"
 #include "fe/wedge/operators/shell/entropy_viscosity.hpp"
 #include "fe/wedge/operators/shell/mass.hpp"
+#include "fe/wedge/operators/shell/shear_heating_kerngen.hpp"
 #include "fe/wedge/operators/shell/unsteady_advection_diffusion_supg.hpp"
 #include "fe/wedge/operators/shell/unsteady_advection_diffusion_supg_kerngen.hpp"
 #include "fe/wedge/operators/shell/wedge_constant_div_k_grad.hpp"
@@ -29,6 +30,7 @@
 #include "util/timer.hpp"
 
 #include "hbm_probe.hpp"
+#include "interpolators.hpp"
 #include "parameters.hpp"
 
 namespace terra::mantlecirculation {
@@ -364,7 +366,9 @@ class EVSolver : public EnergySolver< ScalarType >
         linalg::VectorQ1Scalar< ScalarType >&                           T,
         ScalarType                                                      h,
         const Parameters&                                               prm,
-        std::shared_ptr< util::Table >                                  table )
+        std::shared_ptr< util::Table >                                  table,
+        const grid::Grid4DDataScalar< ScalarType >&                     viscosity = {},
+        const grid::Grid4DDataScalar< ScalarType >&                     rho       = {} )
     : domain_( domain )
     , coords_shell_( coords_shell )
     , coords_radii_( coords_radii )
@@ -375,6 +379,8 @@ class EVSolver : public EnergySolver< ScalarType >
     , h_( h )
     , prm_( prm )
     , table_( std::move( table ) )
+    , viscosity_( viscosity )
+    , rho_( rho )
     , tmp_(         "ev_tmp",        *domain_, ownership_mask_ )
     , q_(           "ev_q",          *domain_, ownership_mask_ )
     , diag_(        "ev_diag",       *domain_, ownership_mask_ )
@@ -508,6 +514,23 @@ class EVSolver : public EnergySolver< ScalarType >
         // Bootstrap T_prev = T so ∂_t E = 0 on step 1.
         Kokkos::deep_copy( T_prev_.grid_data(), T_.grid_data() );
 
+        // Compressible (TALA) heating setup: a total nodal source field, a
+        // scratch field, and the kerngen shear-heating operator reading the
+        // (in-place-updated) viscosity field. Only when compressible.
+        if ( prm_.physics_parameters.compressible )
+        {
+            heating_source_  = linalg::VectorQ1Scalar< ScalarType >( "ev_heating_source", *domain_, ownership_mask_ );
+            heating_scratch_ = linalg::VectorQ1Scalar< ScalarType >( "ev_heating_scratch", *domain_, ownership_mask_ );
+            diag_ones_       = linalg::VectorQ1Scalar< ScalarType >( "ev_diag_ones", *domain_, ownership_mask_ );
+            linalg::assign( diag_ones_, ScalarType( 1 ) );
+            shear_op_        = std::make_unique< fe::wedge::operators::shell::ShearHeatingKerngen< ScalarType > >(
+                *domain_, coords_shell_, coords_radii_, viscosity_ );
+            const ScalarType Di = static_cast< ScalarType >( prm_.physics_parameters.dissipation_number );
+            const ScalarType Ra = static_cast< ScalarType >( prm_.physics_parameters.rayleigh_number );
+            shear_op_->set_scale( Ra != ScalarType( 0 ) ? Di / Ra : ScalarType( 0 ) );
+            log_hbm( "EV: + compressible heating source fields (2 Q1)" );
+        }
+
         // Apply runtime EV parameter overrides from the CLI.
         ev_params_.alpha_max = static_cast< ScalarType >( prm_.energy_solver_parameters.ev_alpha_max );
         ev_params_.alpha_E   = static_cast< ScalarType >( prm_.energy_solver_parameters.ev_alpha_E );
@@ -584,6 +607,16 @@ class EVSolver : public EnergySolver< ScalarType >
 
     void dump_diagnostics( int timestep, const std::string& outdir ) override
     {
+        // TALA energy-consistency check (dissipation theorem). Runs here — after
+        // the timestep's final Stokes solve — so velocity and temperature are a
+        // mutually consistent (u solves Stokes for this T) pair; the balance is a
+        // Stokes identity and only holds for such a pair. Independent of the ν_h
+        // dump below.
+        if ( prm_.physics_parameters.compressible )
+        {
+            log_dissipation_balance();
+        }
+
         if ( !prm_.energy_solver_parameters.ev_dump_nu_h )
             return;
 
@@ -871,6 +904,45 @@ class EVSolver : public EnergySolver< ScalarType >
         {
             util::logroot << "Solving energy (EV, substep " << i << ") ..." << std::endl;
 
+            // 0) Compressible (TALA) total nodal heat source
+            //      F = γ_internal + (Di/Ra)·Φ_shear + S_adiabatic
+            //    rebuilt each substep (T evolves; u is lagged). Used both as the
+            //    RHS source (M·F) and inside the entropy-viscosity residual so
+            //    ν_E vanishes where the full compressible balance holds.
+            if ( prm_.physics_parameters.compressible )
+            {
+                const ScalarType Di = static_cast< ScalarType >( prm_.physics_parameters.dissipation_number );
+                const ScalarType Ra = static_cast< ScalarType >( prm_.physics_parameters.rayleigh_number );
+                const ScalarType alpha =
+                    static_cast< ScalarType >( prm_.physics_parameters.thermal_expansivity );
+
+                // internal heating (constant) as the base field
+                linalg::assign( heating_source_, gamma );
+
+                // + (Di/Ra) · Φ_shear  (Φ projected to nodes)
+                shear_op_->assemble_phi_nodal( velocity_, heating_scratch_ );
+                const ScalarType visc_scale = ( Ra != ScalarType( 0 ) ) ? Di / Ra : ScalarType( 0 );
+                linalg::lincomb(
+                    heating_source_, { ScalarType( 1 ), visc_scale }, { heating_source_, heating_scratch_ } );
+
+                // + S_adiabatic = −Di·α·ρ̄·(u·n)·T   (rising material cools)
+                Kokkos::parallel_for(
+                    "ev_adiabatic_source",
+                    local_domain_md_range_policy_nodes( *domain_ ),
+                    AdiabaticHeatingSource{ coords_shell_,
+                                            coords_radii_,
+                                            velocity_.grid_data(),
+                                            T_.grid_data(),
+                                            rho_,
+                                            heating_scratch_.grid_data(),
+                                            Di,
+                                            alpha,
+                                            ScalarType( -1 ) } );
+                Kokkos::fence();
+                linalg::lincomb(
+                    heating_source_, { ScalarType( 1 ), ScalarType( 1 ) }, { heating_source_, heating_scratch_ } );
+            }
+
             // 1+2) per-wedge lap projection and ν_h.  Skipped on Picard
             // iterations > 0 of the first substep so all Picard sweeps see
             // the same explicit-lagged stabilization field; substeps beyond
@@ -927,7 +999,11 @@ class EVSolver : public EnergySolver< ScalarType >
                     dt,
                     stats,
                     ev_params_,
-                    gamma );
+                    gamma,
+                    // Compressible: fold the full heat source into the residual
+                    // (F wins over gamma inside compute_nu_h). Empty otherwise.
+                    prm_.physics_parameters.compressible ? heating_source_.grid_data()
+                                                         : grid::Grid4DDataScalar< ScalarType >{} );
             }
             if ( i == 0 )
             {
@@ -941,11 +1017,18 @@ class EVSolver : public EnergySolver< ScalarType >
             linalg::apply( *M_, T_, q_ );
             linalg::lincomb( q_, { ScalarType( 1 ), -dt }, { q_, rhs_ev_ } );
 
-            // 4b) Constant internal-heating source: q += dt · M · γ.
+            // 4b) Heat-source RHS: q += dt · M · F.
+            //     Compressible: F = internal + shear + adiabatic (heating_source_).
+            //     Incompressible: F = γ (constant internal heating) as before.
             //     rhs_ev_ is finished with at this point and is reused as a
-            //     scratch γ-vector; tmp_ is also free until the Dirichlet
+            //     scratch source-vector; tmp_ is also free until the Dirichlet
             //     enforcement below.
-            if ( gamma != ScalarType( 0 ) )
+            if ( prm_.physics_parameters.compressible )
+            {
+                linalg::apply( *M_, heating_source_, tmp_ );
+                linalg::lincomb( q_, { ScalarType( 1 ), dt }, { q_, tmp_ } );
+            }
+            else if ( gamma != ScalarType( 0 ) )
             {
                 linalg::assign( rhs_ev_, gamma );
                 linalg::apply( *M_, rhs_ev_, tmp_ );
@@ -993,6 +1076,53 @@ class EVSolver : public EnergySolver< ScalarType >
         }
     }
 
+    /// @brief Log the global dissipation balance for the compressible energy
+    /// equation (dissipation theorem, Leng & Zhong 2008 / King et al. 2010):
+    ///
+    ///   Φ = (Di/Ra) · ∫ 2η ε̇_dev:ε̇_dev dV      (total viscous dissipation)
+    ///   W = Di · α · ∫ ρ̄ · (u·n) · T dV          (total adiabatic work)
+    ///
+    /// For an energetically consistent formulation ⟨Φ⟩ = ⟨W⟩, so Φ/W → 1 (exact
+    /// in ALA; a systematic few-percent offset in TALA). This is the primary,
+    /// reference-free correctness gate for the shear + adiabatic heating terms:
+    /// a ratio far from 1 flags a wrong sign, Di/Ra scaling, or viscosity
+    /// normalisation.
+    void log_dissipation_balance()
+    {
+        const ScalarType Di    = static_cast< ScalarType >( prm_.physics_parameters.dissipation_number );
+        const ScalarType Ra    = static_cast< ScalarType >( prm_.physics_parameters.rayleigh_number );
+        const ScalarType alpha = static_cast< ScalarType >( prm_.physics_parameters.thermal_expansivity );
+
+        // Φ: assemble the shear linear form ∫Φ_shear N_i (scale 1); the sum over
+        // all test functions is ∫Φ_shear dV (partition of unity), obtained as
+        // dot(1, ·). Scale by Di/Ra.
+        shear_op_->set_scale( ScalarType( 1 ) );
+        linalg::apply( *shear_op_, velocity_, heating_scratch_ );
+        const ScalarType phi_int = linalg::dot( diag_ones_, heating_scratch_ );
+        const ScalarType Phi     = ( Ra != ScalarType( 0 ) ) ? ( Di / Ra ) * phi_int : ScalarType( 0 );
+
+        // W: nodal integrand Di·α·ρ̄·(u·n)·T, integrated via the lumped mass
+        // (∫w dV = dot(w, M_lumped)). Reuse AdiabaticHeatingSource with +1.
+        Kokkos::parallel_for(
+            "ev_dissip_W",
+            local_domain_md_range_policy_nodes( *domain_ ),
+            AdiabaticHeatingSource{ coords_shell_,
+                                    coords_radii_,
+                                    velocity_.grid_data(),
+                                    T_.grid_data(),
+                                    rho_,
+                                    heating_source_.grid_data(),
+                                    Di,
+                                    alpha,
+                                    ScalarType( 1 ) } );
+        Kokkos::fence();
+        const ScalarType W = linalg::dot( heating_source_, M_lumped_ );
+
+        const ScalarType ratio = ( W != ScalarType( 0 ) ) ? Phi / W : ScalarType( 0 );
+        util::logroot << "[TALA dissipation] Phi=" << Phi << "  W=" << W << "  Phi/W=" << ratio
+                      << "  (expect ->1 for ALA; few-% off for TALA)" << std::endl;
+    }
+
   private:
     std::shared_ptr< grid::shell::DistributedDomain >               domain_;
     const grid::Grid3DDataVec< ScalarType, 3 >&                     coords_shell_;
@@ -1004,6 +1134,19 @@ class EVSolver : public EnergySolver< ScalarType >
     ScalarType                                                      h_;
     const Parameters&                                               prm_;
     std::shared_ptr< util::Table >                                  table_;
+
+    // Compressible (TALA) heating. viscosity_ and rho_ alias the Stokes solver's
+    // fine-level fields; they stay valid as those are updated in place. Empty
+    // when running incompressible (no shear/adiabatic heating).
+    grid::Grid4DDataScalar< ScalarType > viscosity_;
+    grid::Grid4DDataScalar< ScalarType > rho_;
+    // Total nodal heat-source F = internal + (Di/Ra)·Φ_shear + adiabatic, and a
+    // scratch for the projected nodal Φ / adiabatic term. Allocated only when
+    // compressible.
+    linalg::VectorQ1Scalar< ScalarType >                                             heating_source_;
+    linalg::VectorQ1Scalar< ScalarType >                                             heating_scratch_;
+    linalg::VectorQ1Scalar< ScalarType >                                             diag_ones_;
+    std::unique_ptr< fe::wedge::operators::shell::ShearHeatingKerngen< ScalarType > > shear_op_;
 
     std::unique_ptr< AD_EV >                                                A_, A_neumann_, A_neumann_diag_;
     std::unique_ptr< TempMass >                                             M_;

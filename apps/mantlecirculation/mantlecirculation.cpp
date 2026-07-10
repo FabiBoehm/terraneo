@@ -399,7 +399,12 @@ Result<> run( const Parameters& prm )
             T,
             h,
             prm,
-            table );
+            table,
+            // Compressible (TALA) heating inputs: fine-level viscosity and
+            // reference density (aliased, updated in place). Ignored when
+            // running incompressible.
+            stokes.eta_fine().grid_data(),
+            stokes.density().grid_data() );
         break;
     case EnergySolverType::FCT:
         energy = std::make_unique< FCTSolver< ScalarType > >(
