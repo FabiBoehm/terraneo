@@ -112,6 +112,7 @@ add_terra_test(test_ev_rotation)
 add_terra_test(test_ev_advection_diffusion)
 
 add_terra_test(test_shear_heating)
+add_terra_test(test_adiabatic_heating_gpu)
 add_terra_test(test_shear_heating_kerngen)
 
 # Adding target for all the tests.

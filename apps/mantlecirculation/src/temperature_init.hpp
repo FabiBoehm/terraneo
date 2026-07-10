@@ -154,6 +154,33 @@ void initialize_temperature_fields(
 
         // Project Q1 T → FV T_fct.
         fv::hex::l2_project_fe_to_fv( T_fct, T, domain, coords_shell, coords_radii );
+
+        // Populate the radial reference profile T_ref used for the buoyancy deviation
+        // Tdev = T - T_ref(r). For a conductive background the reference IS the conductive
+        // profile (the Y_l^m perturbation has zero horizontal mean). Without this, T_ref
+        // stays a default-constructed (null) Grid2DDataScalar and subtract_radial_profile()
+        // dereferences it on device -> GPU null-pointer fault (only the FROM_FILE branch
+        // populated it before).
+        {
+            const ScalarType r_min = domain.domain_info().radii().front();
+            const ScalarType r_max = domain.domain_info().radii().back();
+            const ScalarType T_min = static_cast< ScalarType >( prm.boundary_parameters.temperature_min );
+            const int        nsub  = static_cast< int >( coords_radii.extent( 0 ) );
+            const int        nr    = static_cast< int >( coords_radii.extent( 1 ) );
+            T_ref     = grid::Grid2DDataScalar< ScalarType >( "T_ref_conductive", nsub, nr );
+            auto tref = T_ref;
+            auto rad  = coords_radii;
+            Kokkos::parallel_for(
+                "T_ref conductive profile",
+                Kokkos::MDRangePolicy< Kokkos::Rank< 2 > >( { 0, 0 }, { nsub, nr } ),
+                KOKKOS_LAMBDA( const int sd, const int r ) {
+                    const ScalarType radius = rad( sd, r );
+                    tref( sd, r )           = ( radius < ScalarType( 1e-15 ) )
+                                                  ? ScalarType( 0 )
+                                                  : ( r_min * r_max / radius - r_min ) / ( r_max - r_min ) + T_min;
+                } );
+            Kokkos::fence();
+        }
     }
     else
     {
