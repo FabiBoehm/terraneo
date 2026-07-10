@@ -318,14 +318,18 @@ struct DensityInit
 ///
 /// Fills a Q1 scalar field with
 ///
-///     S_adiab = prefactor · Di · α · ρ̄ · (u·n) · T
+///     S_adiab = prefactor · Di · ρ̄ · (u·n) · T
 ///
 /// where n = coords.normalized() is the outward radial (anti-gravity) unit
-/// vector, u·n the radial velocity, ρ̄ the reference density, T the temperature,
-/// Di the dissipation number and α the thermal expansivity. The nodal field is
-/// meant to be L²-projected onto the RHS via the mass matrix (like the constant
-/// internal-heating source) and interpolated into the entropy-viscosity
-/// residual.
+/// vector, u·n the radial velocity, ρ̄ the reference density, T the temperature
+/// and Di the dissipation number. The nodal field is meant to be L²-projected
+/// onto the RHS via the mass matrix (like the constant internal-heating source)
+/// and interpolated into the entropy-viscosity residual.
+///
+/// The nondimensional coefficient is Di alone: the thermal expansivity α is
+/// already folded into Di (= αgL/Cp) and Ra (∝ α), so it must NOT appear a
+/// second time here — consistent with the buoyancy force Ra·δT·n (which also
+/// carries no explicit α).
 ///
 /// The physically-correct prefactor is −1: rising material (u·n > 0) does work
 /// against gravity and cools, so it must contribute negatively to DT/Dt. The
@@ -340,7 +344,6 @@ struct AdiabaticHeatingSource
     Grid4DDataScalar< ScalarType > rho_;
     Grid4DDataScalar< ScalarType > dst_;
     ScalarType                     dissipation_number_;
-    ScalarType                     thermal_expansivity_;
     ScalarType                     prefactor_ = ScalarType( -1 );
 
     KOKKOS_INLINE_FUNCTION
@@ -353,8 +356,8 @@ struct AdiabaticHeatingSource
         for ( int d = 0; d < 3; ++d )
             u_r += u_( id, x, y, r, d ) * n( d );
 
-        dst_( id, x, y, r ) = prefactor_ * dissipation_number_ * thermal_expansivity_ * rho_( id, x, y, r ) * u_r *
-                              T_( id, x, y, r );
+        dst_( id, x, y, r ) =
+            prefactor_ * dissipation_number_ * rho_( id, x, y, r ) * u_r * T_( id, x, y, r );
     }
 };
 

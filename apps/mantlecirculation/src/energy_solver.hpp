@@ -913,8 +913,6 @@ class EVSolver : public EnergySolver< ScalarType >
             {
                 const ScalarType Di = static_cast< ScalarType >( prm_.physics_parameters.dissipation_number );
                 const ScalarType Ra = static_cast< ScalarType >( prm_.physics_parameters.rayleigh_number );
-                const ScalarType alpha =
-                    static_cast< ScalarType >( prm_.physics_parameters.thermal_expansivity );
 
                 // internal heating (constant) as the base field
                 linalg::assign( heating_source_, gamma );
@@ -925,7 +923,8 @@ class EVSolver : public EnergySolver< ScalarType >
                 linalg::lincomb(
                     heating_source_, { ScalarType( 1 ), visc_scale }, { heating_source_, heating_scratch_ } );
 
-                // + S_adiabatic = −Di·α·ρ̄·(u·n)·T   (rising material cools)
+                // + S_adiabatic = −Di·ρ̄·(u·n)·T   (rising material cools; α is
+                //   already inside Di, so no separate α factor)
                 Kokkos::parallel_for(
                     "ev_adiabatic_source",
                     local_domain_md_range_policy_nodes( *domain_ ),
@@ -936,7 +935,6 @@ class EVSolver : public EnergySolver< ScalarType >
                                             rho_,
                                             heating_scratch_.grid_data(),
                                             Di,
-                                            alpha,
                                             ScalarType( -1 ) } );
                 Kokkos::fence();
                 linalg::lincomb(
@@ -1080,18 +1078,17 @@ class EVSolver : public EnergySolver< ScalarType >
     /// equation (dissipation theorem, Leng & Zhong 2008 / King et al. 2010):
     ///
     ///   Φ = (Di/Ra) · ∫ 2η ε̇_dev:ε̇_dev dV      (total viscous dissipation)
-    ///   W = Di · α · ∫ ρ̄ · (u·n) · T dV          (total adiabatic work)
+    ///   W = Di · ∫ ρ̄ · (u·n) · T dV              (total adiabatic work)
     ///
     /// For an energetically consistent formulation ⟨Φ⟩ = ⟨W⟩, so Φ/W → 1 (exact
     /// in ALA; a systematic few-percent offset in TALA). This is the primary,
     /// reference-free correctness gate for the shear + adiabatic heating terms:
     /// a ratio far from 1 flags a wrong sign, Di/Ra scaling, or viscosity
-    /// normalisation.
+    /// normalisation. (α is folded into Di, matching the buoyancy Ra·δT·n.)
     void log_dissipation_balance()
     {
-        const ScalarType Di    = static_cast< ScalarType >( prm_.physics_parameters.dissipation_number );
-        const ScalarType Ra    = static_cast< ScalarType >( prm_.physics_parameters.rayleigh_number );
-        const ScalarType alpha = static_cast< ScalarType >( prm_.physics_parameters.thermal_expansivity );
+        const ScalarType Di = static_cast< ScalarType >( prm_.physics_parameters.dissipation_number );
+        const ScalarType Ra = static_cast< ScalarType >( prm_.physics_parameters.rayleigh_number );
 
         // Φ: assemble the shear linear form ∫Φ_shear N_i (scale 1); the sum over
         // all test functions is ∫Φ_shear dV (partition of unity), obtained as
@@ -1101,7 +1098,7 @@ class EVSolver : public EnergySolver< ScalarType >
         const ScalarType phi_int = linalg::dot( diag_ones_, heating_scratch_ );
         const ScalarType Phi     = ( Ra != ScalarType( 0 ) ) ? ( Di / Ra ) * phi_int : ScalarType( 0 );
 
-        // W: nodal integrand Di·α·ρ̄·(u·n)·T, integrated via the lumped mass
+        // W: nodal integrand Di·ρ̄·(u·n)·T, integrated via the lumped mass
         // (∫w dV = dot(w, M_lumped)). Reuse AdiabaticHeatingSource with +1.
         Kokkos::parallel_for(
             "ev_dissip_W",
@@ -1113,7 +1110,6 @@ class EVSolver : public EnergySolver< ScalarType >
                                     rho_,
                                     heating_source_.grid_data(),
                                     Di,
-                                    alpha,
                                     ScalarType( 1 ) } );
         Kokkos::fence();
         const ScalarType W = linalg::dot( heating_source_, M_lumped_ );
