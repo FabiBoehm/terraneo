@@ -500,30 +500,36 @@ std::tuple< double, double, int >
 
     // RHS of mass conservation (PDA/TALA stuff) -------
 
-    auto& rho     = stok_vecs["tmp_3"].block_2();
-    auto& drho_dt = stok_vecs["tmp_4"].block_2();
+    // auto& rho     = stok_vecs["tmp_3"].block_2();
+    // auto& drho_dt = stok_vecs["tmp_4"].block_2();
 
-    VectorQ1Vec< double, 3 > pressure_level_velocity(
-        "pressure_level_velocity", domains[pressure_level], mask_data[pressure_level] );
+    VectorQ1Scalar< double > rho( "rho", domains[velocity_level], mask_data[velocity_level] );
+    VectorQ1Scalar< double > drho_dt( "drho_dt", domains[velocity_level], mask_data[velocity_level] );
+
+    // VectorQ1Vec< double, 3 > pressure_level_velocity(
+    //     "pressure_level_velocity", domains[pressure_level], mask_data[pressure_level] );
+
+    VectorQ1Vec< double, 3 > fine_level_velocity(
+        "fine_level_velocity", domains[velocity_level], mask_data[velocity_level] );
 
     Kokkos::parallel_for(
         "rho interpolation",
-        local_domain_md_range_policy_nodes( domains[pressure_level] ),
-        RhoInterpolator( coords_shell[pressure_level], coords_radii[pressure_level], rho.grid_data() ) );
+        local_domain_md_range_policy_nodes( domains[velocity_level] ),
+        RhoInterpolator( coords_shell[velocity_level], coords_radii[velocity_level], rho.grid_data() ) );
 
     Kokkos::parallel_for(
         "drho/dt interpolation",
-        local_domain_md_range_policy_nodes( domains[pressure_level] ),
-        DRhoDtInterpolator( coords_shell[pressure_level], coords_radii[pressure_level], drho_dt.grid_data() ) );
+        local_domain_md_range_policy_nodes( domains[velocity_level] ),
+        DRhoDtInterpolator( coords_shell[velocity_level], coords_radii[velocity_level], drho_dt.grid_data() ) );
 
     Kokkos::parallel_for(
         "solution interpolation (velocity into pressure level)",
-        local_domain_md_range_policy_nodes( domains[pressure_level] ),
+        local_domain_md_range_policy_nodes( domains[velocity_level] ),
         SolutionVelocityInterpolator(
-            coords_shell[pressure_level],
-            coords_radii[pressure_level],
-            pressure_level_velocity.grid_data(),
-            boundary_mask_data[pressure_level],
+            coords_shell[velocity_level],
+            coords_radii[velocity_level],
+            fine_level_velocity.grid_data(),
+            boundary_mask_data[velocity_level],
             false ) );
 
     auto& tala_term           = stok_vecs["tmp_1"].block_2();
@@ -533,17 +539,27 @@ std::tuple< double, double, int >
 
     InvRhoGradRhoDotUForm inv_rho_grad_rho_dot_u_form(
         domains[pressure_level],
+        domains[velocity_level],
         coords_shell[pressure_level],
+        coords_shell[velocity_level],
         coords_radii[pressure_level],
+        coords_radii[velocity_level],
         rho,
-        pressure_level_velocity );
+        fine_level_velocity );
 
     linalg::apply( inv_rho_grad_rho_dot_u_form, tala_term );
 
     using InvRhoDrhoDtForm = fe::wedge::linearforms::shell::InvRhoDrhoDt< double >;
 
     InvRhoDrhoDtForm inv_rho_drho_dt_form(
-        domains[pressure_level], coords_shell[pressure_level], coords_radii[pressure_level], rho, drho_dt );
+        domains[pressure_level],
+        domains[velocity_level],
+        coords_shell[pressure_level],
+        coords_shell[velocity_level],
+        coords_radii[pressure_level],
+        coords_radii[velocity_level],
+        rho,
+        drho_dt );
 
     linalg::apply( inv_rho_drho_dt_form, pda_additional_term );
 
