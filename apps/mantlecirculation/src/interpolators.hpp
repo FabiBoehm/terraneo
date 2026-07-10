@@ -318,18 +318,20 @@ struct DensityInit
 ///
 /// Fills a Q1 scalar field with
 ///
-///     S_adiab = prefactor · Di · ρ̄ · (u·n) · T
+///     S_adiab = prefactor · Di · (u·n) · T
 ///
 /// where n = coords.normalized() is the outward radial (anti-gravity) unit
-/// vector, u·n the radial velocity, ρ̄ the reference density, T the temperature
-/// and Di the dissipation number. The nodal field is meant to be L²-projected
-/// onto the RHS via the mass matrix (like the constant internal-heating source)
-/// and interpolated into the entropy-viscosity residual.
+/// vector, u·n the radial velocity, T the temperature and Di the dissipation
+/// number. The nodal field is meant to be L²-projected onto the RHS via the
+/// mass matrix (like the constant internal-heating source) and interpolated
+/// into the entropy-viscosity residual.
 ///
-/// The nondimensional coefficient is Di alone: the thermal expansivity α is
-/// already folded into Di (= αgL/Cp) and Ra (∝ α), so it must NOT appear a
-/// second time here — consistent with the buoyancy force Ra·δT·n (which also
-/// carries no explicit α).
+/// The nondimensional coefficient is Di alone. Notably there is NO reference
+/// density ρ̄ and NO thermal expansivity α: this matches the buoyancy force
+/// used by the Stokes solve, Ra·δT·n, which is likewise ρ̄- and α-free (α is
+/// folded into Di and Ra). Weighting the adiabatic term by ρ̄ while the
+/// buoyancy is unweighted would break the dissipation balance ⟨Φ⟩=⟨W⟩; keeping
+/// both ρ̄-free is the self-consistent choice for this branch's formulation.
 ///
 /// The physically-correct prefactor is −1: rising material (u·n > 0) does work
 /// against gravity and cools, so it must contribute negatively to DT/Dt. The
@@ -341,7 +343,6 @@ struct AdiabaticHeatingSource
     Grid2DDataScalar< ScalarType > radii_;
     Grid4DDataVec< ScalarType, 3 > u_;
     Grid4DDataScalar< ScalarType > T_;
-    Grid4DDataScalar< ScalarType > rho_;
     Grid4DDataScalar< ScalarType > dst_;
     ScalarType                     dissipation_number_;
     ScalarType                     prefactor_ = ScalarType( -1 );
@@ -356,8 +357,7 @@ struct AdiabaticHeatingSource
         for ( int d = 0; d < 3; ++d )
             u_r += u_( id, x, y, r, d ) * n( d );
 
-        dst_( id, x, y, r ) =
-            prefactor_ * dissipation_number_ * rho_( id, x, y, r ) * u_r * T_( id, x, y, r );
+        dst_( id, x, y, r ) = prefactor_ * dissipation_number_ * u_r * T_( id, x, y, r );
     }
 };
 

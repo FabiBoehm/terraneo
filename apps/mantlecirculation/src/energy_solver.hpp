@@ -923,8 +923,8 @@ class EVSolver : public EnergySolver< ScalarType >
                 linalg::lincomb(
                     heating_source_, { ScalarType( 1 ), visc_scale }, { heating_source_, heating_scratch_ } );
 
-                // + S_adiabatic = −Di·ρ̄·(u·n)·T   (rising material cools; α is
-                //   already inside Di, so no separate α factor)
+                // + S_adiabatic = −Di·(u·n)·T   (rising material cools; α is in
+                //   Di and ρ̄ is omitted to match the ρ̄-free buoyancy Ra·δT·n)
                 Kokkos::parallel_for(
                     "ev_adiabatic_source",
                     local_domain_md_range_policy_nodes( *domain_ ),
@@ -932,7 +932,6 @@ class EVSolver : public EnergySolver< ScalarType >
                                             coords_radii_,
                                             velocity_.grid_data(),
                                             T_.grid_data(),
-                                            rho_,
                                             heating_scratch_.grid_data(),
                                             Di,
                                             ScalarType( -1 ) } );
@@ -1098,7 +1097,7 @@ class EVSolver : public EnergySolver< ScalarType >
         const ScalarType phi_int = linalg::dot( diag_ones_, heating_scratch_ );
         const ScalarType Phi     = ( Ra != ScalarType( 0 ) ) ? ( Di / Ra ) * phi_int : ScalarType( 0 );
 
-        // W: nodal integrand Di·ρ̄·(u·n)·T, integrated via the lumped mass
+        // W: nodal integrand Di·(u·n)·T, integrated via the lumped mass
         // (∫w dV = dot(w, M_lumped)). Reuse AdiabaticHeatingSource with +1.
         Kokkos::parallel_for(
             "ev_dissip_W",
@@ -1107,7 +1106,6 @@ class EVSolver : public EnergySolver< ScalarType >
                                     coords_radii_,
                                     velocity_.grid_data(),
                                     T_.grid_data(),
-                                    rho_,
                                     heating_source_.grid_data(),
                                     Di,
                                     ScalarType( 1 ) } );
