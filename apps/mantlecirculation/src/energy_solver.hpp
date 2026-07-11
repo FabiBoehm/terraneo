@@ -13,8 +13,6 @@
 #include "fe/wedge/operators/shell/unsteady_advection_diffusion_supg.hpp"
 #include "fe/wedge/operators/shell/unsteady_advection_diffusion_supg_kerngen.hpp"
 #include "fe/wedge/operators/shell/wedge_constant_div_k_grad.hpp"
-#include "fv/hex/conversion.hpp"
-#include "fv/hex/operators/fct_advection_diffusion.hpp"
 #include "grid/grid_types.hpp"
 #include "grid/shell/spherical_shell.hpp"
 #include "kernels/common/grid_operations.hpp"
@@ -22,7 +20,6 @@
 #include "linalg/solvers/diagonal_solver.hpp"
 #include "linalg/solvers/fgmres.hpp"
 #include "linalg/solvers/fgmres_lowmem.hpp"
-#include "linalg/vector_fv.hpp"
 #include "linalg/vector_q1.hpp"
 #include "parameters.hpp"
 #include "util/logging.hpp"
@@ -998,7 +995,7 @@ class EVSolver : public EnergySolver< ScalarType >
                     ev_params_,
                     gamma,
                     // Compressible: fold the full heat source into the residual
-                    // (F wins over gamma inside compute_nu_h). Empty otherwise.
+                    // Empty otherwise.
                     prm_.physics_parameters.compressible ? heating_source_.grid_data()
                                                          : grid::Grid4DDataScalar< ScalarType >{} );
             }
@@ -1179,169 +1176,5 @@ class EVSolver : public EnergySolver< ScalarType >
     bool nu_h_locked_for_step_ = false;
 };
 
-/// Explicit FCT energy update on the FV mesh, with L2 projection onto Q1 at
-/// the end of each timestep so downstream consumers (Stokes buoyancy, Nu) see
-/// the updated Q1 temperature.
-template < typename ScalarType >
-class FCTSolver : public EnergySolver< ScalarType >
-{
-  public:
-    FCTSolver(
-        const std::shared_ptr< grid::shell::DistributedDomain >&        domain,
-        const grid::Grid3DDataVec< ScalarType, 3 >&                     coords_shell,
-        const grid::Grid2DDataScalar< ScalarType >&                     coords_radii,
-        const grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag >& boundary_mask,
-        const grid::Grid4DDataScalar< grid::NodeOwnershipFlag >&        ownership_mask,
-        const linalg::VectorQ1Vec< ScalarType, 3 >&                     velocity,
-        linalg::VectorQ1Scalar< ScalarType >&                           T,
-        linalg::VectorFVScalar< ScalarType >&                           T_fct,
-        const linalg::VectorFVVec< ScalarType, 3 >&                     fv_cell_centers,
-        const fv::hex::DirichletBCs< ScalarType >&                      fct_bcs,
-        const Parameters&                                               prm,
-        std::shared_ptr< util::Table >                                  table )
-    : domain_( domain )
-    , coords_shell_( coords_shell )
-    , coords_radii_( coords_radii )
-    , boundary_mask_( boundary_mask )
-    , velocity_( velocity )
-    , T_( T )
-    , T_fct_( T_fct )
-    , fv_cell_centers_( fv_cell_centers )
-    , fct_bcs_( fct_bcs )
-    , prm_( prm )
-    , table_( std::move( table ) )
-    , T_source_( "T_source", *domain_ )
-    , fv_fct_bufs_( *domain_ )
-    {
-        // FCT Picard backup: only touched when iterating; leave empty otherwise.
-        if ( prm_.time_stepping_parameters.picard_iterations > 1 )
-            T_fct_backup_ = linalg::VectorFVScalar< ScalarType >( "T_fct_backup", *domain_ );
-
-        linalg::assign( T_source_, ScalarType( 0 ) );
-
-        // l2_project_fv_to_fe needs at least 5 Q1 scalar temporaries.
-        constexpr int num_l2_proj_tmps = 5;
-        l2_proj_tmps_.reserve( num_l2_proj_tmps );
-        for ( int i = 0; i < num_l2_proj_tmps; ++i )
-        {
-            l2_proj_tmps_.emplace_back( "fct_l2_proj_tmp_" + std::to_string( i ), *domain_, ownership_mask );
-        }
-    }
-
-    void snapshot_for_picard() override
-    {
-        if ( prm_.time_stepping_parameters.picard_iterations > 1 )
-            Kokkos::deep_copy( T_fct_backup_.grid_data(), T_fct_.grid_data() );
-    }
-
-    void restore_for_picard() override { Kokkos::deep_copy( T_fct_.grid_data(), T_fct_backup_.grid_data() ); }
-
-    ScalarType compute_dt( const int timestep ) override
-    {
-        const auto dt_stable = fv::hex::operators::compute_dt_stable(
-            *domain_,
-            velocity_,
-            fv_cell_centers_.grid_data(),
-            coords_shell_,
-            coords_radii_,
-            prm_.physics_parameters.thermal_diffusivity_nondim );
-        const auto dt =
-            std::min( prm_.time_stepping_parameters.dt_scaling * dt_stable, prm_.time_stepping_parameters.dt_max );
-
-        util::logroot << "Computing dt (FCT stable) ..." << std::endl;
-        util::logroot << "    dt_stable:                     " << dt_stable * prm_.physics_parameters.calc_time_Ma
-                      << " Ma" << std::endl;
-        util::logroot << "=>  dt (= dt_stable * dt_scaling): " << dt * prm_.physics_parameters.calc_time_Ma << " Ma"
-                      << std::endl;
-        return dt;
-    }
-
-    void step( ScalarType dt, bool /*print_convergence*/ ) override
-    {
-        util::Timer timer_energy( "energy" );
-        util::logroot << "Setting up energy solve ..." << std::endl;
-
-        {
-            util::Timer timer_fct_substeps( "fct_substeps" );
-
-            for ( int i = 0; i < prm_.time_stepping_parameters.energy_substeps; ++i )
-            {
-                util::logroot << "Solving energy (FCT, substep " << i << ") ..." << std::endl;
-
-                {
-                    util::Timer timer_fct_source_step( "fct_explicit_step_updating_source_term" );
-                    if ( prm_.physics_parameters.internal_heating )
-                    {
-                        linalg::assign( T_source_, prm_.physics_parameters.internal_heating_rate );
-                    }
-                    timer_fct_source_step.stop();
-
-                    util::Timer timer_fct_step( "fct_explicit_step" );
-                    fv::hex::operators::fct_explicit_step(
-                        *domain_,
-                        T_fct_,
-                        velocity_,
-                        fv_cell_centers_.grid_data(),
-                        coords_shell_,
-                        coords_radii_,
-                        dt,
-                        fv_fct_bufs_,
-                        prm_.physics_parameters.thermal_diffusivity_nondim,
-                        T_source_.grid_data(),
-                        /*subtract_divergence=*/true,
-                        boundary_mask_,
-                        fct_bcs_ );
-                    timer_fct_step.stop();
-                }
-
-                fv::hex::apply_dirichlet_bcs( T_fct_, boundary_mask_, fct_bcs_, *domain_ );
-            }
-
-            timer_fct_substeps.stop();
-        }
-
-        // Project T_fct -> Q1 T once after all substeps.
-        {
-            util::Timer timer_fct_projection( "fct_l2_projection" );
-            fv::hex::l2_project_fv_to_fe_lumped( T_, T_fct_, *domain_, coords_shell_, coords_radii_, l2_proj_tmps_ );
-
-            // Enforce Dirichlet BCs on the Q1 temperature.
-            auto       T_grid    = T_.grid_data();
-            auto       mask      = boundary_mask_;
-            const auto T_cmb_val = static_cast< ScalarType >( prm_.boundary_parameters.temperature_min );
-            const auto T_top_val = static_cast< ScalarType >( prm_.boundary_parameters.temperature_max );
-            Kokkos::parallel_for(
-                "enforce_T_dirichlet_bcs",
-                grid::shell::local_domain_md_range_policy_nodes( *domain_ ),
-                KOKKOS_LAMBDA( const int sd, const int x, const int y, const int r ) {
-                    const auto flag = mask( sd, x, y, r );
-                    if ( flag == grid::shell::ShellBoundaryFlag::CMB )
-                        T_grid( sd, x, y, r ) = T_cmb_val;
-                    else if ( flag == grid::shell::ShellBoundaryFlag::SURFACE )
-                        T_grid( sd, x, y, r ) = T_top_val;
-                } );
-            Kokkos::fence();
-        }
-    }
-
-  private:
-    std::shared_ptr< grid::shell::DistributedDomain >               domain_;
-    const grid::Grid3DDataVec< ScalarType, 3 >&                     coords_shell_;
-    const grid::Grid2DDataScalar< ScalarType >&                     coords_radii_;
-    const grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag >& boundary_mask_;
-    const linalg::VectorQ1Vec< ScalarType, 3 >&                     velocity_;
-    linalg::VectorQ1Scalar< ScalarType >&                           T_;
-    linalg::VectorFVScalar< ScalarType >&                           T_fct_;
-    const linalg::VectorFVVec< ScalarType, 3 >&                     fv_cell_centers_;
-    const fv::hex::DirichletBCs< ScalarType >&                      fct_bcs_;
-    const Parameters&                                               prm_;
-    std::shared_ptr< util::Table >                                  table_;
-
-    // Owned scratch.
-    linalg::VectorFVScalar< ScalarType >                T_source_;
-    linalg::VectorFVScalar< ScalarType >                T_fct_backup_;
-    fv::hex::operators::FVFCTBuffers< ScalarType >      fv_fct_bufs_;
-    std::vector< linalg::VectorQ1Scalar< ScalarType > > l2_proj_tmps_;
-};
 
 } // namespace terra::mantlecirculation

@@ -3,15 +3,11 @@
 #include <string>
 #include <vector>
 
-#include "communication/shell/fv_communication.hpp"
-#include "fv/hex/conversion.hpp"
-#include "fv/hex/helpers.hpp"
 #include "grid/grid_types.hpp"
 #include "grid/shell/spherical_shell.hpp"
 #include "interpolators.hpp"
 #include "io.hpp"
 #include "kokkos/kokkos_wrapper.hpp"
-#include "linalg/vector_fv.hpp"
 #include "linalg/vector_q1.hpp"
 #include "parameters.hpp"
 #include "shell/spherical_harmonics.hpp"
@@ -19,30 +15,23 @@
 
 namespace terra::mantlecirculation {
 
-/// Set T (Q1) and T_fct (FV) from the configured initial-condition profile,
-/// apply Dirichlet BCs on T_fct, exchange ghost layers, and L2-project to keep
-/// both fields consistent.
+/// Set the Q1 temperature field T from the configured initial-condition profile.
 ///
-/// Two profiles are supported:
-///   * CONDUCTIVE: spherical steady-state conduction solution + optional
-///     spherical-harmonic perturbation (Y_l^m + factor·Y_l2^m2).  Q1 first,
-///     then projected to FV.
-///   * power-law + noise: FV interpolation followed by a per-cell noise add.
-///     FV first, then projected back to Q1.
+/// Three profiles are supported:
+///   * FROM_FILE:   radial reference profile read from CSV, broadcast to Q1 nodes.
+///   * CONDUCTIVE:  spherical steady-state conduction solution + optional
+///                  spherical-harmonic perturbation (Y_l^m + factor·Y_l2^m2).
+///   * power-law + noise: radial power-law profile with a per-node noise add.
 ///
-/// In either case the post-condition is: T_fct holds the FV cell-averaged
-/// initial state with Dirichlet BCs applied and ghost layers populated; T is
-/// the L2-projected Q1 representation of T_fct.
+/// The interpolators write a position-dependent value identically to every
+/// subdomain copy of a shared node, so T is consistent without a halo exchange.
 template < typename ScalarType >
 void initialize_temperature_fields(
     linalg::VectorQ1Scalar< ScalarType >&                           T,
-    linalg::VectorFVScalar< ScalarType >&                           T_fct,
     grid::Grid2DDataScalar< ScalarType >&                           T_ref,
-    const fv::hex::DirichletBCs< ScalarType >&                      fct_bcs,
     const grid::shell::DistributedDomain&                           domain,
     const grid::Grid3DDataVec< ScalarType, 3 >&                     coords_shell,
     const grid::Grid2DDataScalar< ScalarType >&                     coords_radii,
-    const linalg::VectorFVVec< ScalarType, 3 >&                     fv_cell_centers,
     const grid::Grid4DDataScalar< grid::NodeOwnershipFlag >&        ownership_mask,
     const grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag >& boundary_mask,
     const Parameters&                                               prm )
@@ -83,8 +72,6 @@ void initialize_temperature_fields(
         //                ownership_mask } );
         //        Kokkos::fence();
 
-        // Project Q1 -> FV
-        fv::hex::l2_project_fe_to_fv( T_fct, T, domain, coords_shell, coords_radii );
     }
 
     else if ( init_temp.profile == InitialTemperatureProfile::CONDUCTIVE )
@@ -149,11 +136,7 @@ void initialize_temperature_fields(
         Kokkos::fence();
         // NOTE: do NOT call send_recv here.  The kernel writes the same value to every
         // subdomain copy of each shared node already; send_recv (SUM) would accumulate
-        // them and produce N*value at shared nodes.  The downstream FE→FV→FE projection
-        // re-establishes consistency.
-
-        // Project Q1 T → FV T_fct.
-        fv::hex::l2_project_fe_to_fv( T_fct, T, domain, coords_shell, coords_radii );
+        // them and produce N*value at shared nodes.
 
         // Populate the radial reference profile T_ref used for the buoyancy deviation
         // Tdev = T - T_ref(r). For a conductive background the reference IS the conductive
@@ -187,44 +170,31 @@ void initialize_temperature_fields(
         logroot << "Initial temperature: power-law + noise" << std::endl;
 
         Kokkos::parallel_for(
-            "initial temp interpolation (FCT)",
-            grid::shell::local_domain_md_range_policy_cells_fv_skip_ghost_layers( domain ),
-            FVInitialConditionInterpolator{
+            "initial temp interpolation (power-law)",
+            grid::shell::local_domain_md_range_policy_nodes( domain ),
+            InitialConditionInterpolator{
                 domain.domain_info().radii().front(),
                 domain.domain_info().radii().back(),
                 prm.boundary_parameters.temperature_min,
                 prm.boundary_parameters.temperature_max,
-                fv_cell_centers.grid_data(),
-                T_fct.grid_data() } );
+                coords_shell,
+                coords_radii,
+                T.grid_data(),
+                boundary_mask,
+                /*only_boundary=*/false } );
         Kokkos::fence();
 
         Kokkos::parallel_for(
-            "adding noise to temp (FCT)",
-            grid::shell::local_domain_md_range_policy_cells_fv_skip_ghost_layers( domain ),
-            FVNoiseAdder{
+            "adding noise to temp (power-law)",
+            grid::shell::local_domain_md_range_policy_nodes( domain ),
+            NoiseAdder{
                 prm.boundary_parameters.temperature_min,
                 prm.boundary_parameters.temperature_max,
-                T_fct.grid_data(),
-                Kokkos::Random_XorShift64_Pool<>( 12345 ) } );
+                coords_shell,
+                coords_radii,
+                T.grid_data(),
+                ownership_mask } );
         Kokkos::fence();
-    }
-
-    // Enforce Dirichlet BCs on the FV field and exchange ghost layers.
-    fv::hex::apply_dirichlet_bcs( T_fct, boundary_mask, fct_bcs, domain );
-    communication::shell::update_fv_ghost_layers( domain, T_fct.grid_data() );
-
-    // Project T_fct → Q1 T so downstream consumers (Stokes RHS, output, Nusselt
-    // diagnostic) see a consistent Q1 representation.  Allocate the L2 scratch
-    // locally — this is a one-shot setup call, not a hot loop.
-    if ( init_temp.profile != InitialTemperatureProfile::FROM_FILE )
-    {
-        std::vector< linalg::VectorQ1Scalar< ScalarType > > init_l2_tmps;
-        init_l2_tmps.reserve( 5 );
-        for ( int i = 0; i < 5; ++i )
-        {
-            init_l2_tmps.emplace_back( "init_l2_tmp_" + std::to_string( i ), domain, ownership_mask );
-        }
-        fv::hex::l2_project_fv_to_fe_lumped( T, T_fct, domain, coords_shell, coords_radii, init_l2_tmps );
     }
 }
 
@@ -272,16 +242,13 @@ void compute_reference_conductive_profile(
     // a SUM exchange would multiply it by the sharing count.
 }
 
-/// Load (u, T) from an XDMF checkpoint and rebuild T_fct via FE→FV projection.
+/// Load (u, T) from an XDMF checkpoint.
 template < typename ScalarType >
 void load_temperature_checkpoint(
-    linalg::VectorQ1Vec< ScalarType, 3 >&       u_velocity,
-    linalg::VectorQ1Scalar< ScalarType >&       T,
-    linalg::VectorFVScalar< ScalarType >&       T_fct,
-    const grid::shell::DistributedDomain&       domain,
-    const grid::Grid3DDataVec< ScalarType, 3 >& coords_shell,
-    const grid::Grid2DDataScalar< ScalarType >& coords_radii,
-    const Parameters&                           prm )
+    linalg::VectorQ1Vec< ScalarType, 3 >& u_velocity,
+    linalg::VectorQ1Scalar< ScalarType >& T,
+    const grid::shell::DistributedDomain&  domain,
+    const Parameters&                      prm )
 {
     using util::logroot;
 
@@ -339,11 +306,6 @@ void load_temperature_checkpoint(
         scale( T.grid_data(), 1.0 / prm.boundary_parameters.delta_T_K );
         scale( u_velocity.grid_data(), 1.0 / prm.physics_parameters.calc_cm_per_year );
     }
-
-    // T_fct is not stored in checkpoints (only Q1 T is).  Recover it via FE→FV
-    // projection.  Ghost layers are populated inside l2_project_fe_to_fv, so
-    // the result is immediately usable by FCT kernels.
-    fv::hex::l2_project_fe_to_fv( T_fct, T, domain, coords_shell, coords_radii );
 }
 
 } // namespace terra::mantlecirculation

@@ -217,46 +217,6 @@ struct NoiseAdder
     }
 };
 
-/// Initial condition for FV cell-centred temperature: same radial profile as the Q1 version,
-/// evaluated at the precomputed cell centres.
-struct FVInitialConditionInterpolator
-{
-    ScalarType                     r_min_, r_max_;
-    ScalarType                     T_min_, T_max_;
-    Grid4DDataVec< ScalarType, 3 > cell_centers_;
-    Grid4DDataScalar< ScalarType > data_;
-
-    KOKKOS_INLINE_FUNCTION
-    void operator()( const int id, const int x, const int y, const int r ) const
-    {
-        const ScalarType cx     = cell_centers_( id, x, y, r, 0 );
-        const ScalarType cy     = cell_centers_( id, x, y, r, 1 );
-        const ScalarType cz     = cell_centers_( id, x, y, r, 2 );
-        const ScalarType radius = Kokkos::sqrt( cx * cx + cy * cy + cz * cz );
-        const ScalarType frac   = ( r_max_ - radius ) / ( r_max_ - r_min_ );
-        data_( id, x, y, r )    = T_min_ + ( T_max_ - T_min_ ) * Kokkos::pow( frac, ScalarType( 5 ) );
-    }
-};
-
-/// Noise adder for FV cells.  All non-ghost cells are owned by the local subdomain,
-/// so no ownership mask is needed.
-struct FVNoiseAdder
-{
-    ScalarType                       T_min_, T_max_;
-    Grid4DDataScalar< ScalarType >   data_T_;
-    Kokkos::Random_XorShift64_Pool<> rand_pool_;
-
-    KOKKOS_INLINE_FUNCTION
-    void operator()( const int id, const int x, const int y, const int r ) const
-    {
-        auto             gen          = rand_pool_.get_state();
-        const ScalarType eps          = 1e-1;
-        const ScalarType perturbation = eps * ( 2.0 * gen.drand() - 1.0 );
-        data_T_( id, x, y, r )        = Kokkos::clamp( data_T_( id, x, y, r ) + perturbation, T_min_, T_max_ );
-        rand_pool_.free_state( gen );
-    }
-};
-
 /// Computes viscosity from temperature according to the selected viscosity law.
 struct ViscosityFromTemperature
 {

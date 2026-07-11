@@ -4,7 +4,6 @@
 #include <vector>
 
 #include "communication/shell/communication.hpp"
-#include "communication/shell/fv_communication.hpp"
 #include "communication/shell/redistribute.hpp"
 #include "fe/strong_algebraic_dirichlet_enforcement.hpp"
 #include "fe/strong_algebraic_freeslip_enforcement.hpp"
@@ -17,9 +16,6 @@
 #include "fe/wedge/operators/shell/stokes.hpp"
 #include "fe/wedge/operators/shell/unsteady_advection_diffusion_supg_kerngen.hpp"
 #include "fe/wedge/operators/shell/vector_mass.hpp"
-#include "fv/hex/conversion.hpp"
-#include "fv/hex/helpers.hpp"
-#include "fv/hex/operators/fct_advection_diffusion.hpp"
 #include "geophysics/viscosity/viscosity_interpolation.hpp"
 #include "grid/grid_types.hpp"
 #include "grid/shell/spherical_shell.hpp"
@@ -36,7 +32,6 @@
 #include "linalg/solvers/multigrid.hpp"
 #include "linalg/solvers/pcg.hpp"
 #include "linalg/solvers/power_iteration.hpp"
-#include "linalg/vector_fv.hpp"
 #include "linalg/vector_q1isoq2_q1.hpp"
 #include "mpi/mpi.hpp"
 #include "shell/spherical_harmonics.hpp"
@@ -171,15 +166,6 @@ Result<> run( const Parameters& prm )
 
     Grid2DDataScalar< ScalarType > T_ref;
 
-    // Finite-volume functions/vectors.
-
-    // FV cell-centred temperature field (the FCT prognostic variable).
-    linalg::VectorFVScalar< ScalarType > T_fct( "T_fct", ( *domains[velocity_level] ) );
-    // Pre-computed cell centres (with ghost layers filled once and reused every step).
-    linalg::VectorFVVec< ScalarType, 3 > fv_cell_centers( "fv_cell_centers", ( *domains[velocity_level] ) );
-    fv::hex::initialize_cell_centers(
-        fv_cell_centers, ( *domains[velocity_level] ), coords_shell[velocity_level], coords_radii[velocity_level] );
-
     // Counting DoFs.
     int world_size = mpi::num_processes();
 
@@ -238,22 +224,12 @@ Result<> run( const Parameters& prm )
 
     logroot << "Setting up energy equation solver ..." << std::endl;
 
-    // FCT Dirichlet BCs (also used by FCTSolver below for the FV step).
-    const fv::hex::DirichletBCs< ScalarType > fct_bcs{
-        .T_cmb         = static_cast< ScalarType >( prm.boundary_parameters.temperature_max ),
-        .T_surface     = static_cast< ScalarType >( prm.boundary_parameters.temperature_min ),
-        .apply_cmb     = true,
-        .apply_surface = true };
-
     initialize_temperature_fields(
         T,
-        T_fct,
         T_ref,
-        fct_bcs,
         ( *domains[velocity_level] ),
         coords_shell[velocity_level],
         coords_radii[velocity_level],
-        fv_cell_centers,
         ownership_mask_data[velocity_level],
         boundary_mask_data[velocity_level],
         prm );
@@ -323,10 +299,7 @@ Result<> run( const Parameters& prm )
         load_temperature_checkpoint(
             u.block_1(),
             T,
-            T_fct,
             ( *domains[velocity_level] ),
-            coords_shell[velocity_level],
-            coords_radii[velocity_level],
             prm );
 
         // Refresh viscosity from the loaded T: the IC-based eta computed
@@ -406,29 +379,6 @@ Result<> run( const Parameters& prm )
             stokes.eta_fine().grid_data(),
             stokes.density().grid_data() );
         break;
-    case EnergySolverType::FCT:
-        energy = std::make_unique< FCTSolver< ScalarType > >(
-            domains[velocity_level],
-            coords_shell[velocity_level],
-            coords_radii[velocity_level],
-            boundary_mask_data[velocity_level],
-            ownership_mask_data[velocity_level],
-            u.block_1(),
-            T,
-            T_fct,
-            fv_cell_centers,
-            fct_bcs,
-            prm,
-            table );
-        break;
-    }
-
-    // fv_cell_centers is consumed only by the FCT advection solver after
-    // initialization; for SUPG/EV it is dead weight (a 3-component FV field,
-    // ~0.5 GB/GCD at production scale). Release it for the non-FCT solvers.
-    if ( prm.time_stepping_parameters.energy_solver != EnergySolverType::FCT )
-    {
-        fv_cell_centers = linalg::VectorFVVec< ScalarType, 3 >();
     }
 
     // EV-specific: register the Q1-projected per-wedge ν_h diagnostic field
@@ -530,7 +480,7 @@ Result<> run( const Parameters& prm )
 
     logroot << "Starting time stepping!" << std::endl;
 
-    // Compute Nusselt at timestep 0 (before any FCT steps) for diagnostics.
+    // Compute Nusselt at timestep 0 (before time stepping) for diagnostics.
     {
         const auto Nu_top_0 = compute_nusselt(
             ( *domains[velocity_level] ),
@@ -541,18 +491,9 @@ Result<> run( const Parameters& prm )
             boundary_mask_data[velocity_level],
             ownership_mask_data[velocity_level],
             true );
-        const auto Nu_top_fv_0 = compute_nusselt_fv(
-            ( *domains[velocity_level] ),
-            T_fct,
-            boundary_mask_data[velocity_level],
-            prm.boundary_parameters.temperature_min,
-            prm.boundary_parameters.temperature_max,
-            prm.mesh_parameters.radius_min,
-            prm.mesh_parameters.radius_max,
-            true );
         const auto V_rms_0 = compute_v_rms(
             ( *domains[velocity_level] ), u.block_1(), coords_shell[velocity_level], coords_radii[velocity_level] );
-        logroot << "Nu_top (Q1) = " << Nu_top_0 << ", Nu_top (FV) = " << Nu_top_fv_0 << ", V_rms = " << V_rms_0
+        logroot << "Nu_top (Q1) = " << Nu_top_0 << ", V_rms = " << V_rms_0
                 << "  [timestep 0, before time stepping]" << std::endl;
     }
 
@@ -679,21 +620,11 @@ Result<> run( const Parameters& prm )
                 boundary_mask_data[velocity_level],
                 ownership_mask_data[velocity_level],
                 /*at_surface=*/true );
-            const auto Nu_top_fv = compute_nusselt_fv(
-                ( *domains[velocity_level] ),
-                T_fct,
-                boundary_mask_data[velocity_level],
-                prm.boundary_parameters.temperature_min,
-                prm.boundary_parameters.temperature_max,
-                prm.mesh_parameters.radius_min,
-                prm.mesh_parameters.radius_max,
-                /*at_surface=*/true );
             const auto V_rms = compute_v_rms(
                 ( *domains[velocity_level] ), u.block_1(), coords_shell[velocity_level], coords_radii[velocity_level] );
             if ( timestep % 10 == 0 )
             {
-                logroot << "Nu_top (Q1) = " << Nu_top << ", Nu_top (FV) = " << Nu_top_fv << ", V_rms = " << V_rms
-                        << std::endl;
+                logroot << "Nu_top (Q1) = " << Nu_top << ", V_rms = " << V_rms << std::endl;
             }
             // Per-step CSV. simulated_time is updated below; the value here is
             // the time at the *end* of this step (current T just solved).
@@ -703,10 +634,10 @@ Result<> run( const Parameters& prm )
                 std::ofstream     out( path, std::ios::app );
                 if ( out.tellp() == 0 )
                 {
-                    out << "timestep,sim_time,Nu_top_Q1,Nu_top_FV,V_rms\n";
+                    out << "timestep,sim_time,Nu_top_Q1,V_rms\n";
                 }
                 const double t_end_of_step = simulated_time + prm.time_stepping_parameters.energy_substeps * dt;
-                out << timestep << "," << t_end_of_step << "," << Nu_top << "," << Nu_top_fv << "," << V_rms << "\n";
+                out << timestep << "," << t_end_of_step << "," << Nu_top << "," << V_rms << "\n";
             }
         }
 
