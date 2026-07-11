@@ -1,5 +1,7 @@
 #pragma once
 
+#include <fstream>
+#include <set>
 #include <string>
 #include <variant>
 
@@ -277,17 +279,13 @@ struct EnergySolverParameters
 };
 
 /// Time-discretization scheme for the energy (temperature) equation.
-///   FCT  : explicit Flux-Corrected Transport on the FV mesh.  Low-order upwind
-///          predictor + Zalesak limiter (monotone, no over/undershoots).
-///          Stability bound: dt <= dt_stable (computed from advective + diffusive
-///          face fluxes).  Cheap per step but requires small dt at high velocity / Pe.
 ///   SUPG : implicit SUPG-stabilised Galerkin advection-diffusion on the Q1 mesh,
 ///          solved by FGMRES.  Unconditionally stable (dt only bounded by the
 ///          *advection* CFL for accuracy), so allows much larger dt at moderate Pe.
 ///          Linear-solver convergence degrades at high Pe (Ra >> 1e6).
+///   ENTROPY_VISCOSITY : entropy-viscosity-stabilised Galerkin on the Q1 mesh.
 enum class EnergySolverType
 {
-    FCT,
     SUPG,
     ENTROPY_VISCOSITY,
 };
@@ -309,7 +307,7 @@ struct TimeSteppingParameters
     int energy_substeps   = 1;
     int picard_iterations = 1;
 
-    EnergySolverType energy_solver = EnergySolverType::FCT;
+    EnergySolverType energy_solver = EnergySolverType::ENTROPY_VISCOSITY;
 };
 
 struct IOParameters
@@ -366,15 +364,23 @@ inline void nondimensionalise( Parameters& prm )
 
     // --- Domain ---
 
-    // Nondimensionalise radii with mantle thickness -- rescaled to unit sphere for output
+    // Nondimensionalise radii with mantle thickness -- rescaled to unit sphere for output.
+    // Skipped in --set-nondimensional-numbers mode, where radius-min/radius-max are inputs.
     mesh.mantle_thickness_m = mesh.radius_surface_m - mesh.radius_cmb_m;
-    mesh.radius_max         = mesh.radius_surface_m / mesh.mantle_thickness_m;
-    mesh.radius_min         = mesh.radius_cmb_m / mesh.mantle_thickness_m;
+    if ( !devel.set_nondimensional_numbers )
+    {
+        mesh.radius_max = mesh.radius_surface_m / mesh.mantle_thickness_m;
+        mesh.radius_min = mesh.radius_cmb_m / mesh.mantle_thickness_m;
+    }
 
     // --- Boundary conditions ---
+    // Skipped in --set-nondimensional-numbers mode, where temperature-bc-value-* are inputs.
 
-    boundary.temperature_min = boundary.temperature_surface_K / boundary.delta_T_K;
-    boundary.temperature_max = boundary.temperature_cmb_K / boundary.delta_T_K;
+    if ( !devel.set_nondimensional_numbers )
+    {
+        boundary.temperature_min = boundary.temperature_surface_K / boundary.delta_T_K;
+        boundary.temperature_max = boundary.temperature_cmb_K / boundary.delta_T_K;
+    }
 
     // Surface density
     phys.surface_density_nondim = phys.surface_density_dim / phys.reference_density;
@@ -489,6 +495,11 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
     add_option_with_default( app, "--radius-cmb", parameters.mesh_parameters.radius_cmb_m )->group( "Domain" );
     add_option_with_default( app, "--radius-surface", parameters.mesh_parameters.radius_surface_m )->group( "Domain" );
 
+    // Non-dimensional shell radii. Only honoured when --set-nondimensional-numbers is set;
+    // otherwise nondimensionalise() overwrites them from radius-cmb/radius-surface.
+    add_option_with_default( app, "--radius-min", parameters.mesh_parameters.radius_min )->group( "Domain" );
+    add_option_with_default( app, "--radius-max", parameters.mesh_parameters.radius_max )->group( "Domain" );
+
     add_option_with_default( app, "--radial-extra-levels", parameters.mesh_parameters.radial_extra_levels )
         ->group( "Domain" )
         ->description( "Per-MG-level offset added to the radial diamond refinement level relative to the "
@@ -551,10 +562,28 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
     add_option_with_default( app, "--temperature-surface", parameters.boundary_parameters.temperature_surface_K )
         ->group( "Boundary Conditions" );
 
+    // Non-dimensional temperature BC values. Only honoured when --set-nondimensional-numbers
+    // is set; otherwise nondimensionalise() overwrites them from temperature-cmb/-surface / dT.
+    add_option_with_default( app, "--temperature-bc-value-cmb", parameters.boundary_parameters.temperature_max )
+        ->group( "Boundary Conditions" );
+    add_option_with_default( app, "--temperature-bc-value-surface", parameters.boundary_parameters.temperature_min )
+        ->group( "Boundary Conditions" );
+
     //////////////////////////////
     /// Geophysical parameters ///
     //////////////////////////////
     add_flag_with_default( app, "--compressible", parameters.physics_parameters.compressible );
+
+    // Nondimensional-number controls. By default (flag unset) Ra, Pe, Di and the H-number are
+    // DERIVED from the dimensional parameters in nondimensionalise(). With
+    // --set-nondimensional-numbers the derivation is skipped and the values below are used
+    // verbatim, so Ra and Di become directly settable (e.g. a Di->0 incompressible-limit
+    // regression at fixed Ra).
+    add_flag_with_default(
+        app, "--set-nondimensional-numbers", parameters.devel_parameters.set_nondimensional_numbers );
+    add_option_with_default( app, "--rayleigh-number", parameters.physics_parameters.rayleigh_number );
+    add_option_with_default( app, "--dissipation-number", parameters.physics_parameters.dissipation_number );
+    add_option_with_default( app, "--diffusivity", parameters.physics_parameters.thermal_diffusivity_nondim );
     add_flag_with_default( app, "--internal-heating-enabled", parameters.physics_parameters.internal_heating );
     add_option_with_default( app, "--internal-heating-rate", parameters.physics_parameters.internal_heating_rate );
 
@@ -704,7 +733,6 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
                        "Default: 1 (no iteration, current behavior)." );
 
     std::map< std::string, EnergySolverType > energy_solver_map{
-        { "fct", EnergySolverType::FCT },
         { "supg", EnergySolverType::SUPG },
         { "entropy_viscosity", EnergySolverType::ENTROPY_VISCOSITY },
         { "ev", EnergySolverType::ENTROPY_VISCOSITY },
@@ -712,9 +740,9 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
 
     add_option_with_default( app, "--energy-solver", parameters.time_stepping_parameters.energy_solver )
         ->transform( CLI::CheckedTransformer( energy_solver_map, CLI::ignore_case ) )
-        ->default_val( "fct" )
+        ->default_val( "ev" )
         ->group( "Time Discretization" )
-        ->description( "'fct': Explicit FCT advection-diffusion (default). "
+        ->description( "'ev': Entropy-viscosity Galerkin advection-diffusion (default). "
                        "'supg': Implicit SUPG advection-diffusion with FGMRES solver." );
 
     /////////////////////
@@ -852,6 +880,48 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
             return { CLIHelp{} };
         }
         return { "CLI parse error" };
+    }
+
+    // Non-breaking guard against dead/misspelled config-file keys. CLI11 silently ignores
+    // config entries that match no registered option (allow_config_extras is on), which has
+    // masked real settings before (e.g. rayleigh-number / radius-min were unbound and had no
+    // effect). Re-scan the config file and warn -- loudly but without aborting -- for every
+    // key that binds to no option.
+    if ( app.get_config_ptr() != nullptr && app.get_config_ptr()->count() > 0 )
+    {
+        std::set< std::string > known;
+        for ( const auto* opt : app.get_options() )
+        {
+            for ( const auto& ln : opt->get_lnames() )
+            {
+                known.insert( ln );
+            }
+        }
+        std::ifstream cfg( app.get_config_ptr()->as< std::string >() );
+        std::string   line;
+        while ( std::getline( cfg, line ) )
+        {
+            const auto first = line.find_first_not_of( " \t" );
+            if ( first == std::string::npos || line[first] == '#' || line[first] == '[' )
+            {
+                continue; // blank, comment, or section header
+            }
+            const auto eq = line.find( '=', first );
+            if ( eq == std::string::npos )
+            {
+                continue;
+            }
+            std::string key  = line.substr( first, eq - first );
+            const auto  last = key.find_last_not_of( " \t" );
+            if ( last != std::string::npos )
+            {
+                key.erase( last + 1 );
+            }
+            if ( !key.empty() && known.find( key ) == known.end() )
+            {
+                util::logroot << "[WARN] config key ignored (no matching option): " << key << std::endl;
+            }
+        }
     }
 
     // Cross-flag validation for anisotropic refinement.  The radial diamond
