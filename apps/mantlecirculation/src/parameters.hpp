@@ -29,7 +29,7 @@ struct MeshParameters
     // (refinement_level_mesh_* + radial_extra_levels) at every MG level, so the
     // full hierarchy stays consistent (both axes halve per step). lat_sdr/rad_sdr
     // override refinement_level_subdomains per axis when >= 0.
-    int radial_extra_levels = 0;
+    int radial_extra_levels = -1;
     int lat_sdr             = -1;
     int rad_sdr             = -1;
 
@@ -712,7 +712,7 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
 
     add_option_with_default( app, "--energy-solver", parameters.time_stepping_parameters.energy_solver )
         ->transform( CLI::CheckedTransformer( energy_solver_map, CLI::ignore_case ) )
-        ->default_val( "fct" )
+        ->default_val( "ev" )
         ->group( "Time Discretization" )
         ->description( "'fct': Explicit FCT advection-diffusion (default). "
                        "'supg': Implicit SUPG advection-diffusion with FGMRES solver." );
