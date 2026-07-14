@@ -14,65 +14,16 @@ using grid::Grid3DDataVec;
 using grid::Grid4DDataScalar;
 using grid::Grid4DDataVec;
 
-struct InitialConditionInterpolator
-{
-    ScalarType                                         r_min_;
-    ScalarType                                         r_max_;
-    ScalarType                                         T_min_;
-    ScalarType                                         T_max_;
-    Grid3DDataVec< ScalarType, 3 >                     grid_;
-    Grid2DDataScalar< ScalarType >                     radii_;
-    Grid4DDataScalar< ScalarType >                     data_;
-    Grid4DDataScalar< grid::shell::ShellBoundaryFlag > mask_data_;
-    bool                                               only_boundary_;
-
-    InitialConditionInterpolator(
-        const ScalarType                                          r_min,
-        const ScalarType                                          r_max,
-        const ScalarType                                          T_min,
-        const ScalarType                                          T_max,
-        const Grid3DDataVec< ScalarType, 3 >&                     grid,
-        const Grid2DDataScalar< ScalarType >&                     radii,
-        const Grid4DDataScalar< ScalarType >&                     data,
-        const Grid4DDataScalar< grid::shell::ShellBoundaryFlag >& mask_data,
-        bool                                                      only_boundary )
-    : r_min_( r_min )
-    , r_max_( r_max )
-    , T_min_( T_min )
-    , T_max_( T_max )
-    , grid_( grid )
-    , radii_( radii )
-    , data_( data )
-    , mask_data_( mask_data )
-    , only_boundary_( only_boundary )
-    {}
-
-    KOKKOS_INLINE_FUNCTION
-    void operator()( const int local_subdomain_id, const int x, const int y, const int r ) const
-    {
-        const auto mask_value  = mask_data_( local_subdomain_id, x, y, r );
-        const auto is_boundary = util::has_flag( mask_value, grid::shell::ShellBoundaryFlag::BOUNDARY );
-
-        if ( !only_boundary_ || is_boundary )
-        {
-            const dense::Vec< ScalarType, 3 > coords =
-                grid::shell::coords( local_subdomain_id, x, y, r, grid_, radii_ );
-            const auto frac                      = ( r_max_ - coords.norm() ) / ( r_max_ - r_min_ );
-            data_( local_subdomain_id, x, y, r ) = T_min_ + ( T_max_ - T_min_ ) * Kokkos::pow( frac, 5 );
-        }
-    }
-};
-
-// Interpolate from custom radial profile to Q1 field
+// Interpolate from radial profile to Q1 field
 struct RadialProfileToQ1
 {
-    Grid2DDataScalar< ScalarType > profile_;
+    Grid2DDataScalar< ScalarType > radial_profile_;
     Grid4DDataScalar< ScalarType > data_;
 
     KOKKOS_INLINE_FUNCTION
     void operator()( const int id, const int x, const int y, const int r ) const
     {
-        data_( id, x, y, r ) = profile_( id, r );
+        data_( id, x, y, r ) = radial_profile_( id, r );
     }
 };
 
@@ -168,52 +119,119 @@ struct RHSVelocityInterpolator
 
 struct NoiseAdder
 {
+    ScalarType                                  eps_;
     ScalarType                                  T_min_;
     ScalarType                                  T_max_;
+    ScalarType                                  r_min_;
+    ScalarType                                  r_max_;
+    bool                                        taper_near_boundaries_;
     Grid3DDataVec< ScalarType, 3 >              grid_;
     Grid2DDataScalar< ScalarType >              radii_;
-    Grid4DDataScalar< ScalarType >              data_T_;
+    Grid4DDataScalar< ScalarType >              data_;
     Grid4DDataScalar< grid::NodeOwnershipFlag > mask_;
     Kokkos::Random_XorShift64_Pool<>            rand_pool_;
 
     NoiseAdder(
+        const ScalarType                                   eps,
         const ScalarType                                   T_min,
         const ScalarType                                   T_max,
+        const ScalarType                                   r_min,
+        const ScalarType                                   r_max,
+        const bool                                         taper_near_boundaries,
         const Grid3DDataVec< ScalarType, 3 >&              grid,
         const Grid2DDataScalar< ScalarType >&              radii,
-        const Grid4DDataScalar< ScalarType >&              data_T,
+        const Grid4DDataScalar< ScalarType >&              data,
         const Grid4DDataScalar< grid::NodeOwnershipFlag >& mask )
-    : T_min_( T_min )
+    : eps_( eps )
+    , T_min_( T_min )
     , T_max_( T_max )
+    , r_min_( r_min )
+    , r_max_( r_max )
+    , taper_near_boundaries_( taper_near_boundaries )
     , grid_( grid )
     , radii_( radii )
-    , data_T_( data_T )
+    , data_( data )
     , mask_( mask )
     , rand_pool_( 12345 )
     {}
 
+    static constexpr ScalarType taper_width_ = ScalarType( 0.05 );
+
     KOKKOS_INLINE_FUNCTION
-    void operator()( const int local_subdomain_id, const int x, const int y, const int r ) const
+    void operator()( const int id, const int x, const int y, const int r ) const
     {
         auto generator = rand_pool_.get_state();
 
-        const ScalarType eps          = 1e-1;
-        const auto       perturbation = eps * ( 2.0 * generator.drand() - 1.0 );
+        const ScalarType perturbation = eps_ * ( 2.0 * generator.drand() - 1.0 );
+        ScalarType       taper        = ScalarType( 1 );
 
-        const auto process_ownes_point =
-            util::has_flag( mask_( local_subdomain_id, x, y, r ), grid::NodeOwnershipFlag::OWNED );
-
-        if ( process_ownes_point )
+        // apply tapering near top and bottom boundary
+        if ( taper_near_boundaries_ )
         {
-            data_T_( local_subdomain_id, x, y, r ) =
-                Kokkos::clamp( data_T_( local_subdomain_id, x, y, r ) + perturbation, T_min_, T_max_ );
+            const ScalarType radius = radii_( id, r );
+
+            const ScalarType dist_to_boundary = Kokkos::min( radius - r_min_, r_max_ - radius );
+            const ScalarType t = Kokkos::clamp( dist_to_boundary / taper_width_, ScalarType( 0 ), ScalarType( 1 ) );
+
+            taper = t * t * ( ScalarType( 3 ) - ScalarType( 2 ) * t );
+        }
+
+        // Only write to owned nodes
+        const auto process_owns_point = util::has_flag( mask_( id, x, y, r ), grid::NodeOwnershipFlag::OWNED );
+
+        if ( process_owns_point )
+        {
+            data_( id, x, y, r ) = Kokkos::clamp( data_( id, x, y, r ) + taper * perturbation, T_min_, T_max_ );
         }
         else
         {
-            data_T_( local_subdomain_id, x, y, r ) = T_min_;
+            data_( id, x, y, r ) = ScalarType( 0 );
         }
 
         rand_pool_.free_state( generator );
+    }
+};
+
+struct SphericalHarmonicPerturbationAdder
+{
+    ScalarType                                  eps_;
+    ScalarType                                  T_min_, T_max_;
+    ScalarType                                  r_min_, r_max_;
+    bool                                        taper_near_boundaries_;
+    Grid2DDataScalar< ScalarType >              radii_; // Only used if taper_near_boundaries == 'true'
+    Grid3DDataScalar< ScalarType >              sph_coeffs_;
+    Grid4DDataScalar< ScalarType >              data_;
+    Grid4DDataScalar< grid::NodeOwnershipFlag > mask_;
+
+    static constexpr ScalarType taper_width_ = ScalarType( 0.05 );
+
+    KOKKOS_INLINE_FUNCTION
+    void operator()( const int id, const int x, const int y, const int r ) const
+    {
+        ScalarType taper = ScalarType( 1 );
+
+        // apply tapering near top and bottom boundary
+        if ( taper_near_boundaries_ )
+        {
+            const ScalarType radius           = radii_( id, r );
+            const ScalarType dist_to_boundary = Kokkos::min( radius - r_min_, r_max_ - radius );
+            const ScalarType t = Kokkos::clamp( dist_to_boundary / taper_width_, ScalarType( 0 ), ScalarType( 1 ) );
+
+            taper = t * t * ( ScalarType( 3 ) - ScalarType( 2 ) * t );
+        }
+
+        // Only write to owned nodes
+        const auto process_owns_point = util::has_flag( mask_( id, x, y, r ), grid::NodeOwnershipFlag::OWNED );
+
+        if ( process_owns_point )
+        {
+            data_( id, x, y, r ) =
+                Kokkos::clamp( data_( id, x, y, r ) + taper * eps_ * sph_coeffs_( id, x, y ), T_min_, T_max_ );
+        }
+        else
+        {
+            data_( id, x, y, r ) = ScalarType( 0 );
+        }
     }
 };
 
