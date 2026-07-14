@@ -169,7 +169,8 @@ Result<> run( const Parameters& prm )
     VectorQ1Scalar< ScalarType > T( "T", ( *domains[velocity_level] ), ownership_mask_data[velocity_level] );
     VectorQ1Scalar< ScalarType > Tdev( "Tdev", ( *domains[velocity_level] ), ownership_mask_data[velocity_level] );
 
-    Grid2DDataScalar< ScalarType > T_ref;
+    Grid2DDataScalar< ScalarType > T_ref(
+        "T_ref", coords_radii[velocity_level].extent( 0 ), coords_radii[velocity_level].extent( 1 ) );
 
     // Finite-volume functions/vectors.
 
@@ -375,7 +376,7 @@ Result<> run( const Parameters& prm )
     // nu_h_nodal_view() can be registered with the XDMF output.
 
     std::unique_ptr< EnergySolver< ScalarType > > energy;
-    switch ( prm.time_stepping_parameters.energy_solver )
+    switch ( prm.energy_solver_parameters.energy_solver )
     {
     case EnergySolverType::SUPG:
         energy = std::make_unique< SUPGSolver< ScalarType > >(
