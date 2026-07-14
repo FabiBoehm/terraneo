@@ -126,11 +126,11 @@ struct ViscosityParameters
 };
 
 /// Initial temperature distribution.
-///   POWER_LAW  : T_init from a radial power-law profile + small noise (legacy default).
-///   CONDUCTIVE : T_init = analytic conduction profile (r_min*r_max/r - r_min) / D, plus an
-///                optional spherical-harmonic perturbation Y_l^m (and an optional second
-///                harmonic) of amplitude `sph_epsilon`.  Use this for the standard mantle
+///   POWER_LAW  : T_init from a radial power-law profile (legacy default).
+///   CONDUCTIVE : T_init = analytic conduction profile (r_min*r_max/r - r_min) / D.
+///                Use this in combination with a spherical harmonic perturbation for the standard mantle
 ///                convection benchmarks (Zhong et al. 2008 A/C cases).
+///   FROM_FILE  : Custom T_init read from csv file with path set in 'Tref_profile_csv_path'.
 enum class InitialTemperatureProfile
 {
     POWER_LAW,
@@ -138,28 +138,36 @@ enum class InitialTemperatureProfile
     FROM_FILE
 };
 
+/// Initial temperature perturbation.
+/// Choice between random noise and a spherical harmonic perturbation pattern, defined with parameters 'sph_degree_l' and 'sph_order_m'.
+/// Amplitudes for both cases are set with the parameter 'perturbation_amplitude', in fraction of global temperature difference.
+enum class InitialPerturbation
+{
+    NOISE,
+    SPHERICAL_HARMONICS
+};
+
 struct InitialTemperatureParameters
 {
-    /// Selector for the initial-temperature distribution — see InitialTemperatureProfile.
-    InitialTemperatureProfile profile = InitialTemperatureProfile::FROM_FILE;
+    /// Selectors for the initial temperature distribution — see InitialTemperatureProfile and InitialPerturbation.
+    InitialTemperatureProfile profile      = InitialTemperatureProfile::FROM_FILE;
+    InitialPerturbation       perturbation = InitialPerturbation::SPHERICAL_HARMONICS;
 
     // Reference temperature from file
     std::string Tref_profile_csv_path        = "TemperatureProfile_3800K.csv";
     std::string Tref_profile_radii_key       = "radius";
     std::string Tref_profile_temperature_key = "temperature";
 
-    /// Spherical-harmonic perturbation degree l of the first harmonic (l >= 0). Set 0 to
-    /// disable the SH perturbation entirely (then sph_epsilon is ignored).
+    double perturbation_amplitude = 5e-2;
+
+    /// Spherical-harmonic perturbation degree l and order m (l >= 0, |m| <= l). Set l to 0 to
+    /// disable the SH perturbation entirely (then perturbation_amplitude is ignored).
     int sph_degree_l = 0;
-    /// Spherical-harmonic perturbation order m of the first harmonic (|m| <= l).
-    int sph_order_m = 0;
-    /// Amplitude of the perturbation: T = T_ref(r) + sph_epsilon * (Y_l1^m1 + factor_2 * Y_l2^m2).
-    /// Typical values are 0.01..0.1 for Zhong-style benchmarks.
-    double sph_epsilon = 0.0;
+    int sph_order_m  = 0;
 
     /// Optional second spherical harmonic for combined modes (e.g. cubic symmetry
     /// T_perturb = Y_4^0 + (5/7) * Y_4^4).  Set sph_degree_l_2 > 0 to enable.
-    /// The total perturbation is sph_epsilon * (Y_l1^m1 + sph_factor_2 * Y_l2^m2).
+    /// The total perturbation is perturbation_amplitude * (Y_l1^m1 + sph_factor_2 * Y_l2^m2).
     int sph_degree_l_2 = 0;
     int sph_order_m_2  = 0;
     /// Relative amplitude of the second harmonic (typical values are O(1); e.g. 5/7 for
@@ -254,6 +262,21 @@ struct StokesSolverParameters
     std::vector< int > viscous_pc_agglom_factors = {};
 };
 
+/// Time-discretization scheme for the energy (temperature) equation.
+///   FCT  : explicit Flux-Corrected Transport on the FV mesh.  Low-order upwind
+///          predictor + Zalesak limiter (monotone, no over/undershoots).
+///          Stability bound: dt <= dt_stable (computed from advective + diffusive
+///          face fluxes).  Cheap per step but requires small dt at high velocity / Pe.
+///   SUPG : implicit SUPG-stabilised Galerkin advection-diffusion on the Q1 mesh,
+///          solved by FGMRES.  Unconditionally stable (dt only bounded by the
+///          *advection* CFL for accuracy), so allows much larger dt at moderate Pe.
+///          Linear-solver convergence degrades at high Pe (Ra >> 1e6).
+enum class EnergySolverType
+{
+    FCT,
+    SUPG,
+    ENTROPY_VISCOSITY,
+};
 struct EnergySolverParameters
 {
     int    krylov_restart            = 5;
@@ -274,22 +297,8 @@ struct EnergySolverParameters
     /// If true, log global min/max/mean of the per-wedge ν_h field once per
     /// output_frequency to <outdir>/nu_h_stats.csv (timestep, min, max, mean).
     bool ev_dump_nu_h = false;
-};
 
-/// Time-discretization scheme for the energy (temperature) equation.
-///   FCT  : explicit Flux-Corrected Transport on the FV mesh.  Low-order upwind
-///          predictor + Zalesak limiter (monotone, no over/undershoots).
-///          Stability bound: dt <= dt_stable (computed from advective + diffusive
-///          face fluxes).  Cheap per step but requires small dt at high velocity / Pe.
-///   SUPG : implicit SUPG-stabilised Galerkin advection-diffusion on the Q1 mesh,
-///          solved by FGMRES.  Unconditionally stable (dt only bounded by the
-///          *advection* CFL for accuracy), so allows much larger dt at moderate Pe.
-///          Linear-solver convergence degrades at high Pe (Ra >> 1e6).
-enum class EnergySolverType
-{
-    FCT,
-    SUPG,
-    ENTROPY_VISCOSITY,
+    EnergySolverType energy_solver = EnergySolverType::ENTROPY_VISCOSITY;
 };
 
 struct TimeSteppingParameters
@@ -308,8 +317,6 @@ struct TimeSteppingParameters
 
     int energy_substeps   = 1;
     int picard_iterations = 1;
-
-    EnergySolverType energy_solver = EnergySolverType::FCT;
 };
 
 struct IOParameters
@@ -627,14 +634,31 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
         ->transform( CLI::CheckedTransformer( init_temp_profile_map, CLI::ignore_case ) )
         ->default_val( "from-file" )
         ->group( "Initial Temperature" )
-        ->description(
-            "'from-file': read custom temperature profile from file."
-            "'power-law': T = ((r_max-r)/(r_max-r_min))^5 + random noise (default). "
-            "'conductive': T_ref = (r_min*r_max/r - r_min)/(r_max - r_min), with optional spherical harmonic perturbation." );
+        ->description( "'power-law': T = ((r_max-r)/(r_max-r_min))^5 (default). "
+                       "'from-file': read custom temperature profile from file."
+                       "'conductive': T_ref = (r_min*r_max/r - r_min)/(r_max - r_min)." );
 
     add_option_with_default(
         app, "--temperature-profile-path", parameters.physics_parameters.initial_temperature.Tref_profile_csv_path )
-        ->group( "Initial Temperature" );
+        ->group( "Initial Temperature" )
+        ->description( "Path to file for '--initial-temperature-profile == from-file'." );
+
+    std::map< std::string, InitialPerturbation > init_temp_perturbation_map{
+        { "noise", InitialPerturbation::NOISE },
+        { "spherical-harmonics", InitialPerturbation::SPHERICAL_HARMONICS },
+        { "sph", InitialPerturbation::SPHERICAL_HARMONICS } };
+
+    add_option_with_default(
+        app, "--initial-temperature-perturbation", parameters.physics_parameters.initial_temperature.perturbation )
+        ->transform( CLI::CheckedTransformer( init_temp_perturbation_map, CLI::ignore_case ) )
+        ->default_val( "spherical-harmonics" )
+        ->group( "Initial Temperature" )
+        ->description( "'noise' or 'spherical-harmonics' / 'sph' perturbation." );
+
+    add_option_with_default(
+        app, "--perturbation-amplitude", parameters.physics_parameters.initial_temperature.perturbation_amplitude )
+        ->group( "Initial Temperature" )
+        ->description( "Fractional amplitude of added noise/spherical harmonic perturbation." );
 
     add_option_with_default(
         app, "--initial-temperature-sph-degree", parameters.physics_parameters.initial_temperature.sph_degree_l )
@@ -645,11 +669,6 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
         app, "--initial-temperature-sph-order", parameters.physics_parameters.initial_temperature.sph_order_m )
         ->group( "Initial Temperature" )
         ->description( "Spherical harmonic order m for initial temperature perturbation." );
-
-    add_option_with_default(
-        app, "--initial-temperature-sph-epsilon", parameters.physics_parameters.initial_temperature.sph_epsilon )
-        ->group( "Initial Temperature" )
-        ->description( "Perturbation amplitude epsilon: T = T_ref + eps * Y_l^m." );
 
     add_option_with_default(
         app, "--initial-temperature-sph-degree-2", parameters.physics_parameters.initial_temperature.sph_degree_l_2 )
@@ -710,7 +729,7 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
         { "ev", EnergySolverType::ENTROPY_VISCOSITY },
     };
 
-    add_option_with_default( app, "--energy-solver", parameters.time_stepping_parameters.energy_solver )
+    add_option_with_default( app, "--energy-solver", parameters.energy_solver_parameters.energy_solver )
         ->transform( CLI::CheckedTransformer( energy_solver_map, CLI::ignore_case ) )
         ->default_val( "ev" )
         ->group( "Time Discretization" )
