@@ -1,5 +1,6 @@
 #pragma once
 
+#include <random>
 #include <string>
 #include <vector>
 
@@ -94,8 +95,52 @@ void initialize_temperature_fields(
 
         // Compute spherical-harmonic coefficients on unit-sphere Q1 nodes.
         grid::Grid3DDataScalar< ScalarType > sph_coeffs;
-        const bool                           has_sph = ( init_temp.sph_degree_l > 0 && init_temp.sph_epsilon != 0.0 );
-        if ( has_sph )
+        // Broadband IC (HyTeG-style): random sum of Y_l^m over l in [min,max], all m.
+        const bool broadband_sph =
+            ( init_temp.sph_degree_max >= 1 && init_temp.sph_degree_max >= init_temp.sph_degree_min &&
+              init_temp.sph_epsilon != 0.0 );
+        bool has_sph = broadband_sph || ( init_temp.sph_degree_l > 0 && init_temp.sph_epsilon != 0.0 );
+        if ( broadband_sph )
+        {
+            const int l_min = std::max( 1, init_temp.sph_degree_min );
+            const int l_max = init_temp.sph_degree_max;
+            logroot << " + eps * broadband SH sum, l in [" << l_min << "," << l_max << "], seed "
+                    << init_temp.sph_random_seed << std::endl;
+            // Draw coefficients once on the host (reproducible), fold each mode into
+            // the device grid; amplitude-normalise by 1/sqrt(#modes).
+            std::mt19937                             rng( init_temp.sph_random_seed );
+            std::uniform_real_distribution< double > dist( -1.0, 1.0 );
+            int                                      nmodes = 0;
+            for ( int l = l_min; l <= l_max; ++l )
+                nmodes += ( 2 * l + 1 );
+            const ScalarType norm =
+                ( nmodes > 0 ) ? ScalarType( 1 ) / std::sqrt( static_cast< ScalarType >( nmodes ) ) : ScalarType( 1 );
+            sph_coeffs = grid::Grid3DDataScalar< ScalarType >(
+                "sph_coeffs_broadband",
+                static_cast< int >( coords_shell.extent( 0 ) ),
+                static_cast< int >( coords_shell.extent( 1 ) ),
+                static_cast< int >( coords_shell.extent( 2 ) ) );
+            for ( int l = l_min; l <= l_max; ++l )
+            {
+                for ( int m = -l; m <= l; ++m )
+                {
+                    const ScalarType c = static_cast< ScalarType >( dist( rng ) ) * norm;
+                    auto             g = shell::spherical_harmonics_coefficients_grid< ScalarType, ScalarType >(
+                        l, m, coords_shell );
+                    auto sc = sph_coeffs;
+                    Kokkos::parallel_for(
+                        "accumulate broadband sph",
+                        Kokkos::MDRangePolicy< Kokkos::Rank< 3 > >(
+                            { 0, 0, 0 },
+                            { static_cast< int >( g.extent( 0 ) ),
+                              static_cast< int >( g.extent( 1 ) ),
+                              static_cast< int >( g.extent( 2 ) ) } ),
+                        KOKKOS_LAMBDA( int sd, int x, int y ) { sc( sd, x, y ) += c * g( sd, x, y ); } );
+                    Kokkos::fence();
+                }
+            }
+        }
+        else if ( has_sph )
         {
             sph_coeffs = shell::spherical_harmonics_coefficients_grid< ScalarType, ScalarType >(
                 init_temp.sph_degree_l, init_temp.sph_order_m, coords_shell );
@@ -132,7 +177,12 @@ void initialize_temperature_fields(
                 coords_radii,
                 T.grid_data(),
                 sph_coeffs,
-                has_sph } );
+                has_sph,
+                // Canonical TALA: start on the adiabat (consistent with the buoyancy
+                // reference) instead of the conductive profile.
+                prm.physics_parameters.tala_adiabat_ic,
+                static_cast< ScalarType >( prm.physics_parameters.dissipation_number ),
+                static_cast< ScalarType >( prm.physics_parameters.adiabat_surface_temperature ) } );
         Kokkos::fence();
         // NOTE: do NOT call send_recv here.  The kernel writes the same value to every
         // subdomain copy of each shared node already; send_recv (SUM) would accumulate
@@ -150,17 +200,31 @@ void initialize_temperature_fields(
             const ScalarType T_min = static_cast< ScalarType >( prm.boundary_parameters.temperature_min );
             const int        nsub  = static_cast< int >( coords_radii.extent( 0 ) );
             const int        nr    = static_cast< int >( coords_radii.extent( 1 ) );
-            T_ref     = grid::Grid2DDataScalar< ScalarType >( "T_ref_conductive", nsub, nr );
+            // Canonical TALA (match HyTeG): reference the buoyancy deviation against the
+            // adiabat T̄(r)=T_ad,s·exp(Di·(r_max−r)) rather than the conductive profile.
+            const bool       adiabatic_ref = prm.physics_parameters.tala_adiabat_reference;
+            const ScalarType Di            = static_cast< ScalarType >( prm.physics_parameters.dissipation_number );
+            const ScalarType T_ad_s        = static_cast< ScalarType >( prm.physics_parameters.adiabat_surface_temperature );
+            T_ref     = grid::Grid2DDataScalar< ScalarType >(
+                adiabatic_ref ? "T_ref_adiabatic" : "T_ref_conductive", nsub, nr );
             auto tref = T_ref;
             auto rad  = coords_radii;
             Kokkos::parallel_for(
-                "T_ref conductive profile",
+                "T_ref reference profile",
                 Kokkos::MDRangePolicy< Kokkos::Rank< 2 > >( { 0, 0 }, { nsub, nr } ),
                 KOKKOS_LAMBDA( const int sd, const int r ) {
                     const ScalarType radius = rad( sd, r );
-                    tref( sd, r )           = ( radius < ScalarType( 1e-15 ) )
-                                                  ? ScalarType( 0 )
-                                                  : ( r_min * r_max / radius - r_min ) / ( r_max - r_min ) + T_min;
+                    if ( adiabatic_ref )
+                    {
+                        // Adiabat: T̄(r) = T_ad,s · exp( Di·(r_max − radius) ).
+                        tref( sd, r ) = T_ad_s * Kokkos::exp( Di * ( r_max - radius ) );
+                    }
+                    else
+                    {
+                        tref( sd, r ) = ( radius < ScalarType( 1e-15 ) )
+                                            ? ScalarType( 0 )
+                                            : ( r_min * r_max / radius - r_min ) / ( r_max - r_min ) + T_min;
+                    }
                 } );
             Kokkos::fence();
         }

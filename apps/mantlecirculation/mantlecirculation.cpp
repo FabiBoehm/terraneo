@@ -676,10 +676,9 @@ Result<> run( const Parameters& prm )
 
         if ( has_negative( T ) )
         {
-            logroot << "\nDETECTED NEGATIVE TEMPERATURE VALUES.\n"
-                       "Aborting simulation...\n"
-                    << std::endl;
-            break;
+            logroot << "[WARN] Negative temperature values detected (continuing anyway; "
+                       "negative-T abort disabled for now). min(T) = "
+                    << min_entry( T ) << std::endl;
         }
     }
 

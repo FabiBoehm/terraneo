@@ -91,6 +91,7 @@ enum class ViscosityLaw
 {
     CONSTANT,
     FRANK_KAMENETSKII,
+    ARRHENIUS,
 };
 
 struct ViscosityParameters
@@ -125,6 +126,16 @@ struct ViscosityParameters
     /// constant viscosity value.
     double reference_viscosity = 1e23;
     double viscosity           = 1.0;
+
+    /// Arrhenius (HyTeG type-3) law parameters. When `law == ARRHENIUS`:
+    ///   eta(T,r) = clamp( exp( E_a·(1/(T+0.25) − 1.45) + D·(r_max−r)/(r_max−r_min) ),
+    ///                     viscosity_min, viscosity_max )
+    /// matching HyTeG src/terraneo/helpers/Viscosity.hpp (activationEnergy E_a,
+    /// depthViscosityFactor D, min/maxVisc bounds). Defaults follow HyTeG.
+    double activation_energy      = 5.0;   // E_a
+    double depth_viscosity_factor = 2.5;   // D
+    double viscosity_min          = 0.005; // nondim lower clamp (HyTeG minVisc)
+    double viscosity_max          = 500.0; // nondim upper clamp (HyTeG maxVisc)
 };
 
 /// Initial temperature distribution.
@@ -167,6 +178,18 @@ struct InitialTemperatureParameters
     /// Relative amplitude of the second harmonic (typical values are O(1); e.g. 5/7 for
     /// the Zhong C3 cubic-symmetry benchmark).
     double sph_factor_2 = 0.0;
+
+    /// Broadband initial perturbation (matches HyTeG's degree 10-25 spectrum approach):
+    /// when sph_degree_max >= max(1, sph_degree_min), the perturbation is a random-
+    /// coefficient sum of Y_l^m over l in [sph_degree_min, sph_degree_max], all orders
+    /// m in [-l, l], amplitude-normalised and scaled by sph_epsilon. Breaks the
+    /// symmetry that a single low-degree mode (e.g. Y_4^0) locks the flow into.
+    /// Takes precedence over the single/double-mode path above when enabled. Set
+    /// sph_degree_max = 0 (default) to keep the discrete single/double-mode behaviour.
+    int          sph_degree_min  = 0;
+    int          sph_degree_max  = 0;
+    /// Fixed RNG seed for the broadband coefficients (reproducible ICs).
+    unsigned int sph_random_seed = 42;
 };
 
 struct PhysicsParameters
@@ -197,6 +220,26 @@ struct PhysicsParameters
 
     bool compressible = false;
 
+    // Canonical King-2010 TALA weighting to match HyTeG. When true: the Stokes
+    // buoyancy carries the reference density (f = Ra·ρ̄·T′·n̂), the shear-heating
+    // source carries 1/ρ̄ ((Di/Ra)·(1/ρ̄)·Φ), and the buoyancy deviation T′ is
+    // taken against the adiabat T̄(r)=T_ad,s·exp(Di·(r_max−r)) rather than the
+    // conductive profile. Default false keeps the legacy ρ̄-free form; ρ̄≡1 for
+    // incompressible runs, so those are unaffected either way.
+    bool rho_weighted_tala = false;
+    // Independent sub-switches (for isolation/debugging). --rho-weighted-tala is a
+    // master that turns all three on (see nondimensionalise()). Set individually to
+    // enable exactly one TALA ingredient:
+    //   tala_rho_buoyancy       : buoyancy Ra·ρ̄·T′·n̂ (+ shear 1/ρ̄) instead of ρ̄-free
+    //   tala_adiabat_reference  : buoyancy deviation T′ taken against the adiabat
+    //   tala_adiabat_ic         : initial T field starts on the adiabat
+    bool tala_rho_buoyancy      = false;
+    bool tala_adiabat_reference = false;
+    bool tala_adiabat_ic        = false;
+    // Nondimensional adiabat surface temperature T_ad,s used to build the adiabatic
+    // reference profile (HyTeG: adiabatSurfaceTemp/(T_cmb−T_surf), e.g. 1600/3900).
+    double adiabat_surface_temperature = 0.41;
+
     double calc_cm_per_year = 3e-4; // from non-dim velocity to cm/a
     double calc_time_Ma     = 1e6;  // from non-dim time to Ma
 
@@ -222,6 +265,24 @@ struct StokesSolverParameters
     int    krylov_max_iterations     = 10;
     double krylov_relative_tolerance = 1e-6;
     double krylov_absolute_tolerance = 1e-12;
+
+    /// Relaxation scale on the Schur (pressure) block of the block-triangular
+    /// preconditioner: effective Ŝ^{-1}_prec = schur_relaxation · Ŝ^{-1}. Analogue of
+    /// HyTeG's Uzawa `relaxParamSchur`. Default 1.0 = unscaled (legacy). The optimal
+    /// value drifts with viscosity contrast → a robustness knob at high contrast.
+    double schur_relaxation = 1.0;
+
+    /// Refresh the fine-level A-block MG smoother (D^-1 + Chebyshev eigenvalue
+    /// bounds) on every viscosity update. Without this the smoother stays tuned to
+    /// the INITIAL viscosity and the MG stalls once a strongly-varying viscosity
+    /// evolves (mirrors HyTeG's refresh-on-viscosity-update). Default on; cheap.
+    bool refresh_viscous_pc = true;
+
+    /// Also coarsen the evolving fine viscosity down the MG hierarchy on each refresh
+    /// (weighted-average restriction, non-GCA) and re-tune ALL levels' smoothers, so
+    /// the coarse operators track the current viscosity. Targets the weak coarse-grid
+    /// correction that caps convergence at very high viscosity contrast. Default off.
+    bool refresh_coarse_viscosity = false;
 
     /// Store the outer FGMRES Krylov basis in single precision while the operator,
     /// preconditioner and orthogonalization stay double. Roughly halves the FGMRES
@@ -360,6 +421,15 @@ inline void nondimensionalise( Parameters& prm )
     auto& mesh     = prm.mesh_parameters;
     auto& boundary = prm.boundary_parameters;
     auto& devel    = prm.devel_parameters;
+
+    // --rho-weighted-tala is a master switch: enable all three TALA sub-ingredients.
+    // (Individual --tala-* flags let us isolate one ingredient without the master.)
+    if ( phys.rho_weighted_tala )
+    {
+        phys.tala_rho_buoyancy      = true;
+        phys.tala_adiabat_reference = true;
+        phys.tala_adiabat_ic        = true;
+    }
     auto& time     = prm.time_stepping_parameters;
 
     // --- Domain ---
@@ -574,6 +644,16 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
     //////////////////////////////
     add_flag_with_default( app, "--compressible", parameters.physics_parameters.compressible );
 
+    // Canonical King-2010 / HyTeG TALA weighting (ρ̄ buoyancy, 1/ρ̄ shear, adiabat reference).
+    // Master switch: turns on all three sub-flags below (see nondimensionalise()).
+    add_flag_with_default( app, "--rho-weighted-tala", parameters.physics_parameters.rho_weighted_tala );
+    // Independent sub-switches for isolation/debugging.
+    add_flag_with_default( app, "--tala-rho-buoyancy", parameters.physics_parameters.tala_rho_buoyancy );
+    add_flag_with_default( app, "--tala-adiabat-reference", parameters.physics_parameters.tala_adiabat_reference );
+    add_flag_with_default( app, "--tala-adiabat-ic", parameters.physics_parameters.tala_adiabat_ic );
+    add_option_with_default(
+        app, "--adiabat-surface-temperature", parameters.physics_parameters.adiabat_surface_temperature );
+
     // Nondimensional-number controls. By default (flag unset) Ra, Pe, Di and the H-number are
     // DERIVED from the dimensional parameters in nondimensionalise(). With
     // --set-nondimensional-numbers the derivation is skipped and the values below are used
@@ -628,6 +708,7 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
     std::map< std::string, ViscosityLaw > viscosity_law_map{
         { "constant", ViscosityLaw::CONSTANT },
         { "frank-kamenetskii", ViscosityLaw::FRANK_KAMENETSKII },
+        { "arrhenius", ViscosityLaw::ARRHENIUS },
     };
 
     add_option_with_default( app, "--viscosity-law", parameters.physics_parameters.viscosity_parameters.law )
@@ -641,6 +722,24 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
         ->group( "Viscosity" )
         ->description( "Base of the Frank-Kamenetskii viscosity law: eta = rmu^(0.5 - T) "
                        "(Zhong et al. 2008). Cold/hot contrast = rmu; rmu = 1 gives constant viscosity." );
+
+    // Arrhenius (HyTeG type-3) law parameters: eta = clamp(exp(E_a*(1/(T+0.25)-1.45)+D*depth), min, max).
+    add_option_with_default(
+        app, "--viscosity-activation-energy", parameters.physics_parameters.viscosity_parameters.activation_energy )
+        ->group( "Viscosity" )
+        ->description( "Arrhenius activation energy E_a (--viscosity-law arrhenius)." );
+    add_option_with_default(
+        app, "--viscosity-depth-factor", parameters.physics_parameters.viscosity_parameters.depth_viscosity_factor )
+        ->group( "Viscosity" )
+        ->description( "Arrhenius linear depth factor D (HyTeG depthViscosityFactor)." );
+    add_option_with_default(
+        app, "--viscosity-min", parameters.physics_parameters.viscosity_parameters.viscosity_min )
+        ->group( "Viscosity" )
+        ->description( "Lower clamp on the (nondim) Arrhenius viscosity (HyTeG minVisc)." );
+    add_option_with_default(
+        app, "--viscosity-max", parameters.physics_parameters.viscosity_parameters.viscosity_max )
+        ->group( "Viscosity" )
+        ->description( "Upper clamp on the (nondim) Arrhenius viscosity (HyTeG maxVisc)." );
 
     ///////////////////////////////
     /// Initial temperature      ///
@@ -695,6 +794,19 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
         ->group( "Initial Temperature" )
         ->description(
             "Weight factor for second spherical harmonic: T += eps * envelope * (Y_l1^m1 + factor_2 * Y_l2^m2)." );
+
+    add_option_with_default(
+        app, "--initial-temperature-sph-degree-min", parameters.physics_parameters.initial_temperature.sph_degree_min )
+        ->group( "Initial Temperature" )
+        ->description( "Broadband IC: lowest spherical-harmonic degree l (enable with --...-sph-degree-max >= 1)." );
+    add_option_with_default(
+        app, "--initial-temperature-sph-degree-max", parameters.physics_parameters.initial_temperature.sph_degree_max )
+        ->group( "Initial Temperature" )
+        ->description( "Broadband IC: highest degree l. Sum of random Y_l^m over [min,max] (HyTeG-style, e.g. 10..25)." );
+    add_option_with_default(
+        app, "--initial-temperature-sph-seed", parameters.physics_parameters.initial_temperature.sph_random_seed )
+        ->group( "Initial Temperature" )
+        ->description( "Fixed RNG seed for the broadband IC coefficients (reproducible)." );
 
     ///////////////////////////
     /// Time discretization ///
@@ -770,6 +882,21 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
     add_option_with_default(
         app, "--stokes-krylov-absolute-tolerance", parameters.stokes_solver_parameters.krylov_absolute_tolerance )
         ->group( "Stokes Solver" );
+    add_option_with_default(
+        app, "--stokes-schur-relaxation", parameters.stokes_solver_parameters.schur_relaxation )
+        ->group( "Stokes Solver" )
+        ->description( "Relaxation scale on the Schur preconditioner (HyTeG Uzawa relaxParamSchur analogue). "
+                       "1.0 = unscaled; tune for strongly-varying viscosity." );
+    add_flag_with_default(
+        app, "--stokes-refresh-viscous-pc", parameters.stokes_solver_parameters.refresh_viscous_pc )
+        ->group( "Stokes Solver" )
+        ->description( "Refresh the A-block MG smoother (D^-1 + Chebyshev bounds) on every viscosity update "
+                       "(needed for strongly-varying/evolving viscosity; on by default)." );
+    add_flag_with_default(
+        app, "--stokes-refresh-coarse-viscosity", parameters.stokes_solver_parameters.refresh_coarse_viscosity )
+        ->group( "Stokes Solver" )
+        ->description( "Also restrict the evolving viscosity to coarse MG levels and re-tune all smoothers "
+                       "(non-GCA coarse-op refresh; for very high viscosity contrast)." );
     add_flag_with_default(
         app, "--stokes-float-krylov-basis", parameters.stokes_solver_parameters.float_krylov_basis )
         ->group( "Stokes Solver" );

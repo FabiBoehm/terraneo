@@ -278,7 +278,10 @@ class ShearHeatingKerngen
         atomically_add_local_wedge_scalar_coefficients( dst_, s, x_cell, y_cell, r_cell, dst );
     }
 
+  public:
     /// @brief Assemble the lumped mass row ∫ N_i into @p out (Replace + additive).
+    /// Public because it hosts an extended KOKKOS_LAMBDA, which nvcc forbids in
+    /// private/protected member functions.
     void assemble_lumped_mass_( DstVectorType& out )
     {
         assign( out, 0 );

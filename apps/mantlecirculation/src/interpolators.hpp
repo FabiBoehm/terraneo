@@ -104,6 +104,12 @@ struct ConductiveProfileInterpolator
     Grid4DDataScalar< ScalarType > data_;
     Grid3DDataScalar< ScalarType > sph_coeffs_;
     bool                           has_sph_;
+    // Canonical TALA (match HyTeG): start on the adiabat T̄(r)=T_ad,s·exp(Di·(r_max−r))
+    // rather than the conductive profile, so the background is consistent with the
+    // buoyancy reference (Tdev(t=0) = perturbation). Off by default.
+    bool                           adiabatic_ = false;
+    ScalarType                     Di_        = ScalarType( 0 );
+    ScalarType                     T_ad_s_    = ScalarType( 0 );
 
     KOKKOS_INLINE_FUNCTION
     void operator()( const int sd, const int x, const int y, const int r ) const
@@ -118,9 +124,10 @@ struct ConductiveProfileInterpolator
             return;
         }
 
-        const ScalarType T_cond = ( r_min_ * r_max_ / radius - r_min_ ) / ( r_max_ - r_min_ ) + T_min_;
+        const ScalarType T_bg = adiabatic_ ? ( T_ad_s_ * Kokkos::exp( Di_ * ( r_max_ - radius ) ) )
+                                           : ( ( r_min_ * r_max_ / radius - r_min_ ) / ( r_max_ - r_min_ ) + T_min_ );
 
-        ScalarType T_val = T_cond;
+        ScalarType T_val = T_bg;
         if ( has_sph_ )
         {
             T_val += eps_ * sph_coeffs_( sd, x, y );
@@ -136,19 +143,28 @@ struct RHSVelocityInterpolator
     Grid2DDataScalar< ScalarType > radii_;
     Grid4DDataVec< ScalarType, 3 > data_u_;
     Grid4DDataScalar< ScalarType > data_T_;
+    // Reference density ρ̄(r). Used only when weight_by_rho_ is true (canonical
+    // King-2010 TALA buoyancy f = Ra·ρ̄·T′·n̂). ρ̄≡1 for incompressible runs, so
+    // the multiply is harmless there regardless of the flag.
+    Grid4DDataScalar< ScalarType > rho_;
     ScalarType                     rayleigh_number_;
+    bool                           weight_by_rho_ = false;
 
     RHSVelocityInterpolator(
         const Grid3DDataVec< ScalarType, 3 >& grid,
         const Grid2DDataScalar< ScalarType >& radii,
         const Grid4DDataVec< ScalarType, 3 >& data_u,
         const Grid4DDataScalar< ScalarType >& data_T,
-        ScalarType                            rayleigh_number )
+        const Grid4DDataScalar< ScalarType >& rho,
+        ScalarType                            rayleigh_number,
+        bool                                  weight_by_rho )
     : grid_( grid )
     , radii_( radii )
     , data_u_( data_u )
     , data_T_( data_T )
+    , rho_( rho )
     , rayleigh_number_( rayleigh_number )
+    , weight_by_rho_( weight_by_rho )
     {}
 
     KOKKOS_INLINE_FUNCTION
@@ -158,10 +174,15 @@ struct RHSVelocityInterpolator
 
         const auto n = coords.normalized();
 
+        // Canonical TALA buoyancy carries the reference density ρ̄(r); the legacy
+        // ρ̄-free form uses 1. (ρ̄≡1 for incompressible, so this is a no-op there.)
+        const ScalarType rho =
+            weight_by_rho_ ? rho_( local_subdomain_id, x, y, r ) : ScalarType( 1 );
+
         for ( int d = 0; d < 3; d++ )
         {
             data_u_( local_subdomain_id, x, y, r, d ) =
-                rayleigh_number_ * n( d ) * data_T_( local_subdomain_id, x, y, r );
+                rayleigh_number_ * rho * n( d ) * data_T_( local_subdomain_id, x, y, r );
         }
     }
 };
@@ -224,6 +245,17 @@ struct ViscosityFromTemperature
     ScalarType                     rmu_;
     Grid4DDataScalar< ScalarType > eta_;
     Grid4DDataScalar< ScalarType > T_;
+    // Radial reference profile eta_ref(r), multiplied into the T-dependent factor.
+    // All-ones when no radial profile is configured, so the product is a no-op then.
+    Grid2DDataScalar< ScalarType > eta_ref_;
+    // Radial coordinate + shell bounds for the Arrhenius depth term (unused otherwise).
+    Grid2DDataScalar< ScalarType > radii_;
+    ScalarType                     r_min_             = ScalarType( 0 );
+    ScalarType                     r_max_             = ScalarType( 0 );
+    ScalarType                     activation_energy_ = ScalarType( 0 );
+    ScalarType                     depth_factor_      = ScalarType( 0 );
+    ScalarType                     visc_min_          = ScalarType( 0 );
+    ScalarType                     visc_max_          = ScalarType( 0 );
 
     KOKKOS_INLINE_FUNCTION
     void operator()( const int id, const int x, const int y, const int r ) const
@@ -233,10 +265,25 @@ struct ViscosityFromTemperature
         switch ( law_ )
         {
         case ViscosityLaw::FRANK_KAMENETSKII:
-            // Zhong et al. (2008) form: mu = rmu^(0.5 - T).
-            // Total viscosity contrast (cold/hot) = rmu.
-            eta_( id, x, y, r ) = Kokkos::pow( rmu_, ScalarType( 0.5 ) - T_val );
+            // Zhong et al. (2008) form: mu = rmu^(0.5 - T), times the radial
+            // reference profile eta_ref(r).  Total cold/hot contrast = rmu * (eta_ref range).
+            eta_( id, x, y, r ) = Kokkos::pow( rmu_, ScalarType( 0.5 ) - T_val ) * eta_ref_( id, r );
             break;
+        case ViscosityLaw::ARRHENIUS:
+        {
+            // HyTeG type-3 law (src/terraneo/helpers/Viscosity.hpp):
+            //   eta = exp( E_a·(1/(T+0.25) − 1.45) + D·(r_max−r)/(r_max−r_min) )
+            // clamped to [visc_min, visc_max]. Depth term carries the radial dependence,
+            // so no separate eta_ref profile is needed (eta_ref_ ≡ 1 for a pure Arrhenius run).
+            const ScalarType radius     = radii_( id, r );
+            const ScalarType depth_norm = ( r_max_ - radius ) / ( r_max_ - r_min_ );
+            ScalarType       eta        = Kokkos::exp(
+                activation_energy_ * ( ScalarType( 1 ) / ( T_val + ScalarType( 0.25 ) ) - ScalarType( 1.45 ) ) +
+                depth_factor_ * depth_norm );
+            eta                 = Kokkos::clamp( eta, visc_min_, visc_max_ );
+            eta_( id, x, y, r ) = eta * eta_ref_( id, r );
+            break;
+        }
         case ViscosityLaw::CONSTANT:
         default:
             // eta is already set, nothing to do.

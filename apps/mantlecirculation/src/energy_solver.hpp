@@ -914,14 +914,19 @@ class EVSolver : public EnergySolver< ScalarType >
                 // internal heating (constant) as the base field
                 linalg::assign( heating_source_, gamma );
 
-                // + (Di/Ra) · Φ_shear  (Φ projected to nodes)
+                // + (Di/Ra) · Φ_shear  (Φ projected to nodes). ρ̄-FREE, matching HyTeG:
+                // its shear-heating scaling is (Pe·Di)/(C_p·Ra) with no density factor,
+                // and the shear operator takes viscosity, not ρ̄. (An earlier 1/ρ̄
+                // weighting here broke the ⟨Φ⟩=⟨W⟩ balance and caused a slow runaway.)
                 shear_op_->assemble_phi_nodal( velocity_, heating_scratch_ );
                 const ScalarType visc_scale = ( Ra != ScalarType( 0 ) ) ? Di / Ra : ScalarType( 0 );
                 linalg::lincomb(
                     heating_source_, { ScalarType( 1 ), visc_scale }, { heating_source_, heating_scratch_ } );
 
-                // + S_adiabatic = −Di·(u·n)·T   (rising material cools; α is in
-                //   Di and ρ̄ is omitted to match the ρ̄-free buoyancy Ra·δT·n)
+                // + S_adiabatic = −Di·(u·n)·T   (rising material cools; α is in Di).
+                //   This term is ρ̄-free in BOTH formulations: canonical King divides
+                //   the energy equation by ρ̄c̄ₚ, so ρ̄ cancels on the adiabatic term
+                //   (unlike buoyancy and shear, which keep ρ̄ / 1/ρ̄). Full T is used.
                 Kokkos::parallel_for(
                     "ev_adiabatic_source",
                     local_domain_md_range_policy_nodes( *domain_ ),

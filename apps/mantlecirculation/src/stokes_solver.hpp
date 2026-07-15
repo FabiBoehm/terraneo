@@ -263,14 +263,14 @@ class StokesContext
 
         // ---------------- Viscosity ----------------
         // Radial profile (constant or CSV-driven), then projected into Q1 on every level.
-        std::vector< grid::Grid2DDataScalar< ScalarType > > radial_viscosity_profile;
-        radial_viscosity_profile.reserve( num_levels_ );
+        radial_viscosity_profile_.clear();
+        radial_viscosity_profile_.reserve( num_levels_ );
         if ( !prm_.physics_parameters.viscosity_parameters.radial_profile_enabled )
         {
             logroot << "Using constant viscosity profile." << std::endl;
             for ( int level = 0; level < num_levels_; level++ )
             {
-                radial_viscosity_profile.push_back(
+                radial_viscosity_profile_.push_back(
                     shell::interpolate_constant_radial_profile( coords_radii_[level], 1.0 ) );
             }
         }
@@ -279,7 +279,7 @@ class StokesContext
             logroot << "Using radially varying viscosity profile." << std::endl;
             for ( int level = 0; level < num_levels_; level++ )
             {
-                radial_viscosity_profile.push_back( shell::interpolate_radial_profile_into_subdomains_from_csv(
+                radial_viscosity_profile_.push_back( shell::interpolate_radial_profile_into_subdomains_from_csv(
                     prm_.physics_parameters.viscosity_parameters.radial_profile_csv_filename,
                     prm_.physics_parameters.viscosity_parameters.radial_profile_radii_key,
                     prm_.physics_parameters.viscosity_parameters.radial_profile_viscosity_key,
@@ -300,8 +300,29 @@ class StokesContext
             // GCA still needs an approximation of viscosity on coarse grids
             // for the weighting of the mass matrix.
             geophysics::viscosity::RadialProfileViscosityInterpolator viscosity_interpolator(
-                radial_viscosity_profile[level], prm_.physics_parameters.viscosity_parameters.viscosity );
+                radial_viscosity_profile_[level], prm_.physics_parameters.viscosity_parameters.viscosity );
             viscosity_interpolator.interpolate( eta_[level].grid_data() );
+        }
+
+        // Scalar restrictions to coarsen the (evolving, T-dependent) viscosity down the
+        // MG hierarchy on refresh. RestrictionScalar is a functional (adjoint-prolongation)
+        // restriction, so on a coefficient it sums; the 1/R(1) normalisation makes it a
+        // weighted average.  Only used when --stokes-refresh-coarse-viscosity is set.
+        eta_restr_.resize( num_levels_ );
+        eta_restr_inv_norm_.reserve( num_levels_ );
+        for ( int level = 0; level < num_levels_; level++ )
+            eta_restr_inv_norm_.emplace_back(
+                "eta_restr_norm_" + std::to_string( level ), *domains_[level], ownership_mask_[level] );
+        for ( int level = 0; level < num_levels_ - 1; level++ )
+        {
+            if ( domains_[level]->comm() == MPI_COMM_NULL )
+                continue;
+            eta_restr_[level] =
+                std::make_unique< RestrictionScalar >( *domains_[level], linalg::OperatorApplyMode::Replace );
+            VectorQ1Scalar< ScalarType > ones( "eta_restr_ones", *domains_[level + 1], ownership_mask_[level + 1] );
+            linalg::assign( ones, ScalarType( 1 ) );
+            linalg::apply( *eta_restr_[level], ones, eta_restr_inv_norm_[level] );
+            linalg::invert_entries( eta_restr_inv_norm_[level] );
         }
 
         // ---------------- GCA element selection ----------------
@@ -614,6 +635,15 @@ class StokesContext
             linalg::assign( tmp, 1.0 );
             linalg::apply( *pmass_, tmp, lumped_diagonal_pmass_ );
         }
+        // Schur relaxation (HyTeG Uzawa relaxParamSchur analogue): the DiagonalSolver
+        // applies D^{-1}, so to get the effective preconditioner relax · Ŝ^{-1} we scale
+        // the lumped diagonal D by 1/relax before it is inverted.
+        const ScalarType schur_relax = static_cast< ScalarType >( prm_.stokes_solver_parameters.schur_relaxation );
+        if ( schur_relax > ScalarType( 0 ) && schur_relax != ScalarType( 1 ) )
+        {
+            linalg::lincomb(
+                lumped_diagonal_pmass_, { ScalarType( 1 ) / schur_relax }, { lumped_diagonal_pmass_ } );
+        }
         inv_lumped_pmass_ = std::make_unique< PrecSchur >( lumped_diagonal_pmass_ );
 
         // ---------------- Outer block-triangular preconditioner ----------------
@@ -758,8 +788,76 @@ class StokesContext
                 prm_.physics_parameters.viscosity_parameters.law,
                 prm_.physics_parameters.viscosity_parameters.rmu,
                 eta_[velocity_level_].grid_data(),
-                T.grid_data() } );
+                T.grid_data(),
+                radial_viscosity_profile_[velocity_level_],
+                coords_radii_[velocity_level_],
+                static_cast< ScalarType >( prm_.mesh_parameters.radius_min ),
+                static_cast< ScalarType >( prm_.mesh_parameters.radius_max ),
+                static_cast< ScalarType >( prm_.physics_parameters.viscosity_parameters.activation_energy ),
+                static_cast< ScalarType >( prm_.physics_parameters.viscosity_parameters.depth_viscosity_factor ),
+                static_cast< ScalarType >( prm_.physics_parameters.viscosity_parameters.viscosity_min ),
+                static_cast< ScalarType >( prm_.physics_parameters.viscosity_parameters.viscosity_max ) } );
         Kokkos::fence();
+
+        // The fine viscous operator is matrix-free and now sees the new eta, but the
+        // A-block MG smoother's cached D^-1 and Chebyshev eigenvalue interval were
+        // estimated from the *initial* viscosity. Left stale, the smoother is
+        // mistuned after the viscosity evolves and the MG stalls at high contrast
+        // (HyTeG refreshes these on every viscosity update). Refresh the fine level.
+        if ( prm_.stokes_solver_parameters.refresh_viscous_pc )
+            refresh_viscous_smoother();
+    }
+
+    /// Refresh the A-block MG viscous preconditioner after a viscosity update.
+    /// Always refreshes the fine-level D^-1 + Chebyshev bounds. When
+    /// --stokes-refresh-coarse-viscosity is set, it ALSO restricts the (evolving,
+    /// T-dependent) fine viscosity down the MG hierarchy (weighted average, non-GCA)
+    /// so the coarse operators track the current viscosity, and re-tunes every level's
+    /// smoother — the fix for the weak coarse correction at high viscosity contrast.
+    void refresh_viscous_smoother()
+    {
+        if ( smoothers_.empty() )
+            return;
+
+        const bool coarse = prm_.stokes_solver_parameters.refresh_coarse_viscosity;
+
+        // 1) Coarsen the fine viscosity down the hierarchy: eta_[L] = R(eta_[L+1]) / R(1).
+        if ( coarse )
+        {
+            for ( int level = num_levels_ - 2; level >= 0; --level )
+            {
+                if ( domains_[level]->comm() == MPI_COMM_NULL || !eta_restr_[level] )
+                    continue;
+                linalg::apply( *eta_restr_[level], eta_[level + 1], eta_[level] ); // R(eta)
+                auto ed = eta_[level].grid_data();
+                auto nd = eta_restr_inv_norm_[level].grid_data();
+                Kokkos::parallel_for(
+                    "eta_coarsen_average",
+                    grid::shell::local_domain_md_range_policy_nodes( *domains_[level] ),
+                    KOKKOS_LAMBDA( const int id, const int x, const int y, const int r ) {
+                        ed( id, x, y, r ) *= nd( id, x, y, r );
+                    } );
+                Kokkos::fence();
+            }
+        }
+
+        // 2) Recompute D^-1 and re-tune the Chebyshev smoother. Fine level always;
+        //    all levels when the coarse viscosity was refreshed above.
+        const int first = coarse ? 0 : ( num_levels_ - 1 );
+        for ( int level = first; level < num_levels_; ++level )
+        {
+            if ( domains_[level]->comm() == MPI_COMM_NULL )
+                continue;
+            VectorQ1Vec< ScalarType > tmp( "invdiag_refresh_tmp", *domains_[level], ownership_mask_[level] );
+            linalg::assign( tmp, ScalarType( 1 ) );
+            auto& A = ( level == num_levels_ - 1 ) ? K_->block_11() : A_c_[level];
+            A.set_diagonal( true );
+            linalg::apply( A, tmp, inverse_diagonals_[level] );
+            A.set_diagonal( false );
+            linalg::invert_entries( inverse_diagonals_[level] );
+            linalg::assign( smoothers_[level].get_inverse_diagonal(), inverse_diagonals_[level] );
+            smoothers_[level].refresh_max_eigenvalue_estimate_in_next_solve();
+        }
     }
 
     /// Solve  K · u = f(T_for_buoyancy)  with the configured FGMRES + MG/Schur
@@ -780,7 +878,9 @@ class StokesContext
                 coords_radii_[velocity_level_],
                 triangular_prec_tmp_.block_1().grid_data(),
                 T_for_buoyancy.grid_data(),
-                prm_.physics_parameters.rayleigh_number ) );
+                rho_.grid_data(),
+                prm_.physics_parameters.rayleigh_number,
+                prm_.physics_parameters.tala_rho_buoyancy ) );
 
         linalg::apply( *M_, triangular_prec_tmp_.block_1(), stok_vecs_["f"].block_1() );
 
@@ -858,6 +958,9 @@ class StokesContext
     // destroyed later, so things that other members hold by-reference (eta_,
     // stok_vecs_, *_tmp_*) must come first.
     std::vector< linalg::VectorQ1Scalar< ScalarType > >            eta_;
+    // Per-level radial reference viscosity profile eta_ref(r); retained so the
+    // T-dependent viscosity update can multiply it in each step.
+    std::vector< grid::Grid2DDataScalar< ScalarType > >           radial_viscosity_profile_;
     linalg::VectorQ1Scalar< ScalarType >                           rho_;
     linalg::VectorQ1Scalar< ScalarType >                           GCAElements_;
     std::map< std::string, linalg::VectorQ1IsoQ2Q1< ScalarType > > stok_vecs_;
@@ -881,6 +984,12 @@ class StokesContext
     std::vector< Prolongation >          P_;
     std::vector< Restriction >           R_;
     std::unique_ptr< RestrictionScalar > R_scalar_;
+    // Scalar-restriction hierarchy for coarsening the T-dependent viscosity down the
+    // MG levels on refresh (non-GCA path). eta_restr_[L] restricts level L+1 -> L;
+    // eta_restr_inv_norm_[L] = 1/R_L(1) turns the functional restriction into a
+    // weighted average (coarse eta = R(eta)/R(1)).
+    std::vector< std::unique_ptr< RestrictionScalar > > eta_restr_;
+    std::vector< VectorQ1Scalar< ScalarType > >         eta_restr_inv_norm_;
     std::vector< Smoother >              smoothers_;
     std::unique_ptr< CoarseGridSolver >  coarse_grid_solver_;
 

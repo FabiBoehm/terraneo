@@ -1,0 +1,78 @@
+## ============================================================================
+## MT256 PRODUCTION — canonical (HyTeG-aligned) compressible TALA
+##   Lin-2022 radial profile x Frank-Kamenetskii rmu=100, Ra=1e6, Di=0.5.
+##   rho-weighted buoyancy + adiabat reference/IC + rho-free energy terms.
+##   Fine + coarse viscous-PC refresh (handles the high-contrast Lin x FK field).
+## Mesh/subdomain levels passed via the job script (mesh-max 8 = MT256).
+## ============================================================================
+
+## --- Nondimensional numbers (verbatim, Earth-like point) ---
+set-nondimensional-numbers=true
+rayleigh-number=1e6
+dissipation-number=0.5
+compressible=true
+diffusivity=1
+
+## --- Geometry (aspect ratio 0.55) ---
+radius-min=1.22
+radius-max=2.22
+
+## --- Temperature BCs (nondimensional) ---
+temperature-bc-value-cmb=1.0
+temperature-bc-value-surface=0.0
+
+## --- Canonical TALA (match HyTeG): rho-bar buoyancy, adiabat reference + IC,
+##     rho-free shear/adiabatic/diffusion. Adiabat surface temp = 1600/3900. ---
+rho-weighted-tala=true
+adiabat-surface-temperature=0.41
+
+## --- Viscosity: FK T-dependence x Lin-2022 radial profile (~1e3-1e4 contrast) ---
+viscosity-law="frank-kamenetskii"
+viscosity-rmu=100
+viscosity-radial-profile=true
+viscosity-radial-profile-csv-filename="/home/hpc/iwia/iwia054h/terraneo/data/radialprofiles/ViscosityProfile_Lin_et_al_2022.csv"
+viscosity-radial-profile-radii-key="radius_normalized_1p22_2p22"
+viscosity-radial-profile-value-key="viscosity_scaled_by_min"
+
+## --- Boundary conditions ---
+velocity-bc-cmb="freeslip"
+velocity-bc-surface="noslip"
+
+## --- Initial temperature: adiabat (rho-weighted-tala) + a REDUCED broadband SH
+##     spectrum (degrees 2-8) to seed a 3-D planform while keeping the IC build fast. ---
+initial-temperature-profile="conductive"
+initial-temperature-sph-epsilon=0.01
+initial-temperature-sph-degree-min=2
+initial-temperature-sph-degree-max=8
+initial-temperature-sph-seed=7
+
+## --- Time stepping ---
+dt-scaling=0.5
+t-end=1e6
+max-timesteps=1000000
+energy-solver="ev"
+energy-substeps=1
+picard-iterations=2
+
+## --- Stokes solver: 30 Krylov iters. Cheap, but sufficient because the coarse
+##     viscous-PC refresh steepens the MG descent (reached ~3e-4 by iter 30). ---
+stokes-krylov-restart=30
+stokes-krylov-max-iterations=30
+stokes-krylov-relative-tolerance=1e-06
+stokes-krylov-absolute-tolerance=1e-12
+stokes-viscous-pc-num-vcycles=1
+stokes-viscous-pc-cheby-order=2
+stokes-viscous-pc-num-smoothing-steps-prepost=3
+stokes-viscous-pc-num-power-iterations=10
+stokes-viscous-pc-agglom-factors=[]
+stokes-gca=0
+
+## --- Viscous-PC refresh on every viscosity update (THE fix for high contrast):
+##     fine level (default on) + whole-hierarchy coarse refresh. ---
+stokes-refresh-viscous-pc=true
+stokes-refresh-coarse-viscosity=true
+
+## --- Output / checkpoint ---
+outdir-overwrite=1
+output-frequency=100
+ev-dump-nu-h=false
