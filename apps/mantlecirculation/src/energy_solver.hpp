@@ -271,7 +271,7 @@ class SUPGSolver : public EnergySolver< ScalarType >
             linalg::invert_entries( diag_ );
         }
 
-        for ( int i = 0; i < prm_.time_stepping_parameters.energy_substeps; ++i )
+        for ( int i = 0; i < prm_.energy_solver_parameters.energy_substeps; ++i )
         {
             util::logroot << "Solving energy (SUPG, substep " << i << ") ..." << std::endl;
 
@@ -868,7 +868,7 @@ class EVSolver : public EnergySolver< ScalarType >
                                      static_cast< ScalarType >( prm_.physics_parameters.internal_heating_rate ) :
                                      ScalarType( 0 );
 
-        for ( int i = 0; i < prm_.time_stepping_parameters.energy_substeps; ++i )
+        for ( int i = 0; i < prm_.energy_solver_parameters.energy_substeps; ++i )
         {
             util::logroot << "Solving energy (EV, substep " << i << ") ..." << std::endl;
 
@@ -1128,7 +1128,7 @@ class FCTSolver : public EnergySolver< ScalarType >
         {
             util::Timer timer_fct_substeps( "fct_substeps" );
 
-            for ( int i = 0; i < prm_.time_stepping_parameters.energy_substeps; ++i )
+            for ( int i = 0; i < prm_.energy_solver_parameters.energy_substeps; ++i )
             {
                 util::logroot << "Solving energy (FCT, substep " << i << ") ..." << std::endl;
 

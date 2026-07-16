@@ -698,12 +698,12 @@ Result<> run( const Parameters& prm )
                 {
                     out << "timestep,sim_time,Nu_top_Q1,Nu_top_FV,V_rms\n";
                 }
-                const double t_end_of_step = simulated_time + prm.time_stepping_parameters.energy_substeps * dt;
+                const double t_end_of_step = simulated_time + prm.energy_solver_parameters.energy_substeps * dt;
                 out << timestep << "," << t_end_of_step << "," << Nu_top << "," << Nu_top_fv << "," << V_rms << "\n";
             }
         }
 
-        simulated_time += prm.time_stepping_parameters.energy_substeps * dt;
+        simulated_time += prm.energy_solver_parameters.energy_substeps * dt;
         simulated_time_Ma = simulated_time * prm.physics_parameters.calc_time_Ma;
 
         logroot << "Simulated time: " << simulated_time_Ma << " Ma\n";
