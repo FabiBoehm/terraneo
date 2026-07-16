@@ -283,6 +283,7 @@ struct EnergySolverParameters
     int    krylov_max_iterations     = 100;
     double krylov_relative_tolerance = 1e-6;
     double krylov_absolute_tolerance = 1e-12;
+    int    energy_substeps           = 1;
 
     /// Store the energy FGMRES Krylov basis in single precision (operator stays
     /// double). The energy advection-diffusion solve is well-conditioned and runs
@@ -315,7 +316,6 @@ struct TimeSteppingParameters
     int timestep_initial      = 0;
     int initial_dt_ramp_steps = 20;
 
-    int energy_substeps   = 1;
     int picard_iterations = 1;
 };
 
@@ -714,27 +714,11 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
     add_option_with_default( app, "--initial-ramp-steps", parameters.time_stepping_parameters.initial_dt_ramp_steps )
         ->group( "Time Discretization" )
         ->description( "Amount of ramp-up timesteps at the beginning of the run." );
-    add_option_with_default( app, "--energy-substeps", parameters.time_stepping_parameters.energy_substeps )
-        ->group( "Time Discretization" );
     add_option_with_default( app, "--picard-iterations", parameters.time_stepping_parameters.picard_iterations )
         ->group( "Time Discretization" )
         ->description( "Number of Picard (fixed-point) iterations per timestep. "
                        "Each iteration re-solves Stokes and energy from the same starting temperature. "
                        "Default: 1 (no iteration, current behavior)." );
-
-    std::map< std::string, EnergySolverType > energy_solver_map{
-        { "fct", EnergySolverType::FCT },
-        { "supg", EnergySolverType::SUPG },
-        { "entropy_viscosity", EnergySolverType::ENTROPY_VISCOSITY },
-        { "ev", EnergySolverType::ENTROPY_VISCOSITY },
-    };
-
-    add_option_with_default( app, "--energy-solver", parameters.energy_solver_parameters.energy_solver )
-        ->transform( CLI::CheckedTransformer( energy_solver_map, CLI::ignore_case ) )
-        ->default_val( "ev" )
-        ->group( "Time Discretization" )
-        ->description( "'fct': Explicit FCT advection-diffusion (default). "
-                       "'supg': Implicit SUPG advection-diffusion with FGMRES solver." );
 
     /////////////////////
     /// Stokes solver ///
@@ -810,6 +794,20 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
     /// Energy solver ///
     /////////////////////
 
+    std::map< std::string, EnergySolverType > energy_solver_map{
+        { "fct", EnergySolverType::FCT },
+        { "supg", EnergySolverType::SUPG },
+        { "entropy_viscosity", EnergySolverType::ENTROPY_VISCOSITY },
+        { "ev", EnergySolverType::ENTROPY_VISCOSITY },
+    };
+
+    add_option_with_default( app, "--energy-solver", parameters.energy_solver_parameters.energy_solver )
+        ->transform( CLI::CheckedTransformer( energy_solver_map, CLI::ignore_case ) )
+        ->default_val( "ev" )
+        ->group( "Energy Solver" )
+        ->description( "'fct': Explicit FCT advection-diffusion (default). "
+                       "'supg': Implicit SUPG advection-diffusion with FGMRES solver." );
+
     add_option_with_default( app, "--energy-krylov-restart", parameters.energy_solver_parameters.krylov_restart )
         ->group( "Energy Solver" );
     add_flag_with_default(
@@ -824,7 +822,8 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
     add_option_with_default(
         app, "--energy-krylov-absolute-tolerance", parameters.energy_solver_parameters.krylov_absolute_tolerance )
         ->group( "Energy Solver" );
-
+    add_option_with_default( app, "--energy-substeps", parameters.energy_solver_parameters.energy_substeps )
+        ->group( "Energy Solver" );
     add_option_with_default( app, "--ev-alpha-max", parameters.energy_solver_parameters.ev_alpha_max )
         ->group( "Energy Solver" );
     add_option_with_default( app, "--ev-alpha-E", parameters.energy_solver_parameters.ev_alpha_E )
