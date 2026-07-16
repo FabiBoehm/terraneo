@@ -3,10 +3,10 @@
 #include <string>
 #include <variant>
 
+#include "util/cli11_config.hpp" // Custom formatter
 #include "util/cli11_helper.hpp"
 #include "util/info.hpp"
 #include "util/result.hpp"
-
 namespace terra::mantlecirculation {
 
 using ScalarType = double;
@@ -344,6 +344,9 @@ struct DeveloperOptions
 {
     bool set_nondimensional_numbers = false;
     bool output_dimensional         = true;
+
+    // Some logging and parameter options
+    bool print_parameter_descriptions = true;
 };
 
 struct Parameters
@@ -438,6 +441,8 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
     using util::add_flag_with_default;
     using util::add_option_with_default;
 
+    app.config_formatter( std::make_shared< ConfigGroupedNoDescriptions >() );
+
     // Allow config files
     app.set_config( "--config" );
 
@@ -476,9 +481,9 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
         app,
         "--write-config-and-exit",
         parameters.output_config_file,
-        "Writes a config file with the passed (or default arguments) to the desired location to be then modified and passed. E.g., '--write-config-and-exit my-config.toml'.\n"
-        "IMPORTANT: THIS OPTION MUST BE REMOVED IN THE GENERATED CONFIG OR ELSE YOU WILL OVERWRITE IT AGAIN" )
-        ->group( "General" );
+        "Writes a config file with the passed (or default arguments) to the desired"
+        "location to be then modified and passed." 
+        "E.g., '--write-config-and-exit my-config.toml'.\n");
 
     ///////////////////////
     /// Domain and mesh ///
@@ -561,14 +566,20 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
     //////////////////////////////
     /// Geophysical parameters ///
     //////////////////////////////
-    add_flag_with_default( app, "--compressible", parameters.physics_parameters.compressible );
-    add_flag_with_default( app, "--internal-heating-enabled", parameters.physics_parameters.internal_heating );
-    add_option_with_default( app, "--internal-heating-rate", parameters.physics_parameters.internal_heating_rate );
-
-    add_option_with_default( app, "--reference-density", parameters.physics_parameters.reference_density );
-    add_option_with_default( app, "--thermal-expansivity", parameters.physics_parameters.thermal_expansivity );
-    add_option_with_default( app, "--thermal-conductivity", parameters.physics_parameters.thermal_conductivity );
-    add_option_with_default( app, "--specific-heat-capacity", parameters.physics_parameters.specific_heat_capacity );
+    add_flag_with_default( app, "--compressible", parameters.physics_parameters.compressible )
+        ->group( "Physical Parameters" );
+    add_flag_with_default( app, "--internal-heating-enabled", parameters.physics_parameters.internal_heating )
+        ->group( "Physical Parameters" );
+    add_option_with_default( app, "--internal-heating-rate", parameters.physics_parameters.internal_heating_rate )
+        ->group( "Physical Parameters" );
+    add_option_with_default( app, "--reference-density", parameters.physics_parameters.reference_density )
+        ->group( "Physical Parameters" );
+    add_option_with_default( app, "--thermal-expansivity", parameters.physics_parameters.thermal_expansivity )
+        ->group( "Physical Parameters" );
+    add_option_with_default( app, "--thermal-conductivity", parameters.physics_parameters.thermal_conductivity )
+        ->group( "Physical Parameters" );
+    add_option_with_default( app, "--specific-heat-capacity", parameters.physics_parameters.specific_heat_capacity )
+        ->group( "Physical Parameters" );
 
     // Viscosity parameters
     add_option_with_default(
@@ -932,7 +943,7 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
     {
         util::logroot << "Writing config file to " << parameters.output_config_file << " and exiting." << std::endl;
         std::ofstream config_file( parameters.output_config_file );
-        config_file << app.config_to_str( true, true );
+        config_file << app.config_to_str( true, parameters.devel_parameters.print_parameter_descriptions );
     }
 
     return { parameters };
