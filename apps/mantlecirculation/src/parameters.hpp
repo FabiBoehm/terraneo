@@ -25,10 +25,11 @@ struct MeshParameters
     double radius_cmb_m       = 3480000.0;
     double mantle_thickness_m = 2891000.0;
 
-    // Anisotropic refinement (Path B.1): radial diamond level is set to
-    // (refinement_level_mesh_* + radial_extra_levels) at every MG level, so the
-    // full hierarchy stays consistent (both axes halve per step). lat_sdr/rad_sdr
-    // override refinement_level_subdomains per axis when >= 0.
+    // Anisotropic mesh refinement
+    // Radial diamond level is set to (refinement_level_mesh_* + radial_extra_levels)
+    // at every MG level, so the full hierarchy stays consistent
+    // (both axes halve per step).
+    // lat_sdr/rad_sdr >= 0 overrides refinement_level_subdomains per axis.
     int radial_extra_levels = -1;
     int lat_sdr             = -1;
     int rad_sdr             = -1;
@@ -168,11 +169,9 @@ struct InitialTemperatureParameters
     /// Optional second spherical harmonic for combined modes (e.g. cubic symmetry
     /// T_perturb = Y_4^0 + (5/7) * Y_4^4).  Set sph_degree_l_2 > 0 to enable.
     /// The total perturbation is perturbation_amplitude * (Y_l1^m1 + sph_factor_2 * Y_l2^m2).
-    int sph_degree_l_2 = 0;
-    int sph_order_m_2  = 0;
-    /// Relative amplitude of the second harmonic (typical values are O(1); e.g. 5/7 for
-    /// the Zhong C3 cubic-symmetry benchmark).
-    double sph_factor_2 = 0.0;
+    int    sph_degree_l_2 = 0;
+    int    sph_order_m_2  = 0;
+    double sph_factor_2   = 0.0;
 };
 
 struct PhysicsParameters
@@ -339,13 +338,17 @@ struct IOParameters
     bool no_radial_profiles = false;
 };
 
-// This struct holds options that might be useful for debugging, benchmarking, etc., but are not intended for 'standard' use.
+// This struct holds options that might be useful for debugging, benchmarking, etc.,
+// but are not intended to appear at the surface for 'standard' use.
 struct DeveloperOptions
 {
     bool set_nondimensional_numbers = false;
     bool output_dimensional         = true;
 
     // Some logging and parameter options
+    bool extended_parameters = false;          // If false, hide some of the parameters that
+                                               // are not relevant for 'standard' use.
+    bool extended_diagnostics         = false; // Extended logging of solver diagnostics, etc.
     bool print_parameter_descriptions = true;
 };
 
@@ -501,37 +504,41 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
     add_option_with_default( app, "--radius-cmb", parameters.mesh_parameters.radius_cmb_m )->group( "Domain" );
     add_option_with_default( app, "--radius-surface", parameters.mesh_parameters.radius_surface_m )->group( "Domain" );
 
-    add_option_with_default( app, "--radial-extra-levels", parameters.mesh_parameters.radial_extra_levels )
-        ->group( "Domain" )
-        ->description( "Per-MG-level offset added to the radial diamond refinement level relative to the "
-                       "lateral one. Radial level at each MG level L becomes L + radial_extra_levels, so the "
-                       "hierarchy coarsens uniformly in both axes. Default 0 = isotropic." );
-    add_option_with_default( app, "--lat-sdr", parameters.mesh_parameters.lat_sdr )
-        ->group( "Domain" )
-        ->description(
-            "Override the lateral subdomain refinement level (otherwise --refinement-level-subdomains is used)." );
-    add_option_with_default( app, "--rad-sdr", parameters.mesh_parameters.rad_sdr )
-        ->group( "Domain" )
-        ->description(
-            "Override the radial subdomain refinement level (otherwise --refinement-level-subdomains is used)." );
+    if ( parameters.devel_parameters.extended_parameters )
+    {
+        add_option_with_default( app, "--radial-extra-levels", parameters.mesh_parameters.radial_extra_levels )
+            ->group( "Anisotropic mesh refinement" )
+            ->description( "Per-MG-level offset added to the radial diamond refinement level relative to the "
+                           "lateral one. Radial level at each MG level L becomes L + radial_extra_levels, so the "
+                           "hierarchy coarsens uniformly in both axes. Default -1." );
+        add_option_with_default( app, "--lat-sdr", parameters.mesh_parameters.lat_sdr )
+            ->group( "Anisotropic mesh refinement" )
+            ->description(
+                "Override the lateral subdomain refinement level (otherwise --refinement-level-subdomains is used)." );
+        add_option_with_default( app, "--rad-sdr", parameters.mesh_parameters.rad_sdr )
+            ->group( "Anisotropic mesh refinement" )
+            ->description(
+                "Override the radial subdomain refinement level (otherwise --refinement-level-subdomains is used)." );
 
-    std::map< std::string, MeshParameters::RadialDistribution > radial_distribution_map{
-        { "uniform", MeshParameters::RadialDistribution::UNIFORM },
-        { "tanh-both", MeshParameters::RadialDistribution::TANH_BOTH },
-        { "tanh-cmb", MeshParameters::RadialDistribution::TANH_CMB },
-        { "tanh-surface", MeshParameters::RadialDistribution::TANH_SURFACE },
-    };
-    add_option_with_default( app, "--radial-distribution", parameters.mesh_parameters.radial_distribution )
-        ->transform( CLI::CheckedTransformer( radial_distribution_map, CLI::ignore_case ) )
-        ->group( "Domain" )
-        ->description( "Radial shell distribution: 'uniform' (equispaced, default), 'tanh-both' "
-                       "(cluster at both CMB and surface), 'tanh-cmb' (cluster at CMB only), "
-                       "'tanh-surface' (cluster at surface only).  Cluster strength is set by "
-                       "--radial-cluster-k." );
-    add_option_with_default( app, "--radial-cluster-k", parameters.mesh_parameters.radial_cluster_k )
-        ->group( "Domain" )
-        ->description( "Cluster-strength k for the tanh-based radial distributions.  k <= 0 "
-                       "collapses to uniform; k ~ 1 mild clustering, k ~ 2 strong clustering." );
+        std::map< std::string, MeshParameters::RadialDistribution > radial_distribution_map{
+            { "uniform", MeshParameters::RadialDistribution::UNIFORM },
+            { "tanh-both", MeshParameters::RadialDistribution::TANH_BOTH },
+            { "tanh-cmb", MeshParameters::RadialDistribution::TANH_CMB },
+            { "tanh-surface", MeshParameters::RadialDistribution::TANH_SURFACE },
+        };
+        add_option_with_default( app, "--radial-distribution", parameters.mesh_parameters.radial_distribution )
+            ->transform( CLI::CheckedTransformer( radial_distribution_map, CLI::ignore_case ) )
+            ->default_val( "uniform" )
+            ->group( "Anisotropic mesh refinement" )
+            ->description( "Radial shell distribution: 'uniform' (equispaced, default), 'tanh-both' "
+                           "(cluster at both CMB and surface), 'tanh-cmb' (cluster at CMB only), "
+                           "'tanh-surface' (cluster at surface only).  Cluster strength is set by "
+                           "--radial-cluster-k." );
+        add_option_with_default( app, "--radial-cluster-k", parameters.mesh_parameters.radial_cluster_k )
+            ->group( "Anisotropic mesh refinement" )
+            ->description( "Cluster-strength k for the tanh-based radial distributions.  k <= 0 "
+                           "collapses to uniform; k ~ 1 mild clustering, k ~ 2 strong clustering." );
+    }
 
     ///////////////////////////
     /// Boundary conditions ///
@@ -785,21 +792,25 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
         "--stokes-viscous-pc-num-power-iterations",
         parameters.stokes_solver_parameters.viscous_pc_num_power_iterations )
         ->group( "Stokes Solver" );
-    add_option_with_default( app, "--stokes-gca", parameters.stokes_solver_parameters.gca )
-        ->group( "Stokes Solver" )
-        ->description( "Galerkin coarse-grid approximation mode for the viscous-block multigrid "
-                       "preconditioner. 0 = disabled (default; coarse operators rediscretised), "
-                       "1 = full GCA (more robust at variable viscosity), "
-                       "2 = adaptive GCA (memory-saving, slightly less robust)." );
-    app.add_option(
-           "--stokes-viscous-pc-agglom-factors",
-           parameters.stokes_solver_parameters.viscous_pc_agglom_factors,
-           "Per-descent agglomeration factors for the viscous MG preconditioner. "
-           "Space-separated list of length num_mg_levels-1. Example: \"2 2 1 1\". "
-           "Empty (default) = classical MG with all levels on MPI_COMM_WORLD." )
-        ->group( "Stokes Solver" )
-        ->expected( 0, -1 )
-        ->default_val( parameters.stokes_solver_parameters.viscous_pc_agglom_factors );
+
+    if ( parameters.devel_parameters.extended_parameters )
+    {
+        add_option_with_default( app, "--stokes-gca", parameters.stokes_solver_parameters.gca )
+            ->group( "Stokes Solver" )
+            ->description( "Galerkin coarse-grid approximation mode for the viscous-block multigrid "
+                           "preconditioner. 0 = disabled (default; coarse operators rediscretised), "
+                           "1 = full GCA (more robust at variable viscosity), "
+                           "2 = adaptive GCA (memory-saving, slightly less robust)." );
+        app.add_option(
+               "--stokes-viscous-pc-agglom-factors",
+               parameters.stokes_solver_parameters.viscous_pc_agglom_factors,
+               "Per-descent agglomeration factors for the viscous MG preconditioner. "
+               "Space-separated list of length num_mg_levels-1. Example: \"2 2 1 1\". "
+               "Empty (default) = classical MG with all levels on MPI_COMM_WORLD." )
+            ->group( "Stokes Solver" )
+            ->expected( 0, -1 )
+            ->default_val( parameters.stokes_solver_parameters.viscous_pc_agglom_factors );
+    }
 
     /////////////////////
     /// Energy solver ///
