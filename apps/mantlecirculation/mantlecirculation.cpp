@@ -529,6 +529,7 @@ Result<> run( const Parameters& prm )
     logroot << "Starting time stepping!" << std::endl;
 
     // Compute Nusselt at timestep 0 (before any FCT steps) for diagnostics.
+    if ( prm.devel_parameters.extended_diagnostics )
     {
         const auto Nu_top_0 = compute_nusselt(
             ( *domains[velocity_level] ),
@@ -661,7 +662,7 @@ Result<> run( const Parameters& prm )
 
         // Nusselt number: computed and appended to <outdir>/nu.csv at the
         // same cadence as XDMF output (output_frequency).
-        if ( write_output )
+        if ( write_output && prm.devel_parameters.extended_diagnostics )
         {
             const auto Nu_top = compute_nusselt(
                 ( *domains[velocity_level] ),

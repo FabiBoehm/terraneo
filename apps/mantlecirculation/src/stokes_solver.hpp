@@ -468,21 +468,28 @@ class StokesContext
 
             // Diagnostic: estimate Chebyshev spectrum per level (mirrors the
             // estimate Chebyshev does internally on first solve).
-            for ( int level = 0; level < num_levels_; level++ )
+            if ( prm_.devel_parameters.extended_diagnostics )
             {
-                if ( domains_[level]->comm() == MPI_COMM_NULL )
-                    continue;
+                for ( int level = 0; level < num_levels_; level++ )
+                {
+                    if ( domains_[level]->comm() == MPI_COMM_NULL )
+                        continue;
 
-                VectorQ1Vec< ScalarType > tmp_pi_it( "cheby_est_tmpIt", *domains_[level], ownership_mask_[level] );
-                VectorQ1Vec< ScalarType > tmp_pi_aux( "cheby_est_tmpAux", *domains_[level], ownership_mask_[level] );
-                const auto                log_level = prm_.mesh_parameters.refinement_level_mesh_min + level;
-                auto&                     A_lvl     = ( level == num_levels_ - 1 ) ? K_->block_11() : A_c_[level];
-                linalg::DiagonallyScaledOperator< Viscous > inv_diag_A( A_lvl, inverse_diagonals_[level] );
-                const double                                lmax_est = linalg::solvers::power_iteration(
-                    inv_diag_A, tmp_pi_it, tmp_pi_aux, prm_.stokes_solver_parameters.viscous_pc_num_power_iterations );
-                logroot << "[Cheby estimate] level " << log_level << ": lambda_max(D^-1 A_viscous) ~ " << lmax_est
-                        << "  => lambda_max_cheby = " << 1.5 * lmax_est << ", lambda_min_cheby = " << 0.1 * lmax_est
-                        << std::endl;
+                    VectorQ1Vec< ScalarType > tmp_pi_it( "cheby_est_tmpIt", *domains_[level], ownership_mask_[level] );
+                    VectorQ1Vec< ScalarType > tmp_pi_aux(
+                        "cheby_est_tmpAux", *domains_[level], ownership_mask_[level] );
+                    const auto log_level = prm_.mesh_parameters.refinement_level_mesh_min + level;
+                    auto&      A_lvl     = ( level == num_levels_ - 1 ) ? K_->block_11() : A_c_[level];
+                    linalg::DiagonallyScaledOperator< Viscous > inv_diag_A( A_lvl, inverse_diagonals_[level] );
+                    const double                                lmax_est = linalg::solvers::power_iteration(
+                        inv_diag_A,
+                        tmp_pi_it,
+                        tmp_pi_aux,
+                        prm_.stokes_solver_parameters.viscous_pc_num_power_iterations );
+                    logroot << "[Cheby estimate] level " << log_level << ": lambda_max(D^-1 A_viscous) ~ " << lmax_est
+                            << "  => lambda_max_cheby = " << 1.5 * lmax_est << ", lambda_min_cheby = " << 0.1 * lmax_est
+                            << std::endl;
+                }
             }
 
             // ---------------- Coarse grid solver ----------------
