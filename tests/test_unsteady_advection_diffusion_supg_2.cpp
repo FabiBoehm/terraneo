@@ -431,7 +431,7 @@ SweepResult test( int level, ScalarType kappa, const std::shared_ptr< util::Tabl
 
     if ( xdmf )
     {
-        xdmf_output.write();
+        xdmf_output.write( 0 );
     }
 
     util::logroot << "Timestep " << 0 << std::endl;
@@ -606,7 +606,7 @@ SweepResult test( int level, ScalarType kappa, const std::shared_ptr< util::Tabl
 
         if ( xdmf )
         {
-            xdmf_output.write();
+            xdmf_output.write( ts );
         }
     }
 

@@ -159,7 +159,7 @@ void test( int level, const std::shared_ptr< util::Table >& table )
 
     if ( vtk )
     {
-        xdmf_output.write();
+        xdmf_output.write( 0 );
     }
 
     for ( int ts = 1; ts < timesteps; ++ts )
@@ -174,7 +174,7 @@ void test( int level, const std::shared_ptr< util::Table >& table )
 
         if ( vtk )
         {
-            xdmf_output.write();
+            xdmf_output.write( ts );
         }
     }
 }

@@ -286,7 +286,7 @@ void test( const int level )
     constexpr int vtk_interval = 10;
     io::XDMFOutput xdmf( "test_supg_rotation_out", domain, coords_shell, coords_radii );
     xdmf.add( T.grid_data() );
-    xdmf.write(); // initial condition
+    xdmf.write( 0 ); // initial condition
 
     util::logroot << "Running SUPG rotation test"
                   << "  level=" << level << "  dt=" << dt
@@ -364,7 +364,7 @@ void test( const int level )
         t_max_worst                 = std::max( t_max_worst, t_max_step );
 
         if ( ts % vtk_interval == 0 )
-            xdmf.write();
+            xdmf.write( ts );
 
         // Entropy-viscosity diagnostics (ν_h was already computed above).
         if ( ts % vtk_interval == 0 )
@@ -380,7 +380,7 @@ void test( const int level )
                       << "  T_min=" << t_min_step << "  T_max=" << t_max_step << "\n";
     }
 
-    xdmf.write(); // final state
+    xdmf.write( ts ); // final state
 
     // After one full revolution, T should equal T_ref. The final L2 error is the
     // headline accuracy metric; t_{min,max}_worst capture the worst over/undershoot.
