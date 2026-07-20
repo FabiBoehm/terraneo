@@ -1097,8 +1097,7 @@ class FCTSolver : public EnergySolver< ScalarType >
         if ( prm_.time_stepping_parameters.picard_iterations > 1 )
             Kokkos::deep_copy( T_fct_backup_.grid_data(), T_fct_.grid_data() );
     }
-    void snapshot_for_picard() override { Kokkos::deep_copy( T_fct_backup_.grid_data(), T_fct_.grid_data() ); }
-
+   
     void restore_for_picard() override { Kokkos::deep_copy( T_fct_.grid_data(), T_fct_backup_.grid_data() ); }
 
     ScalarType compute_dt( const int timestep ) override
