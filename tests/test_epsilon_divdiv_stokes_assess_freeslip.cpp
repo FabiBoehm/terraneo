@@ -787,7 +787,7 @@ test( int    min_level,
         xdmf_vel.add( solution.block_1().grid_data() );
         xdmf_vel.add( error.block_1().grid_data() );
 
-        xdmf_vel.write();
+        xdmf_vel.write( 0 );
 
         util::logroot << "Writing XDMF output (pressure level) ...\n";
 
@@ -801,7 +801,7 @@ test( int    min_level,
         xdmf_pre.add( solution.block_2().grid_data() );
         xdmf_pre.add( error.block_2().grid_data() );
 
-        xdmf_pre.write();
+        xdmf_pre.write( 0 );
 
         util::logroot << "XDMF output written.\n";
     }

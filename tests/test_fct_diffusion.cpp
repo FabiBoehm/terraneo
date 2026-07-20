@@ -179,7 +179,7 @@ void test( const int level )
         const ScalarType err = compute_error( domain, T.grid_data(), cell_centers.grid_data(), r_min, r_max );
         util::logroot << "  ts=" << ts << "  t=" << t << "  rel-L2 err=" << err << "\n";
         fv::hex::l2_project_fv_to_fe( T_fe, T, domain, coords_shell, coords_radii, tmps_fe );
-        xdmf.write();
+        xdmf.write( ts );
     };
 
     write_output( 0 );

@@ -197,7 +197,7 @@ double test( int level, const std::shared_ptr< util::Table >& table )
         xdmf.add( u.grid_data() );
         xdmf.add( solution.grid_data() );
         xdmf.add( error.grid_data() );
-        xdmf.write();
+        xdmf.write( 0 );
     }
 
     table->add_row(

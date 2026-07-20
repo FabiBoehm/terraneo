@@ -147,7 +147,7 @@ int main( int argc, char** argv )
             terra::grid::shell::local_domain_md_range_policy_nodes( domain ),
             SomeVecInterpolator( subdomain_shell_coords, subdomain_radii, data_vec.grid_data(), 0.1 * i ) );
 
-        xdmf.write();
+        xdmf.write( i );
     }
 
     return 0;

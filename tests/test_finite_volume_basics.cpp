@@ -66,7 +66,7 @@ void test( int level )
 
     io::XDMFOutput xdmf( "test_finite_volume_basics_out", domain, coords_shell, coords_radii );
     xdmf.add( u_fe.grid_data() );
-    xdmf.write();
+    xdmf.write( 0 );
 }
 
 int main( int argc, char** argv )

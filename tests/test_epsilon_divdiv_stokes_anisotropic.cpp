@@ -746,7 +746,7 @@ test( double kmax,
     xdmf.add( k.grid_data() );
     xdmf.add( u.block_1().grid_data() );
     xdmf.add( solution.block_1().grid_data() );
-    //xdmf.write();
+    //xdmf.write( 0 );
 
     terra::linalg::trafo::cartesian_to_normal_tangential_in_place< ScalarType, ScalarType >(
         u.block_1(), coords_shell[velocity_level], boundary_mask_data[velocity_level], CMB );

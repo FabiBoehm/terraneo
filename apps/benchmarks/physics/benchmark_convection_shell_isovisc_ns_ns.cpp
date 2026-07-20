@@ -515,7 +515,7 @@ void run( const Parameters& prm, const std::shared_ptr< util::Table >& table )
 
     // Time stepping
 
-    xdmf_output.write();
+    xdmf_output.write( 0 );
 
     auto shell_idx         = terra::grid::shell::subdomain_shell_idx( domains[velocity_level] );
     auto num_global_shells = static_cast< int >( domains[velocity_level].domain_info().radii().size() );
@@ -662,7 +662,7 @@ void run( const Parameters& prm, const std::shared_ptr< util::Table >& table )
                 std::cout << "Writing XDMF output and radial profiles ..." << std::endl;
             }
 
-            xdmf_output.write();
+            xdmf_output.write( timestep );
             profiles = shell::radial_profiles_to_table(
                 shell::radial_profiles( T, shell_idx, num_global_shells ),
                 domains[velocity_level].domain_info().radii() );

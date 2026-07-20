@@ -520,7 +520,7 @@ T test(
         xdmf.add( solution.grid_data() );
         xdmf.add( error.grid_data() );
         xdmf.add( k.grid_data() );
-        xdmf.write();
+        xdmf.write( 0 );
     }
 
     table->add_row(
