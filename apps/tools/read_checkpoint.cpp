@@ -187,7 +187,7 @@ int main( int argc, char** argv )
             }
         }
 
-        xdmf.write();
+        xdmf.write( 0 );
     }
     logroot << "\nBye :)" << std::endl;
 
