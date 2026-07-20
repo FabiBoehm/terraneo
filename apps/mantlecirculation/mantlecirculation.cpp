@@ -424,7 +424,7 @@ Result<> run( const Parameters& prm )
     // fv_cell_centers is consumed only by the FCT advection solver after
     // initialization; for SUPG/EV it is dead weight (a 3-component FV field,
     // ~0.5 GB/GCD at production scale). Release it for the non-FCT solvers.
-    if ( prm.time_stepping_parameters.energy_solver != EnergySolverType::FCT )
+    if ( prm.energy_solver_parameters.energy_solver != EnergySolverType::FCT )
     {
         fv_cell_centers = linalg::VectorFVVec< ScalarType, 3 >();
     }
