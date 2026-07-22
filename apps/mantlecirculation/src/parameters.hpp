@@ -231,7 +231,7 @@ struct StokesSolverParameters
     /// Store the outer FGMRES Krylov basis in single precision while the operator,
     /// preconditioner and orthogonalization stay double. Roughly halves the FGMRES
     /// workspace memory; convergence is unaffected (the operator never sees float).
-    bool   float_krylov_basis        = false;
+    bool float_krylov_basis = false;
 
     /// Precision of the velocity-block multigrid V-cycle preconditioner (see MGPrecision).
     MGPrecision mg_precision = MGPrecision::DOUBLE;
@@ -287,7 +287,7 @@ struct EnergySolverParameters
     /// Store the energy FGMRES Krylov basis in single precision (operator stays
     /// double). The energy advection-diffusion solve is well-conditioned and runs
     /// fine in reduced precision; this trims the energy FGMRES workspace.
-    bool   float_krylov_basis        = false;
+    bool float_krylov_basis = false;
 
     /// Entropy-viscosity stabilization parameters (only used when
     /// `energy_solver == ENTROPY_VISCOSITY`).  Defaults match ASPECT.
@@ -346,9 +346,9 @@ struct DeveloperOptions
     bool output_dimensional         = true;
 
     // Some logging and parameter options
-    bool extended_parameters = false;          // If false, hide some of the parameters that
-                                               // are not relevant for 'standard' use.
-    bool extended_diagnostics         = false; // Extended logging of solver diagnostics, etc.
+    bool extended_parameters = false;         // If false, hide some of the parameters that
+                                              // are not relevant for 'standard' use.
+    bool extended_diagnostics         = true; // Extended logging of solver diagnostics, memory footprint, etc.
     bool print_parameter_descriptions = true;
 };
 
@@ -485,8 +485,8 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
         "--write-config-and-exit",
         parameters.output_config_file,
         "Writes a config file with the passed (or default arguments) to the desired"
-        "location to be then modified and passed." 
-        "E.g., '--write-config-and-exit my-config.toml'.\n");
+        "location to be then modified and passed."
+        "E.g., '--write-config-and-exit my-config.toml'.\n" );
 
     ///////////////////////
     /// Domain and mesh ///
@@ -746,11 +746,10 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
     // of this function, before the option defaults below are captured).
     add_flag_with_default( app, "--low-mem", low_mem )
         ->group( "Stokes Solver" )
-        ->description(
-            "Low-memory solver preset. Equivalent to --stokes-float-krylov-basis "
-            "--energy-float-krylov-basis --stokes-krylov-restart 5 --energy-krylov-restart 5 "
-            "--stokes-viscous-pc-num-smoothing-steps-prepost 1. Individual flags passed "
-            "explicitly override the corresponding preset value." );
+        ->description( "Low-memory solver preset. Equivalent to --stokes-float-krylov-basis "
+                       "--energy-float-krylov-basis --stokes-krylov-restart 5 --energy-krylov-restart 5 "
+                       "--stokes-viscous-pc-num-smoothing-steps-prepost 1. Individual flags passed "
+                       "explicitly override the corresponding preset value." );
 
     add_option_with_default( app, "--stokes-krylov-restart", parameters.stokes_solver_parameters.krylov_restart )
         ->group( "Stokes Solver" );
@@ -763,8 +762,7 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
     add_option_with_default(
         app, "--stokes-krylov-absolute-tolerance", parameters.stokes_solver_parameters.krylov_absolute_tolerance )
         ->group( "Stokes Solver" );
-    add_flag_with_default(
-        app, "--stokes-float-krylov-basis", parameters.stokes_solver_parameters.float_krylov_basis )
+    add_flag_with_default( app, "--stokes-float-krylov-basis", parameters.stokes_solver_parameters.float_krylov_basis )
         ->group( "Stokes Solver" );
     static const std::map< std::string, MGPrecision > mg_precision_map{
         { "double", MGPrecision::DOUBLE },
@@ -832,8 +830,7 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
 
     add_option_with_default( app, "--energy-krylov-restart", parameters.energy_solver_parameters.krylov_restart )
         ->group( "Energy Solver" );
-    add_flag_with_default(
-        app, "--energy-float-krylov-basis", parameters.energy_solver_parameters.float_krylov_basis )
+    add_flag_with_default( app, "--energy-float-krylov-basis", parameters.energy_solver_parameters.float_krylov_basis )
         ->group( "Energy Solver" );
     add_option_with_default(
         app, "--energy-krylov-max-iterations", parameters.energy_solver_parameters.krylov_max_iterations )

@@ -41,9 +41,9 @@
 #include "mpi/mpi.hpp"
 #include "shell/spherical_harmonics.hpp"
 #include "src/build_radii.hpp"
-#include "src/hbm_probe.hpp"
 #include "src/diagnostics.hpp"
 #include "src/energy_solver.hpp"
+#include "src/hbm_probe.hpp"
 #include "src/interpolators.hpp"
 #include "src/io.hpp"
 #include "src/parameters.hpp"
@@ -227,7 +227,9 @@ Result<> run( const Parameters& prm )
     }
 
     // ---- Stokes solver context: viscosity hierarchy, GCA, MG, Schur, FGMRES.
-    log_hbm( "before StokesContext (domains + grids only)" );
+    if ( prm.devel_parameters.extended_diagnostics )
+        log_hbm( "before StokesContext (domains + grids only)" );
+
     StokesContext< ScalarType > stokes(
         domains, coords_shell, coords_radii, ownership_mask_data, boundary_mask_data, bcs, agglom, prm, table );
 
@@ -362,7 +364,8 @@ Result<> run( const Parameters& prm )
 
     stokes.solve( Tdev, prm.physics_parameters.compressible, /*log_convergence=*/true );
 
-    log_hbm( "after first Stokes solve (peak)" );
+    if ( prm.devel_parameters.extended_diagnostics )
+        log_hbm( "after first Stokes solve (peak)" );
 
     ScalarType simulated_time    = ScalarType( 0 );
     ScalarType simulated_time_Ma = ScalarType( 0 );
@@ -711,6 +714,10 @@ Result<> run( const Parameters& prm )
         logroot << "  Stopping at " << prm.time_stepping_parameters.t_end_Ma << " Ma, "
                 << std::round( simulated_time_Ma / prm.time_stepping_parameters.t_end_Ma * 100.0 * 10.0 ) / 10.0
                 << "% done.\n";
+
+        // Memory footprint
+        if ( prm.devel_parameters.extended_diagnostics )
+            log_hbm( "after timestep " + std::to_string( timestep ) );
         logroot << std::endl;
 
         timer_timestep.stop();

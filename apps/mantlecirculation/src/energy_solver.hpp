@@ -398,7 +398,9 @@ class EVSolver : public EnergySolver< ScalarType >
         }
 
         util::logroot << "Setting up entropy-viscosity (EV) energy solver ..." << std::endl;
-        log_hbm( "EV: after Q1 scalar fields (T_prev/rhs/lap/M_lumped/backups/g/tmp/q/diag)" );
+
+        if ( prm_.devel_parameters.extended_diagnostics )
+            log_hbm( "EV: after Q1 scalar fields (T_prev/rhs/lap/M_lumped/backups/g/tmp/q/diag)" );
 
         // Per-wedge ν_h field: extents (#subdomains, N-1, N-1, N_r-1, num_wedges).
         const auto num_sub = static_cast< long long >( domain_->subdomains().size() );
@@ -447,7 +449,8 @@ class EVSolver : public EnergySolver< ScalarType >
         // (a single physics parameter), so we use the constant-coefficient
         // overload of the ∇·(ν ∇·) operator — no per-wedge Grid5D κ field is
         // stored — giving the standard ∫ κ ∇φ_i · ∇φ_j with additive halo exchange.
-        log_hbm( "EV: + nu_h_wedge (1 Grid5D per-wedge field; kappa is a scalar)" );
+        if ( prm_.devel_parameters.extended_diagnostics )
+            log_hbm( "EV: + nu_h_wedge (1 Grid5D per-wedge field; kappa is a scalar)" );
         A_kappa_ = std::make_unique< EVDiffOp >(
             *domain_,
             coords_shell_,
@@ -1097,7 +1100,7 @@ class FCTSolver : public EnergySolver< ScalarType >
         if ( prm_.time_stepping_parameters.picard_iterations > 1 )
             Kokkos::deep_copy( T_fct_backup_.grid_data(), T_fct_.grid_data() );
     }
-   
+
     void restore_for_picard() override { Kokkos::deep_copy( T_fct_.grid_data(), T_fct_backup_.grid_data() ); }
 
     ScalarType compute_dt( const int timestep ) override
