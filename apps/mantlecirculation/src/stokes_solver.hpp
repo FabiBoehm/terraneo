@@ -662,7 +662,8 @@ class StokesContext
         // estimate's transient temps do not coincide with this (the largest) allocation.
         //   double path: 2*restart+4 full-precision vectors.
         //   float-basis path: 3 full-precision scratch (r/w aliased, v, z) + 2*restart+1 basis.
-        log_hbm( "stokes: before FGMRES workspace" );
+        if ( prm_.devel_parameters.extended_diagnostics )
+            log_hbm( "stokes: before FGMRES workspace" );
         if ( use_float_basis_ )
         {
             constexpr int kNumStokesWork = 3; // FGMRESLowMem aliases r/w
@@ -702,7 +703,8 @@ class StokesContext
                     ownership_mask_[pressure_level_] );
             }
         }
-        log_hbm( "stokes: after FGMRES workspace (delta = Krylov basis+scratch)" );
+        if ( prm_.devel_parameters.extended_diagnostics )
+            log_hbm( "stokes: after FGMRES workspace (delta = Krylov basis+scratch)" );
 
         const linalg::solvers::FGMRESOptions< ScalarType > stokes_fgmres_opts{
             .restart                     = prm_.stokes_solver_parameters.krylov_restart,
@@ -722,7 +724,8 @@ class StokesContext
             stokes_fgmres_double_->set_tag( "stokes_fgmres" );
         }
 
-        log_hbm( "stokes: ctor end (delta = MG hierarchy + operators + coarse + preconditioner)" );
+        if ( prm_.devel_parameters.extended_diagnostics )
+            log_hbm( "stokes: ctor end (delta = MG hierarchy + operators + coarse + preconditioner)" );
     }
 
     // Public accessors needed by the rest of the app.
