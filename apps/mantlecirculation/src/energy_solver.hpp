@@ -867,9 +867,10 @@ class EVSolver : public EnergySolver< ScalarType >
             linalg::invert_entries( diag_ );
         }
 
-        const ScalarType gamma = prm_.physics_parameters.internal_heating ?
-                                     static_cast< ScalarType >( prm_.physics_parameters.internal_heating_rate ) :
-                                     ScalarType( 0 );
+        const ScalarType gamma =
+            prm_.physics_parameters.internal_heating ?
+                static_cast< ScalarType >( prm_.physics_parameters.h_number / prm_.physics_parameters.cp_profile ) :
+                ScalarType( 0 );
 
         for ( int i = 0; i < prm_.energy_solver_parameters.energy_substeps; ++i )
         {
@@ -1139,7 +1140,8 @@ class FCTSolver : public EnergySolver< ScalarType >
                     util::Timer timer_fct_source_step( "fct_explicit_step_updating_source_term" );
                     if ( prm_.physics_parameters.internal_heating )
                     {
-                        linalg::assign( T_source_, prm_.physics_parameters.internal_heating_rate );
+                        linalg::assign(
+                            T_source_, prm_.physics_parameters.h_number / prm_.physics_parameters.cp_profile );
                     }
                     timer_fct_source_step.stop();
 
