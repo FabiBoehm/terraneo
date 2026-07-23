@@ -197,8 +197,13 @@ struct PhysicsParameters
     double specific_heat_capacity = 1230;
     double grueneisen_parameter   = 1.1;
 
+    // Parameter profiles -- to be done
+    double density_profile = 1.0;
+    double alpha_profile   = 1.0;
+    double cp_profile      = 1.0;
+
     bool   internal_heating      = false;
-    double internal_heating_rate = 1.0;
+    double internal_heating_rate = 3e-12;
 
     bool compressible = false;
 
