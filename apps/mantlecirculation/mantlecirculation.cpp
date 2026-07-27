@@ -197,13 +197,13 @@ Result<> run( const Parameters& prm )
             << num_dofs_velocity / world_size << ", " << num_dofs_pressure / world_size << ")" << std::endl;
 
     // Logging nondimensional numbers
-    logroot << "\n----------Simulation parameters-----------"
-               "\nRayleigh number: "
-            << prm.physics_parameters.rayleigh_number
-            << "\nCharacteristic velocity: " << prm.physics_parameters.characteristic_velocity
-            << "\nThermal diffusivity: " << prm.physics_parameters.thermal_diffusivity_dim
-            << "\n------------------------------------------\n"
-            << std::endl;
+    logroot << "\n----------Simulation parameters-----------" << std::endl;
+    logroot << "Rayleigh number: " << prm.physics_parameters.rayleigh_number << std::endl;
+    logroot << "Peclet number: " << prm.physics_parameters.peclet_number << std::endl;
+    logroot << "Thermal diffusivity: " << prm.physics_parameters.thermal_diffusivity_dim << std::endl;
+    if ( !prm.devel_parameters.nondimensional_input )
+        logroot << "Characteristic velocity: " << prm.physics_parameters.characteristic_velocity << std::endl;
+    logroot << "------------------------------------------\n" << std::endl;
 
     // Setting up Stokes velocity boundary conditions.
     //
