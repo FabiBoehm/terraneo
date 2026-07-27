@@ -5,6 +5,18 @@
 
 #include "cli11_wrapper.hpp"
 
+// print boolean params as true/false instead of 1/0
+auto handle_bool_str = []( const CLI::Option* opt, const std::string& val ) -> std::string {
+    if ( opt->get_items_expected_max() == 0 )
+    {
+        if ( val == "0" )
+            return "false";
+        if ( val == "1" )
+            return "true";
+    }
+    return val;
+};
+
 class ConfigGroupedNoDescriptions : public CLI::ConfigBase
 {
   public:
@@ -59,7 +71,7 @@ class ConfigGroupedNoDescriptions : public CLI::ConfigBase
             const CLI::results_t& vals = opt->results();
             if ( vals.empty() )
             {
-                out << opt->get_default_str();
+                out << handle_bool_str( opt, opt->get_default_str() );
             }
             else
             {
@@ -67,7 +79,7 @@ class ConfigGroupedNoDescriptions : public CLI::ConfigBase
                 {
                     if ( i )
                         out << " ";
-                    out << vals[i];
+                    out << handle_bool_str( opt, vals[i] );
                 }
             }
             out << "\n";
