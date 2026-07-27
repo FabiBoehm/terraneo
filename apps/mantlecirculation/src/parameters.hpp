@@ -474,13 +474,13 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
     using util::add_flag_with_default;
     using util::add_option_with_default;
 
-    // Minimal pre-parse to learn about --extended-parameters
+    // Minimal pre-parse to learn about --extended-parameters and --low-mem
     CLI::App pre{ "pre-parse" };
     add_flag_with_default( pre, "--extended-parameters", parameters.devel_parameters.extended_parameters )->group( "" );
+    add_flag_with_default( pre, "--low-mem", parameters.stokes_solver_parameters.low_mem )->group( "" );
     pre.set_config( "--config" );
     pre.set_help_flag( "" );  //disable help-flag, so real app handles --help
     pre.allow_extras( true ); // ignore unrecognized command-line args
-    pre.parse( argc, argv );
 
     try
     {
@@ -489,6 +489,15 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
     catch ( const CLI::ParseError& e )
     {
         return { "CLI parse error" };
+    }
+
+    // Set new defaults for low-memory mode
+    if ( parameters.stokes_solver_parameters.low_mem )
+    {
+        parameters.stokes_solver_parameters.krylov_restart                         = 5;
+        parameters.energy_solver_parameters.krylov_restart                         = 5;
+        parameters.stokes_solver_parameters.viscous_pc_num_smoothing_steps_prepost = 1;
+        //float_krylov_basis parameter is set in regular parse, does not appear in parameter file.
     }
 
     // Regular parse
