@@ -349,16 +349,14 @@ struct IOParameters
     bool no_radial_profiles = false;
 };
 
-// This struct holds options that might be useful for debugging, benchmarking, etc.,
-// but are not intended to appear at the surface for 'standard' use.
+// This struct holds options that might be useful for debugging, benchmarking, etc., but are not intended to appear at the surface for 'standard' use.
 struct DeveloperOptions
 {
-    bool set_nondimensional_numbers = false;
-    bool output_dimensional         = true;
+    bool nondimensional_input = false;
+    bool output_dimensional   = true;
 
     // Some logging and parameter options
-    bool extended_parameters = false;         // If false, hide some of the parameters that
-                                              // are not relevant for 'standard' use.
+    bool extended_parameters = false; // If false, hide some of the parameters that are not relevant for 'standard' use.
     bool extended_diagnostics         = true; // Extended logging of solver diagnostics, memory footprint, etc.
     bool print_parameter_descriptions = true;
 };
@@ -388,45 +386,48 @@ inline void nondimensionalise( Parameters& prm )
     auto& devel    = prm.devel_parameters;
     auto& time     = prm.time_stepping_parameters;
 
-    // --- Domain ---
-
-    // Nondimensionalise radii with mantle thickness -- rescaled to unit sphere for output
-    mesh.mantle_thickness_m = mesh.radius_surface_m - mesh.radius_cmb_m;
-    mesh.radius_max         = mesh.radius_surface_m / mesh.mantle_thickness_m;
-    mesh.radius_min         = mesh.radius_cmb_m / mesh.mantle_thickness_m;
-
-    // --- Boundary conditions ---
-
-    boundary.temperature_min = boundary.temperature_surface_K / boundary.delta_T_K;
-    boundary.temperature_max = boundary.temperature_cmb_K / boundary.delta_T_K;
-
-    // Surface density
-    phys.surface_density_nondim = phys.surface_density_dim / phys.reference_density;
-
-    // Compute characteristic velocity and thermal diffusivity
-    phys.characteristic_velocity =
-        phys.thermal_conductivity / ( phys.reference_density * phys.specific_heat_capacity * mesh.mantle_thickness_m );
-
-    phys.thermal_diffusivity_dim = phys.thermal_conductivity / ( phys.reference_density * phys.specific_heat_capacity );
-
-    // Precompute conversion factors from non-dim to dimensional quantities
-    phys.calc_cm_per_year = phys.characteristic_velocity * 60 * 60 * 24 * 365 * 100; // Velocity in cm/a
-
-    phys.calc_time_Ma = mesh.mantle_thickness_m / ( phys.calc_cm_per_year * 1e4 ); // Time in Ma
-
-    // Acount for plate velocity scaling
-    if ( boundary.plate_parameters.apply_plate_velocities )
+    // Nondimensionalise, if not specified otherwise
+    if ( !devel.nondimensional_input )
     {
-        phys.calc_time_Ma /= boundary.plate_parameters.plate_velocity_scaling;
-    }
+        // --- Domain ---
 
-    // Nondimensionalise time
-    time.t_end  = time.t_end_Ma / phys.calc_time_Ma;
-    time.dt_max = time.dt_max_Ma / phys.calc_time_Ma;
-    time.dt_min = time.dt_min_Ma / phys.calc_time_Ma;
+        // Nondimensionalise radii with mantle thickness -- rescaled to unit sphere for output
+        mesh.mantle_thickness_m = mesh.radius_surface_m - mesh.radius_cmb_m;
+        mesh.radius_max         = mesh.radius_surface_m / mesh.mantle_thickness_m;
+        mesh.radius_min         = mesh.radius_cmb_m / mesh.mantle_thickness_m;
 
-    if ( !devel.set_nondimensional_numbers )
-    {
+        // --- Boundary conditions ---
+
+        boundary.temperature_min = boundary.temperature_surface_K / boundary.delta_T_K;
+        boundary.temperature_max = boundary.temperature_cmb_K / boundary.delta_T_K;
+
+        // Surface density
+        phys.surface_density_nondim = phys.surface_density_dim / phys.reference_density;
+
+        // Compute characteristic velocity and thermal diffusivity
+        phys.characteristic_velocity =
+            phys.thermal_conductivity /
+            ( phys.reference_density * phys.specific_heat_capacity * mesh.mantle_thickness_m );
+
+        phys.thermal_diffusivity_dim =
+            phys.thermal_conductivity / ( phys.reference_density * phys.specific_heat_capacity );
+
+        // Precompute conversion factors from non-dim to dimensional quantities
+        phys.calc_cm_per_year = phys.characteristic_velocity * 60 * 60 * 24 * 365 * 100; // Velocity in cm/a
+
+        phys.calc_time_Ma = mesh.mantle_thickness_m / ( phys.calc_cm_per_year * 1e4 ); // Time in Ma
+
+        // Acount for plate velocity scaling
+        if ( boundary.plate_parameters.apply_plate_velocities )
+        {
+            phys.calc_time_Ma /= boundary.plate_parameters.plate_velocity_scaling;
+        }
+
+        // Nondimensionalise time
+        time.t_end  = time.t_end_Ma / phys.calc_time_Ma;
+        time.dt_max = time.dt_max_Ma / phys.calc_time_Ma;
+        time.dt_min = time.dt_min_Ma / phys.calc_time_Ma;
+
         // Compute nondimensional numbers
         // Rayleigh number = ( rho * alpha * g * L^3 * dT ) / ( eta * kappa )
         phys.rayleigh_number = ( phys.reference_density * phys.gravity * phys.thermal_expansivity *
@@ -444,16 +445,54 @@ inline void nondimensionalise( Parameters& prm )
         phys.h_number = ( phys.internal_heating_rate * mesh.mantle_thickness_m ) /
                         ( phys.specific_heat_capacity * phys.characteristic_velocity * boundary.delta_T_K );
     }
+
+    // else, take values directly from parameter file
+    else
+    {
+        mesh.radius_max          = mesh.radius_surface_m;
+        mesh.radius_min          = mesh.radius_cmb_m;
+        boundary.temperature_min = boundary.temperature_surface_K;
+        boundary.temperature_max = boundary.temperature_cmb_K;
+        phys.h_number            = phys.internal_heating_rate;
+        time.t_end               = time.t_end_Ma;
+        time.dt_max              = time.dt_max_Ma;
+        time.dt_min              = time.dt_min_Ma;
+
+        phys.thermal_expansivity  = 1.0;
+        phys.thermal_conductivity = 1.0;
+        phys.reference_density    = 1.0;
+
+        // Pe, Di, diffusivity should already be set to 1.
+        // Ra is set through parameter file in this case.
+    }
 }
 
 inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int argc, char** argv )
 {
-    CLI::App app{ "Mantle circulation simulation." };
-
     Parameters parameters{};
 
     using util::add_flag_with_default;
     using util::add_option_with_default;
+
+    // Minimal pre-parse to learn about --extended-parameters
+    CLI::App pre{ "pre-parse" };
+    add_flag_with_default( pre, "--extended-parameters", parameters.devel_parameters.extended_parameters )->group( "" );
+    pre.set_config( "--config" );
+    pre.set_help_flag( "" );  //disable help-flag, so real app handles --help
+    pre.allow_extras( true ); // ignore unrecognized command-line args
+    pre.parse( argc, argv );
+
+    try
+    {
+        pre.parse( argc, argv );
+    }
+    catch ( const CLI::ParseError& e )
+    {
+        return { "CLI parse error" };
+    }
+
+    // Regular parse
+    CLI::App app{ "Mantle circulation simulation" };
 
     app.config_formatter( std::make_shared< ConfigGroupedNoDescriptions >() );
 
@@ -852,6 +891,37 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
         ->group( "I/O" )
         ->description( "Disable radial profile output." );
 
+    //////////////////////////
+    /// Developer settings ///
+    //////////////////////////
+
+    add_flag_with_default( app, "--extended-parameters", parameters.devel_parameters.extended_parameters )
+        ->group( "Developer settings" )
+        ->description( "Show hidden parameters. Not needed for 'standard' use." );
+    add_flag_with_default(
+        app,
+        "--print-descriptions,!--print-descriptions-off",
+        parameters.devel_parameters.print_parameter_descriptions )
+        ->group( "Developer settings" )
+        ->description( "Print parameter descriptions in config file. Use --print-descriptions-off to disable" );
+    if ( parameters.devel_parameters.extended_parameters )
+    {
+        add_flag_with_default( app, "--nondim-input", parameters.devel_parameters.nondimensional_input )
+            ->group( "Developer settings" )
+            ->description(
+                "Skip internal nondimensionalisation of provided parameters and take values unchanged from parameter file. Expects fully nondimensionalised input then. Intended for benchmarking purposes." );
+        add_option_with_default( app, "--Rayleigh-number", parameters.physics_parameters.rayleigh_number )
+            ->group( "Developer settings" )
+            ->description(
+                "Set Rayleigh number directly (would normally be computed from input params). Only works in combination with --nondim-input." );
+        add_flag_with_default( app, "--output-dimensional", parameters.devel_parameters.output_dimensional )
+            ->group( "Developer settings" )
+            ->description( "Redimensionalise all output before writing." );
+        add_flag_with_default( app, "--extended-diagnostics", parameters.devel_parameters.extended_diagnostics )
+            ->group( "Developer settings" )
+            ->description( "Log detailed diagnostics on solver setup, memory footprint, etc." );
+    }
+
     try
     {
         app.parse( argc, argv );
@@ -920,6 +990,18 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
 
     util::print_general_info( argc, argv, util::logroot );
     util::print_cli_summary( app, util::logroot );
+
+    // Matching nondimensional input with nondimensional output
+    if ( parameters.devel_parameters.nondimensional_input )
+    {
+        parameters.devel_parameters.output_dimensional = false;
+
+        util::logroot << "\n#############################################\n";
+        util::logroot << "Nondimensional input chosen. Make sure all input parameters are set accordingly:\n";
+        util::logroot << "--> T_surface, T_cmb, viscosity, Ra, internal_heating_rate, t_end, dt_max, dt_min.\n";
+        util::logroot << "Output set to nondimensional.\n";
+        util::logroot << "#############################################" << std::endl;
+    }
 
     // Setting parameters for low-memory mode
     if ( parameters.stokes_solver_parameters.low_mem )

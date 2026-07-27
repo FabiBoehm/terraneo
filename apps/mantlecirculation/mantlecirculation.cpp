@@ -710,9 +710,18 @@ Result<> run( const Parameters& prm )
         simulated_time += prm.energy_solver_parameters.energy_substeps * dt;
         simulated_time_Ma = simulated_time * prm.physics_parameters.calc_time_Ma;
 
-        logroot << "Simulated time: " << simulated_time_Ma << " Ma\n";
-        logroot << "  Stopping at " << prm.time_stepping_parameters.t_end_Ma << " Ma, "
-                << std::round( simulated_time_Ma / prm.time_stepping_parameters.t_end_Ma * 100.0 * 10.0 ) / 10.0
+        // Log time progress
+        if ( prm.devel_parameters.output_dimensional )
+        {
+            logroot << "Simulated time: " << simulated_time_Ma << " Ma\n";
+            logroot << "  Stopping at " << prm.time_stepping_parameters.t_end_Ma << " Ma, ";
+        }
+        else
+        {
+            logroot << "Simulated time: " << simulated_time << "\n";
+            logroot << "Stopping at nondimensional time " << prm.time_stepping_parameters.t_end << ", ";
+        }
+        logroot << std::round( simulated_time / prm.time_stepping_parameters.t_end * 100.0 * 10.0 ) / 10.0
                 << "% done.\n";
 
         // Memory footprint

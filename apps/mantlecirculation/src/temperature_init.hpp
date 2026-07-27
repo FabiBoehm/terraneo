@@ -376,8 +376,16 @@ void load_temperature_checkpoint(
     else if ( static_cast< bool >( metadata.is_dimensional ) != prm.devel_parameters.output_dimensional )
     {
         logroot
-            << "\nWARNING: Read and write checkpoint details are inconsistent - one is dimensional,  one is nondimensional.\n"
+            << "\nWARNING: Read and write checkpoint details are inconsistent - one is dimensional, one is nondimensional.\n"
             << std::endl;
+    }
+
+    if ( static_cast< bool >( metadata.is_dimensional ) && prm.devel_parameters.nondimensional_input )
+    {
+        logroot
+            << "\n Nondimensional input selected, but the checkpoint you are trying to read is dimensional. This will produce garbage. Exiting..."
+            << std::endl;
+        Kokkos::abort( "Error: Nondimensional input inconsistent with dimensional checkpoint." );
     }
 
     auto success_vel = io::read_xdmf_checkpoint_grid(
