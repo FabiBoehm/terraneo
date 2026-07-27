@@ -98,6 +98,59 @@ ScalarType ramp_dt( const ScalarType dt, const int timestep, const int ramp_step
     return scale * dt;
 }
 
+template < typename ScalarType >
+void log_timestep_info(
+    const Parameters& prm,
+    const int         timestep,
+    ScalarType        max_velocity,
+    ScalarType        max_radial_h,
+    ScalarType        dt_cfl,
+    ScalarType        dt )
+{
+    const bool log_dimensional = prm.devel_parameters.output_dimensional;
+
+    const ScalarType vel_scale  = log_dimensional ? prm.physics_parameters.calc_cm_per_year : ScalarType( 1 );
+    const ScalarType grid_scale = log_dimensional ? prm.mesh_parameters.mantle_thickness_m : ScalarType( 1 );
+    const ScalarType time_scale = log_dimensional ? prm.physics_parameters.calc_time_Ma : ScalarType( 1 );
+
+    // Compute dimensional values if required
+    max_velocity *= vel_scale;
+    max_radial_h *= grid_scale;
+    dt_cfl *= time_scale;
+    dt *= time_scale;
+
+    const ScalarType dt_max =
+        log_dimensional ? prm.time_stepping_parameters.dt_max_Ma : prm.time_stepping_parameters.dt_max;
+    const ScalarType dt_min =
+        log_dimensional ? prm.time_stepping_parameters.dt_min_Ma : prm.time_stepping_parameters.dt_min;
+
+    // Logging body
+    util::logroot << "    max_vel" << ( log_dimensional ? " (cm/a) :               " : " :                      " )
+                  << max_velocity << std::endl;
+    util::logroot << "    h"
+                  << ( log_dimensional ? " (m)   :                      " : " :                            " )
+                  << max_radial_h << std::endl;
+    util::logroot << "    cfl timestep size (= dt_scaling * h/v_max): " << dt_cfl << ( log_dimensional ? " Ma" : "" )
+                  << std::endl;
+    if ( dt_cfl > dt_max )
+    {
+        util::logroot << "....limiting maximum timestep size to " << dt_max
+                      << ( log_dimensional ? " Ma....." : " ....." ) << std::endl;
+    }
+    else if ( dt_cfl < dt_min )
+    {
+        util::logroot << "....limiting minimum timestep size to " << dt_min
+                      << ( log_dimensional ? " Ma....." : " ....." ) << std::endl;
+    }
+    if ( timestep <= prm.time_stepping_parameters.initial_dt_ramp_steps )
+    {
+        util::logroot << "....enforcing exponential ramp-up in first "
+                      << prm.time_stepping_parameters.initial_dt_ramp_steps << " timesteps....." << std::endl;
+    }
+    util::logroot << "-------------------------------------------------" << std::endl;
+    util::logroot << "=>   dt: " << dt << ( log_dimensional ? " Ma.\n" : ".\n" ) << std::endl;
+}
+
 /// Implicit Galerkin SUPG advection-diffusion energy solve.
 ///
 /// Operator: A = M + dt · (K_diff + K_adv + K_supg), Dirichlet rows treated
@@ -210,38 +263,15 @@ class SUPGSolver : public EnergySolver< ScalarType >
     ScalarType compute_dt( const int timestep ) override
     {
         // SUPG: implicit diffusion, dt only constrained by advection CFL.
-        const auto max_vel      = kernels::common::max_vector_magnitude( velocity_.grid_data() );
-        const auto dt_advection = h_ / max_vel;
-        const auto dt_cfl       = prm_.time_stepping_parameters.dt_scaling * dt_advection;
-        const auto dt           = std::clamp(
+        const auto max_vel = kernels::common::max_vector_magnitude( velocity_.grid_data() );
+        const auto dt_cfl  = prm_.time_stepping_parameters.dt_scaling * h_ / max_vel;
+        const auto dt      = std::clamp(
             ramp_dt( dt_cfl, timestep, prm_.time_stepping_parameters.initial_dt_ramp_steps ),
             prm_.time_stepping_parameters.dt_min,
             prm_.time_stepping_parameters.dt_max );
 
         util::logroot << "Computing dt (SUPG advection CFL) ..." << std::endl;
-        util::logroot << "    max_vel (cm/a) :             " << max_vel * prm_.physics_parameters.calc_cm_per_year
-                      << std::endl;
-        util::logroot << "    h (m) :                      " << h_ * prm_.mesh_parameters.mantle_thickness_m
-                      << std::endl;
-        util::logroot << "    cfl timestep size (= dt_scaling * h/v_max): "
-                      << dt_cfl * prm_.physics_parameters.calc_time_Ma << " Ma" << std::endl;
-        if ( dt_cfl > prm_.time_stepping_parameters.dt_max )
-        {
-            util::logroot << "....limiting maximum timestep size to " << prm_.time_stepping_parameters.dt_max_Ma
-                          << " Ma....." << std::endl;
-        }
-        else if ( dt_cfl < prm_.time_stepping_parameters.dt_min )
-        {
-            util::logroot << "....limiting minimum timestep size to " << prm_.time_stepping_parameters.dt_min_Ma
-                          << " Ma....." << std::endl;
-        }
-        if ( timestep <= prm_.time_stepping_parameters.initial_dt_ramp_steps )
-        {
-            util::logroot << "....enforcing exponential ramp-up in first "
-                          << prm_.time_stepping_parameters.initial_dt_ramp_steps << " timesteps....." << std::endl;
-        }
-        util::logroot << "-------------------------------------------------" << std::endl;
-        util::logroot << "=>   dt: " << dt * prm_.physics_parameters.calc_time_Ma << " Ma.\n" << std::endl;
+        log_timestep_info( prm_, timestep, max_vel, h_, dt_cfl, dt );
 
         return dt;
     }
@@ -526,38 +556,15 @@ class EVSolver : public EnergySolver< ScalarType >
 
     ScalarType compute_dt( const int timestep ) override
     {
-        const auto max_vel      = kernels::common::max_vector_magnitude( velocity_.grid_data() );
-        const auto dt_advection = h_ / max_vel;
-        const auto dt_cfl       = prm_.time_stepping_parameters.dt_scaling * dt_advection;
-        const auto dt           = std::clamp(
+        const auto max_vel = kernels::common::max_vector_magnitude( velocity_.grid_data() );
+        const auto dt_cfl  = prm_.time_stepping_parameters.dt_scaling * h_ / max_vel;
+        const auto dt      = std::clamp(
             ramp_dt( dt_cfl, timestep, prm_.time_stepping_parameters.initial_dt_ramp_steps ),
             prm_.time_stepping_parameters.dt_min,
             prm_.time_stepping_parameters.dt_max );
 
         util::logroot << "Computing dt (EV advection CFL) ..." << std::endl;
-        util::logroot << "    max_vel (cm/a) :             " << max_vel * prm_.physics_parameters.calc_cm_per_year
-                      << std::endl;
-        util::logroot << "    h (m) :                      " << h_ * prm_.mesh_parameters.mantle_thickness_m
-                      << std::endl;
-        util::logroot << "    cfl timestep size (= dt_scaling * h/v_max): "
-                      << dt_cfl * prm_.physics_parameters.calc_time_Ma << " Ma " << std::endl;
-        if ( dt_cfl > prm_.time_stepping_parameters.dt_max )
-        {
-            util::logroot << "....limiting maximum timestep size to " << prm_.time_stepping_parameters.dt_max_Ma
-                          << " Ma....." << std::endl;
-        }
-        else if ( dt_cfl < prm_.time_stepping_parameters.dt_min )
-        {
-            util::logroot << "....limiting minimum timestep size to " << prm_.time_stepping_parameters.dt_min_Ma
-                          << " Ma....." << std::endl;
-        }
-        if ( timestep <= prm_.time_stepping_parameters.initial_dt_ramp_steps )
-        {
-            util::logroot << "....enforcing exponential ramp-up in first "
-                          << prm_.time_stepping_parameters.initial_dt_ramp_steps << " timesteps....." << std::endl;
-        }
-        util::logroot << "-------------------------------------------------" << std::endl;
-        util::logroot << "=>   dt: " << dt * prm_.physics_parameters.calc_time_Ma << " Ma.\n" << std::endl;
+        log_timestep_info( prm_, timestep, max_vel, h_, dt_cfl, dt );
 
         return dt;
     }
