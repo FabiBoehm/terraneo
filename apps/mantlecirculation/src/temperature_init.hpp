@@ -383,7 +383,7 @@ void radial_profile_init(
         "compute kappa_profile",
         Kokkos::MDRangePolicy< Kokkos::Rank< 2 > >( { 0, 0 }, { coords_radii.extent( 0 ), coords_radii.extent( 1 ) } ),
         KOKKOS_LAMBDA( int id, int r ) {
-            kappa_profile( id, r ) = 1.0 / ( rho_profile( id, r ) * cp_profile( id, r ) );
+            kappa_profile( id, r ) = ScalarType( 1 ) / ( rho_profile( id, r ) * cp_profile( id, r ) );
         } );
     Kokkos::fence();
 }
