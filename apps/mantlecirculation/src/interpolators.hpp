@@ -17,8 +17,8 @@ using grid::Grid4DDataVec;
 // Interpolate from radial profile to Q1 field
 struct RadialProfileToQ1
 {
-    Grid2DDataScalar< ScalarType > radial_profile_;
     Grid4DDataScalar< ScalarType > data_;
+    Grid2DDataScalar< ScalarType > radial_profile_;
 
     KOKKOS_INLINE_FUNCTION
     void operator()( const int id, const int x, const int y, const int r ) const
@@ -299,34 +299,6 @@ struct ViscosityFromTemperature
         default:
             // eta is already set, nothing to do.
             break;
-        }
-    }
-};
-
-struct DensityInit
-{
-    Grid4DDataScalar< ScalarType > rho_;
-    Grid2DDataScalar< ScalarType > radii_;
-    ScalarType                     r_max_;
-    ScalarType                     surface_density_;
-    ScalarType                     dissipation_number_;
-    ScalarType                     grueneisen_parameter_;
-    bool                           compressible_;
-
-    KOKKOS_INLINE_FUNCTION
-    void operator()( const int id, const int x, const int y, const int r ) const
-    {
-        if ( compressible_ )
-        {
-            // Adiabatic compression
-            const ScalarType radius = radii_( id, r );
-
-            rho_( id, x, y, r ) =
-                surface_density_ * Kokkos::exp( dissipation_number_ * ( r_max_ - radius ) / grueneisen_parameter_ );
-        }
-        else
-        {
-            rho_( id, x, y, r ) = 1.0;
         }
     }
 };
