@@ -254,16 +254,7 @@ Result<> run( const Parameters& prm )
         log_hbm( "before StokesContext (domains + grids only)" );
 
     StokesContext< ScalarType > stokes(
-        domains,
-        coords_shell,
-        coords_radii,
-        density,
-        ownership_mask_data,
-        boundary_mask_data,
-        bcs,
-        agglom,
-        prm,
-        table );
+        domains, coords_shell, coords_radii, ownership_mask_data, boundary_mask_data, bcs, agglom, prm, table );
 
     auto& u = stokes.solution();
 
@@ -394,7 +385,7 @@ Result<> run( const Parameters& prm )
     // ----- Initial Stokes solve -----
     logroot << "\n--------- Initial Stokes solve -----------------\n" << std::endl;
 
-    stokes.solve( Tdev, prm.physics_parameters.compressible, /*log_convergence=*/true );
+    stokes.solve( Tdev, density, alpha_profile, prm.physics_parameters.compressible, /*log_convergence=*/true );
 
     if ( prm.devel_parameters.extended_diagnostics )
         log_hbm( "after first Stokes solve (peak)" );
@@ -629,7 +620,12 @@ Result<> run( const Parameters& prm )
             stokes.update_viscosity( T );
 
             // --- Stokes solve ---
-            stokes.solve( Tdev, prm.physics_parameters.compressible, /*log_convergence=*/( picard == num_picard - 1 ) );
+            stokes.solve(
+                Tdev,
+                density,
+                alpha_profile,
+                prm.physics_parameters.compressible,
+                /*log_convergence=*/( picard == num_picard - 1 ) );
 
         } // end Picard loop
 
