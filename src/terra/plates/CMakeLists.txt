@@ -1,0 +1,15 @@
+target_sources(terra
+    PRIVATE
+    functionsForGeometry.hpp
+    functionsForPlates.hpp
+    functionsForRotations.hpp
+    PlateRotationProvider.hpp
+    PlateStorage.hpp
+    PlateVelocityProvider.hpp
+    LocalAveragingPointWeightProvider.hpp
+    SmoothingStrategies.hpp
+    types.hpp
+    conversions.hpp
+    FileIO.hpp
+    json.hpp
+)
