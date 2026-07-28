@@ -97,8 +97,8 @@ void initialize_temperature_fields(
             // Read and populate reference temperature profile
             T_ref = shell::interpolate_radial_profile_into_subdomains_from_csv(
                 init_temp.Tref_profile_csv_path,
-                init_temp.Tref_profile_radii_key,
-                init_temp.Tref_profile_temperature_key,
+                prm.physics_parameters.radial_profiles_radii_key,
+                init_temp.Tref_profile_value_key,
                 coords_radii,
                 1.0 / prm.mesh_parameters.mantle_thickness_m,
                 1.0 / prm.boundary_parameters.delta_T_K );
@@ -141,7 +141,7 @@ void initialize_temperature_fields(
         Kokkos::parallel_for(
             "RadialProfileToQ1",
             grid::shell::local_domain_md_range_policy_nodes( domain ),
-            RadialProfileToQ1{ T_ref, T.grid_data() } );
+            RadialProfileToQ1{ T.grid_data(), T_ref } );
         Kokkos::fence();
 
         // Add initial perturbation
@@ -295,6 +295,97 @@ void initialize_temperature_fields(
         }
         fv::hex::l2_project_fv_to_fe_lumped( T, T_fct, domain, coords_shell, coords_radii, init_l2_tmps );
     }
+}
+
+// Read custom radial profiles (if given), nondimensionalise and fill respective 2D array.
+// Fill radially constant otherwise.
+template < typename ScalarType >
+void radial_profile_init(
+    grid::Grid2DDataScalar< ScalarType >&       rho_profile,
+    grid::Grid2DDataScalar< ScalarType >&       alpha_profile,
+    grid::Grid2DDataScalar< ScalarType >&       cp_profile,
+    grid::Grid2DDataScalar< ScalarType >&       kappa_profile,
+    const grid::Grid2DDataScalar< ScalarType >& coords_radii,
+    const Parameters&                           prm )
+{
+    const auto& phys = prm.physics_parameters;
+
+    // Density
+    if ( !phys.density_profile_csv_path.empty() )
+    {
+        rho_profile = shell::interpolate_radial_profile_into_subdomains_from_csv(
+            phys.density_profile_csv_path,
+            phys.radial_profiles_radii_key,
+            phys.density_profile_value_key,
+            coords_radii,
+            1.0 / prm.mesh_parameters.mantle_thickness_m,
+            1.0 / phys.reference_density );
+    }
+    else if ( phys.compressible )
+    {
+        const ScalarType surface_density = phys.surface_density_nondim;
+        const ScalarType dissipation_nr  = phys.dissipation_number;
+        const ScalarType radius_max      = prm.mesh_parameters.radius_max;
+        const ScalarType grueneisen_prm  = phys.grueneisen_parameter;
+
+        // Adiabatic compression
+        Kokkos::parallel_for(
+            "adiabatic compression",
+            Kokkos::MDRangePolicy< Kokkos::Rank< 2 > >(
+                { 0, 0 }, { coords_radii.extent( 0 ), coords_radii.extent( 1 ) } ),
+            KOKKOS_LAMBDA( int id, int r ) {
+                rho_profile( id, r ) =
+                    surface_density *
+                    Kokkos::exp( dissipation_nr * ( radius_max - coords_radii( id, r ) ) / grueneisen_prm );
+            } );
+        Kokkos::fence();
+    }
+    else // Fill with ones if incompressible
+    {
+        Kokkos::deep_copy( rho_profile, 1.0 );
+    }
+
+    // alpha
+    if ( !phys.alpha_profile_csv_path.empty() )
+    {
+        alpha_profile = shell::interpolate_radial_profile_into_subdomains_from_csv(
+            phys.alpha_profile_csv_path,
+            phys.radial_profiles_radii_key,
+            phys.alpha_profile_value_key,
+            coords_radii,
+            1.0 / prm.mesh_parameters.mantle_thickness_m,
+            1.0 / phys.thermal_expansivity );
+    }
+    else // Fill with ones
+    {
+        Kokkos::deep_copy( alpha_profile, 1.0 );
+    }
+
+    // Cp
+    if ( !phys.cp_profile_csv_path.empty() )
+    {
+        cp_profile = shell::interpolate_radial_profile_into_subdomains_from_csv(
+            phys.cp_profile_csv_path,
+            phys.radial_profiles_radii_key,
+            phys.cp_profile_value_key,
+            coords_radii,
+            1.0 / prm.mesh_parameters.mantle_thickness_m,
+            1.0 / phys.specific_heat_capacity );
+    }
+    else // Fill with ones
+    {
+        Kokkos::deep_copy( cp_profile, 1.0 );
+    }
+
+    // Kappa
+    // Compute diffusivity profile from k (=1), cp_profile and rho_profile
+    Kokkos::parallel_for(
+        "compute kappa_profile",
+        Kokkos::MDRangePolicy< Kokkos::Rank< 2 > >( { 0, 0 }, { coords_radii.extent( 0 ), coords_radii.extent( 1 ) } ),
+        KOKKOS_LAMBDA( int id, int r ) {
+            kappa_profile( id, r ) = 1.0 / ( rho_profile( id, r ) * cp_profile( id, r ) );
+        } );
+    Kokkos::fence();
 }
 
 template < typename ScalarType >

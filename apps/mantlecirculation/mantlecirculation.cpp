@@ -169,8 +169,21 @@ Result<> run( const Parameters& prm )
     VectorQ1Scalar< ScalarType > T( "T", ( *domains[velocity_level] ), ownership_mask_data[velocity_level] );
     VectorQ1Scalar< ScalarType > Tdev( "Tdev", ( *domains[velocity_level] ), ownership_mask_data[velocity_level] );
 
+    // Density is needed in Stokes and energy -- so we set it up here
+    VectorQ1Scalar< ScalarType > density(
+        "density", ( *domains[velocity_level] ), ownership_mask_data[velocity_level] );
+
+    // Radial parameter profiles
     Grid2DDataScalar< ScalarType > T_ref(
         "T_ref", coords_radii[velocity_level].extent( 0 ), coords_radii[velocity_level].extent( 1 ) );
+    Grid2DDataScalar< ScalarType > rho_profile(
+        "rho_profile", coords_radii[velocity_level].extent( 0 ), coords_radii[velocity_level].extent( 1 ) );
+    Grid2DDataScalar< ScalarType > alpha_profile(
+        "alpha_profile", coords_radii[velocity_level].extent( 0 ), coords_radii[velocity_level].extent( 1 ) );
+    Grid2DDataScalar< ScalarType > cp_profile(
+        "cp_profile", coords_radii[velocity_level].extent( 0 ), coords_radii[velocity_level].extent( 1 ) );
+    Grid2DDataScalar< ScalarType > kappa_profile(
+        "kappa_profile", coords_radii[velocity_level].extent( 0 ), coords_radii[velocity_level].extent( 1 ) );
 
     // Finite-volume functions/vectors.
 
@@ -205,6 +218,16 @@ Result<> run( const Parameters& prm )
         logroot << "Characteristic velocity: " << prm.physics_parameters.characteristic_velocity << std::endl;
     logroot << "------------------------------------------\n" << std::endl;
 
+    // Fill radial profile arrays
+    radial_profile_init( rho_profile, alpha_profile, cp_profile, kappa_profile, coords_radii[velocity_level], prm );
+
+    // Initialise density Q1 field from radial profile -- before Stokes solver setup
+    Kokkos::parallel_for(
+        "RadialProfileToQ1",
+        grid::shell::local_domain_md_range_policy_nodes( *domains[velocity_level] ),
+        RadialProfileToQ1{ density.grid_data(), rho_profile } );
+    Kokkos::fence();
+
     // Setting up Stokes velocity boundary conditions.
     //
     // Currently, we can choose either no-slip or free-slip.
@@ -231,7 +254,16 @@ Result<> run( const Parameters& prm )
         log_hbm( "before StokesContext (domains + grids only)" );
 
     StokesContext< ScalarType > stokes(
-        domains, coords_shell, coords_radii, ownership_mask_data, boundary_mask_data, bcs, agglom, prm, table );
+        domains,
+        coords_shell,
+        coords_radii,
+        density,
+        ownership_mask_data,
+        boundary_mask_data,
+        bcs,
+        agglom,
+        prm,
+        table );
 
     auto& u = stokes.solution();
 
@@ -307,7 +339,7 @@ Result<> run( const Parameters& prm )
     xdmf_output->add( Tdev.grid_data() );              // Temperature deviation
     xdmf_output->add( u.block_1().grid_data() );       // Velocity
     xdmf_output->add( stokes.eta_fine().grid_data() ); // Viscosity
-    xdmf_output->add( stokes.density().grid_data() );  // Density
+    xdmf_output->add( density.grid_data() );           // Density
 
     if ( prm.io_parameters.output_pressure )
     {
@@ -454,7 +486,7 @@ Result<> run( const Parameters& prm )
             Tdev.grid_data(),
             u.block_1().grid_data(),
             stokes.eta_fine().grid_data(),
-            stokes.density().grid_data(),
+            density.grid_data(),
             u.block_2().grid_data() );
     }
 
@@ -619,7 +651,7 @@ Result<> run( const Parameters& prm )
                 Tdev.grid_data(),
                 u.block_1().grid_data(),
                 stokes.eta_fine().grid_data(),
-                stokes.density().grid_data(),
+                density.grid_data(),
                 u.block_2().grid_data() );
         }
 
