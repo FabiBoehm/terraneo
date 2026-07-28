@@ -81,38 +81,47 @@ struct ConductiveProfileInterpolator
     }
 };
 
-struct RHSVelocityInterpolator
+struct BuoyancyForceAssembly
 {
     Grid3DDataVec< ScalarType, 3 > grid_;
     Grid2DDataScalar< ScalarType > radii_;
-    Grid4DDataVec< ScalarType, 3 > data_u_;
+    Grid4DDataVec< ScalarType, 3 > data_f_;
     Grid4DDataScalar< ScalarType > data_T_;
+    Grid4DDataScalar< ScalarType > data_rho_;
+    Grid2DDataScalar< ScalarType > alpha_;
     ScalarType                     rayleigh_number_;
+    ScalarType                     prefactor_;
 
-    RHSVelocityInterpolator(
+    BuoyancyForceAssembly(
         const Grid3DDataVec< ScalarType, 3 >& grid,
         const Grid2DDataScalar< ScalarType >& radii,
-        const Grid4DDataVec< ScalarType, 3 >& data_u,
+        const Grid4DDataVec< ScalarType, 3 >& data_f,
         const Grid4DDataScalar< ScalarType >& data_T,
-        ScalarType                            rayleigh_number )
+        const Grid4DDataScalar< ScalarType >& data_rho,
+        const Grid2DDataScalar< ScalarType >& alpha,
+        const ScalarType                      rayleigh_number,
+        const ScalarType                      prefactor = ScalarType( 1 ) )
     : grid_( grid )
     , radii_( radii )
-    , data_u_( data_u )
+    , data_f_( data_f )
     , data_T_( data_T )
+    , data_rho_( data_rho )
+    , alpha_( alpha )
     , rayleigh_number_( rayleigh_number )
+    , prefactor_( prefactor )
     {}
 
     KOKKOS_INLINE_FUNCTION
-    void operator()( const int local_subdomain_id, const int x, const int y, const int r ) const
+    void operator()( const int id, const int x, const int y, const int r ) const
     {
-        const dense::Vec< ScalarType, 3 > coords = grid::shell::coords( local_subdomain_id, x, y, r, grid_, radii_ );
+        const dense::Vec< ScalarType, 3 > coords = grid::shell::coords( id, x, y, r, grid_, radii_ );
 
         const auto n = coords.normalized();
 
         for ( int d = 0; d < 3; d++ )
         {
-            data_u_( local_subdomain_id, x, y, r, d ) =
-                rayleigh_number_ * n( d ) * data_T_( local_subdomain_id, x, y, r );
+            data_f_( id, x, y, r, d ) = prefactor_ * rayleigh_number_ * n( d ) * alpha_( id, r ) *
+                                        data_rho_( id, x, y, r ) * data_T_( id, x, y, r );
         }
     }
 };

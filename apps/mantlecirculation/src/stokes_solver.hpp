@@ -185,7 +185,6 @@ class StokesContext
         const std::vector< std::shared_ptr< grid::shell::DistributedDomain > >&        domains,
         const std::vector< grid::Grid3DDataVec< ScalarType, 3 > >&                     coords_shell,
         const std::vector< grid::Grid2DDataScalar< ScalarType > >&                     coords_radii,
-        const linalg::VectorQ1Scalar< ScalarType >&                                    rho,
         const std::vector< grid::Grid4DDataScalar< grid::NodeOwnershipFlag > >&        ownership_mask,
         const std::vector< grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag > >& boundary_mask,
         grid::shell::BoundaryConditions&                                               bcs,
@@ -195,7 +194,6 @@ class StokesContext
     : domains_( domains )
     , coords_shell_( coords_shell )
     , coords_radii_( coords_radii )
-    , rho_( rho )
     , ownership_mask_( ownership_mask )
     , boundary_mask_( boundary_mask )
     , prm_( prm )
@@ -740,11 +738,16 @@ class StokesContext
         Kokkos::fence();
     }
 
-    /// Solve  K · u = f(T_for_buoyancy)  with the configured FGMRES + MG/Schur
-    /// preconditioner.  When `log_convergence` is true, the per-step Stokes
-    /// and coarse-grid PCG tables are printed; in either case the table is
-    /// cleared at the end of the call.
-    void solve( const linalg::VectorQ1Scalar< ScalarType >& T_for_buoyancy, bool compressible, bool log_convergence )
+    /// Solve  K · u = f(T_for_buoyancy, rho, alpha)  with the configured
+    /// FGMRES + MG/Schur preconditioner.  When `log_convergence` is true,
+    /// the per-step Stokes and coarse-grid PCG tables are printed;
+    /// in either case the table is cleared at the end of the call.
+    void solve(
+        const linalg::VectorQ1Scalar< ScalarType >& T_for_buoyancy,
+        const linalg::VectorQ1Scalar< ScalarType >& rho,
+        const grid::Grid2DDataScalar< ScalarType >& alpha,
+        bool                                        compressible,
+        bool                                        log_convergence )
     {
         util::Timer timer_stokes( "stokes" );
 
@@ -753,12 +756,15 @@ class StokesContext
         Kokkos::parallel_for(
             "Stokes rhs interpolation",
             grid::shell::local_domain_md_range_policy_nodes( *domains_[velocity_level_] ),
-            RHSVelocityInterpolator(
+            BuoyancyForceAssembly(
                 coords_shell_[velocity_level_],
                 coords_radii_[velocity_level_],
                 triangular_prec_tmp_.block_1().grid_data(),
                 T_for_buoyancy.grid_data(),
-                prm_.physics_parameters.rayleigh_number ) );
+                rho.grid_data(),
+                alpha,
+                prm_.physics_parameters.rayleigh_number,
+                1.0 ) );
 
         linalg::apply( *M_, triangular_prec_tmp_.block_1(), stok_vecs_["f"].block_1() );
 
@@ -773,7 +779,7 @@ class StokesContext
             boundary_mask_[velocity_level_],
             grid::shell::get_shell_boundary_flag( bcs_, grid::shell::BoundaryConditionFlag::FREESLIP ) );
 
-        // Apply TALA RHS if needed...
+        // Apply TALA RHS to mass equation if needed...
         if ( compressible )
         {
             TALARHS tala_rhs(
@@ -783,7 +789,7 @@ class StokesContext
                 coords_shell_[velocity_level_],
                 coords_radii_[pressure_level_],
                 coords_radii_[velocity_level_],
-                rho_,
+                rho,
                 stok_vecs_["u_prev"].block_1() );
 
             linalg::apply( tala_rhs, stok_vecs_["f"].block_2() );
@@ -837,7 +843,6 @@ class StokesContext
     // destroyed later, so things that other members hold by-reference (eta_,
     // stok_vecs_, *_tmp_*) must come first.
     std::vector< linalg::VectorQ1Scalar< ScalarType > >            eta_;
-    linalg::VectorQ1Scalar< ScalarType >                           rho_;
     linalg::VectorQ1Scalar< ScalarType >                           GCAElements_;
     std::map< std::string, linalg::VectorQ1IsoQ2Q1< ScalarType > > stok_vecs_;
     std::vector< linalg::VectorQ1IsoQ2Q1< ScalarType > >           stokes_tmp_fgmres_;   // double path
