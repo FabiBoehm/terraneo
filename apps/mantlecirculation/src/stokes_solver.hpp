@@ -185,6 +185,7 @@ class StokesContext
         const std::vector< std::shared_ptr< grid::shell::DistributedDomain > >&        domains,
         const std::vector< grid::Grid3DDataVec< ScalarType, 3 > >&                     coords_shell,
         const std::vector< grid::Grid2DDataScalar< ScalarType > >&                     coords_radii,
+        const linalg::VectorQ1Scalar< ScalarType >&                                    rho,
         const std::vector< grid::Grid4DDataScalar< grid::NodeOwnershipFlag > >&        ownership_mask,
         const std::vector< grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag > >& boundary_mask,
         grid::shell::BoundaryConditions&                                               bcs,
@@ -194,6 +195,7 @@ class StokesContext
     : domains_( domains )
     , coords_shell_( coords_shell )
     , coords_radii_( coords_radii )
+    , rho_( rho )
     , ownership_mask_( ownership_mask )
     , boundary_mask_( boundary_mask )
     , prm_( prm )
@@ -233,24 +235,6 @@ class StokesContext
                 ownership_mask_[velocity_level_],
                 ownership_mask_[pressure_level_] );
         }
-
-        // ---------------- Density ------------------
-        // Initialise and fill density -- time-independent for now (either constant or background profile )
-        rho_ =
-            linalg::VectorQ1Scalar< ScalarType >( "rho", *domains_[velocity_level_], ownership_mask_[velocity_level_] );
-
-        Kokkos::parallel_for(
-            "density_init",
-            grid::shell::local_domain_md_range_policy_nodes( *domains_[velocity_level_] ),
-            DensityInit{
-                rho_.grid_data(),
-                coords_radii_[velocity_level_],
-                prm_.mesh_parameters.radius_max,
-                prm_.physics_parameters.surface_density_nondim,
-                prm_.physics_parameters.dissipation_number,
-                prm_.physics_parameters.grueneisen_parameter,
-                prm_.physics_parameters.compressible } );
-        Kokkos::fence();
 
         // ---------------- Viscosity ----------------
         // Radial profile (constant or CSV-driven), then projected into Q1 on every level.
@@ -732,7 +716,6 @@ class StokesContext
 
     linalg::VectorQ1IsoQ2Q1< ScalarType >& solution() { return stok_vecs_["u"]; }
     linalg::VectorQ1Scalar< ScalarType >&  eta_fine() { return eta_[velocity_level_]; }
-    linalg::VectorQ1Scalar< ScalarType >&  density() { return rho_; }
     long                                   num_dofs_pressure() const { return num_dofs_pressure_; }
     const grid::shell::BoundaryConditions& boundary_conditions() const { return bcs_; }
 

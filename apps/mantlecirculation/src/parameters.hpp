@@ -155,9 +155,8 @@ struct InitialTemperatureParameters
     InitialPerturbation       perturbation = InitialPerturbation::SPHERICAL_HARMONICS;
 
     // Reference temperature from file
-    std::string Tref_profile_csv_path        = "TemperatureProfile_3800K.csv";
-    std::string Tref_profile_radii_key       = "radius";
-    std::string Tref_profile_temperature_key = "temperature";
+    std::string Tref_profile_csv_path  = "TemperatureProfile_3800K.csv";
+    std::string Tref_profile_value_key = "Temperature (K)";
 
     double perturbation_amplitude = 5e-2;
 
@@ -197,11 +196,6 @@ struct PhysicsParameters
     double specific_heat_capacity = 1230;
     double grueneisen_parameter   = 1.1;
 
-    // Parameter profiles -- to be done
-    double density_profile = 1.0;
-    double alpha_profile   = 1.0;
-    double cp_profile      = 1.0;
-
     bool   internal_heating      = false;
     double internal_heating_rate = 3e-12;
 
@@ -209,6 +203,19 @@ struct PhysicsParameters
 
     double calc_cm_per_year = 3e-4; // from non-dim velocity to cm/a
     double calc_time_Ma     = 1e6;  // from non-dim time to Ma
+
+    // Parameter radial profiles -- to be done
+    std::string density_profile_csv_path = "";
+    std::string alpha_profile_csv_path   = "";
+    std::string cp_profile_csv_path      = "";
+
+    std::string radial_profiles_radii_key = "Radius (m)";
+    std::string density_profile_value_key = "rho (kg/m^3)";
+    std::string alpha_profile_value_key   = "alpha (1/K)";
+    std::string cp_profile_value_key      = "Cp (J/kg K)";
+
+    double alpha_profile = 1.0;
+    double cp_profile    = 1.0;
 
     ViscosityParameters          viscosity_parameters{};
     InitialTemperatureParameters initial_temperature{};
@@ -619,6 +626,16 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
         ->group( "Physical Parameters" );
     add_option_with_default( app, "--specific-heat-capacity", parameters.physics_parameters.specific_heat_capacity )
         ->group( "Physical Parameters" );
+
+    // Radial input profiles
+    add_option_with_default( app, "--density-profile-path", parameters.physics_parameters.density_profile_csv_path )
+        ->group( "Radial input profiles" )
+        ->description(
+            "File paths for custom radial input profiles. Leave empty for radially constant parameters / predefined solutions." );
+    add_option_with_default( app, "--alpha-profile-path", parameters.physics_parameters.alpha_profile_csv_path )
+        ->group( "Radial input profiles " );
+    add_option_with_default( app, "--cp-profile-path", parameters.physics_parameters.cp_profile_csv_path )
+        ->group( "Radial input profiles" );
 
     // Viscosity parameters
     add_option_with_default(
