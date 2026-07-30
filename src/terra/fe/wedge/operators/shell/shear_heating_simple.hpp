@@ -15,32 +15,34 @@
 
 namespace terra::fe::wedge::operators::shell {
 
-template < typename ScalarT >
+template < typename ScalarT, int VelocityVecDim = 3 >
 class ShearHeatingSimple
 {
   public:
-    using SrcVectorType                 = linalg::VectorQ1Scalar< ScalarT >;
-    using DstVectorType                 = linalg::VectorQ1Scalar< ScalarT >;
-    using ScalarType                    = ScalarT;
-    using Grid4DDataLocalMatrices       = terra::grid::Grid4DDataMatrices< ScalarType, 6, 6, 2 >;
+    using SrcVectorType           = linalg::VectorQ1Scalar< ScalarT >;
+    using DstVectorType           = linalg::VectorQ1Scalar< ScalarT >;
+    using ScalarType              = ScalarT;
+    using Grid4DDataLocalMatrices = terra::grid::Grid4DDataMatrices< ScalarType, 6, 6, 2 >;
 
   private:
     bool single_quadpoint_ = false;
 
     grid::shell::DistributedDomain domain_;
 
-    grid::Grid3DDataVec< ScalarT, 3 >    grid_;
-    grid::Grid2DDataScalar< ScalarT >    radii_;
-    
-    grid::Grid4DDataScalar< ScalarType > coeff_times_mu_;
-    grid::Grid4DDataScalar< ScalarType > ux_;
-    grid::Grid4DDataScalar< ScalarType > uy_;
+    grid::Grid3DDataVec< ScalarT, 3 > grid_;
+    grid::Grid2DDataScalar< ScalarT > radii_;
+
+    grid::Grid4DDataScalar< ScalarType >    coeff_times_mu_;
+    grid::Grid4DDataScalar< ScalarType >    ux_;
+    grid::Grid4DDataScalar< ScalarType >    uy_;
     grid::Grid4DDataScalar< ScalarType > uz_;
+
+    grid::Grid4DDataVec< ScalarType, 3 > velocity_;
 
     linalg::OperatorApplyMode         operator_apply_mode_;
     linalg::OperatorCommunicationMode operator_communication_mode_;
 
-    communication::shell::SubdomainNeighborhoodSendRecvBuffer< ScalarT > recv_buffers_;
+    communication::shell::SubdomainNeighborhoodSendRecvBuffer< ScalarT >             recv_buffers_;
     communication::shell::ShellBoundaryCommPlan< grid::Grid4DDataScalar< ScalarT > > comm_plan_;
 
     grid::Grid4DDataScalar< ScalarType > src_;
@@ -57,19 +59,21 @@ class ShearHeatingSimple
         const grid::Grid3DDataVec< ScalarT, 3 >&    grid,
         const grid::Grid2DDataScalar< ScalarT >&    radii,
         const grid::Grid4DDataScalar< ScalarType >& coeff_times_mu,
-        const grid::Grid4DDataScalar< ScalarType >& ux,
-        const grid::Grid4DDataScalar< ScalarType >& uy,
-        const grid::Grid4DDataScalar< ScalarType >& uz,
-        linalg::OperatorApplyMode                   operator_apply_mode = linalg::OperatorApplyMode::Replace,
-        linalg::OperatorCommunicationMode           operator_communication_mode =
+        const grid::Grid4DDataVec< ScalarType, 3 >& velocity,
+        // const grid::Grid4DDataScalar< ScalarType >& ux,
+        // const grid::Grid4DDataScalar< ScalarType >& uy,
+        // const grid::Grid4DDataScalar< ScalarType >& uz,
+        linalg::OperatorApplyMode         operator_apply_mode = linalg::OperatorApplyMode::Replace,
+        linalg::OperatorCommunicationMode operator_communication_mode =
             linalg::OperatorCommunicationMode::CommunicateAdditively )
     : domain_( domain )
     , grid_( grid )
     , radii_( radii )
-    , coeff_times_mu_(coeff_times_mu)
-    , ux_( ux )
-    , uy_( uy )
-    , uz_( uz )
+    , coeff_times_mu_( coeff_times_mu )
+    , velocity_( velocity )
+    // , ux_( ux )
+    // , uy_( uy )
+    // , uz_( uz )
     , operator_apply_mode_( operator_apply_mode )
     , operator_communication_mode_( operator_communication_mode )
     , recv_buffers_( domain )
@@ -142,15 +146,23 @@ class ShearHeatingSimple
 
             dense::Vec< ScalarT, 6 > coeff_times_mu[num_wedges_per_hex_cell];
 
-            dense::Vec< ScalarT, 6 > ux[num_wedges_per_hex_cell];
-            dense::Vec< ScalarT, 6 > uy[num_wedges_per_hex_cell];
-            dense::Vec< ScalarT, 6 > uz[num_wedges_per_hex_cell];
+            // dense::Vec< ScalarT, 6 > ux[num_wedges_per_hex_cell];
+            // dense::Vec< ScalarT, 6 > uy[num_wedges_per_hex_cell];
+            // dense::Vec< ScalarT, 6 > uz[num_wedges_per_hex_cell];
 
-            extract_local_wedge_scalar_coefficients( coeff_times_mu, local_subdomain_id, x_cell, y_cell, r_cell, coeff_times_mu_ );
+            extract_local_wedge_scalar_coefficients(
+                coeff_times_mu, local_subdomain_id, x_cell, y_cell, r_cell, coeff_times_mu_ );
 
-            extract_local_wedge_scalar_coefficients( ux, local_subdomain_id, x_cell, y_cell, r_cell, ux_ );
-            extract_local_wedge_scalar_coefficients( uy, local_subdomain_id, x_cell, y_cell, r_cell, uy_ );
-            extract_local_wedge_scalar_coefficients( uz, local_subdomain_id, x_cell, y_cell, r_cell, uz_ );
+            dense::Vec< ScalarT, 6 > vel_coeffs[VelocityVecDim][num_wedges_per_hex_cell];
+            for ( int d = 0; d < VelocityVecDim; d++ )
+            {
+                extract_local_wedge_vector_coefficients(
+                    vel_coeffs[d], local_subdomain_id, x_cell, y_cell, r_cell, d, velocity_ );
+            }
+            
+            // extract_local_wedge_scalar_coefficients( ux, local_subdomain_id, x_cell, y_cell, r_cell, ux_ );
+            // extract_local_wedge_scalar_coefficients( uy, local_subdomain_id, x_cell, y_cell, r_cell, uy_ );
+            // extract_local_wedge_scalar_coefficients( uz, local_subdomain_id, x_cell, y_cell, r_cell, uz_ );
 
             // Compute the local element matrix.
 
@@ -164,13 +176,13 @@ class ShearHeatingSimple
                     const auto J                = jac( wedge_phy_surf[wedge], r_1, r_2, qp );
                     const auto det              = Kokkos::abs( J.det() );
                     const auto J_inv_transposed = J.inv().transposed();
-                    
+
                     ///////////////////////////////////////////////////////////////////////////////////////
                     // We need to implement the shear heating term
                     // \phi = 2\mu (\eps - \frac{1}{3}\nabla\cdot{u}) : (\eps - \frac{1}{3}\nabla\cdot{u})
                     // where, \eps = \frac{1}{2}(\nabla u + (\nabla u)^T)
-                    // here the parameter coeff_times_mu means that the shear heating term 
-                    // can be scaled in such a way that it can be turned off/on on certain 
+                    // here the parameter coeff_times_mu means that the shear heating term
+                    // can be scaled in such a way that it can be turned off/on on certain
                     // parts of the domain
                     ///////////////////////////////////////////////////////////////////////////////////////
 
@@ -196,38 +208,41 @@ class ShearHeatingSimple
 
                         const auto grad_j = grad_shape( j, qp );
 
-                        dux_dx_eval += ( J_inv_transposed * grad_j )( 0 ) * ux[wedge]( j );
-                        dux_dy_eval += ( J_inv_transposed * grad_j )( 1 ) * ux[wedge]( j );
-                        dux_dz_eval += ( J_inv_transposed * grad_j )( 2 ) * ux[wedge]( j );
+                        dux_dx_eval += ( J_inv_transposed * grad_j )( 0 ) * vel_coeffs[0][wedge]( j );
+                        dux_dy_eval += ( J_inv_transposed * grad_j )( 1 ) * vel_coeffs[0][wedge]( j );
+                        dux_dz_eval += ( J_inv_transposed * grad_j )( 2 ) * vel_coeffs[0][wedge]( j );
 
-                        duy_dx_eval += ( J_inv_transposed * grad_j )( 0 ) * uy[wedge]( j );
-                        duy_dy_eval += ( J_inv_transposed * grad_j )( 1 ) * uy[wedge]( j );
-                        duy_dz_eval += ( J_inv_transposed * grad_j )( 2 ) * uy[wedge]( j );
+                        duy_dx_eval += ( J_inv_transposed * grad_j )( 0 ) * vel_coeffs[1][wedge]( j );
+                        duy_dy_eval += ( J_inv_transposed * grad_j )( 1 ) * vel_coeffs[1][wedge]( j );
+                        duy_dz_eval += ( J_inv_transposed * grad_j )( 2 ) * vel_coeffs[1][wedge]( j );
 
-                        duz_dx_eval += ( J_inv_transposed * grad_j )( 0 ) * uz[wedge]( j );
-                        duz_dy_eval += ( J_inv_transposed * grad_j )( 1 ) * uz[wedge]( j );
-                        duz_dz_eval += ( J_inv_transposed * grad_j )( 2 ) * uz[wedge]( j );
+                        duz_dx_eval += ( J_inv_transposed * grad_j )( 0 ) * vel_coeffs[2][wedge]( j );
+                        duz_dy_eval += ( J_inv_transposed * grad_j )( 1 ) * vel_coeffs[2][wedge]( j );
+                        duz_dz_eval += ( J_inv_transposed * grad_j )( 2 ) * vel_coeffs[2][wedge]( j );
                     }
 
                     const auto shear_heating_qp =
                         2 * std::pow( 0.5 * dux_dy_eval + 0.5 * duy_dx_eval, 2 ) +
                         2 * std::pow( 0.5 * dux_dz_eval + 0.5 * duz_dx_eval, 2 ) +
                         2 * std::pow( 0.5 * duy_dz_eval + 0.5 * duz_dy_eval, 2 ) +
-                        std::pow( -0.33333333333333331 * dux_dx_eval - 0.33333333333333331 * duy_dy_eval +
-                                 0.66666666666666674 * duz_dz_eval,
-                             2 ) +
-                        std::pow( -0.33333333333333331 * dux_dx_eval + 0.66666666666666674 * duy_dy_eval -
-                                 0.33333333333333331 * duz_dz_eval,
-                             2 ) +
-                        std::pow( 0.66666666666666674 * dux_dx_eval - 0.33333333333333331 * duy_dy_eval -
-                                 0.33333333333333331 * duz_dz_eval,
-                             2 );
+                        std::pow(
+                            -0.33333333333333331 * dux_dx_eval - 0.33333333333333331 * duy_dy_eval +
+                                0.66666666666666674 * duz_dz_eval,
+                            2 ) +
+                        std::pow(
+                            -0.33333333333333331 * dux_dx_eval + 0.66666666666666674 * duy_dy_eval -
+                                0.33333333333333331 * duz_dz_eval,
+                            2 ) +
+                        std::pow(
+                            0.66666666666666674 * dux_dx_eval - 0.33333333333333331 * duy_dy_eval -
+                                0.33333333333333331 * duz_dz_eval,
+                            2 );
 
                     for ( int i = 0; i < num_nodes_per_wedge; i++ )
                     {
                         const auto u = shape( i, qp );
 
-                        dst[wedge]( i ) += w * shear_heating_qp * (2.0 * coeff_times_mu_eval) * u * det;
+                        dst[wedge]( i ) += w * shear_heating_qp * ( 2.0 * coeff_times_mu_eval ) * u * det;
                     }
                 }
             }

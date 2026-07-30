@@ -17,6 +17,7 @@
 
 using namespace terra;
 
+using grid::Grid4DDataVec;
 using grid::Grid2DDataScalar;
 using grid::Grid3DDataScalar;
 using grid::Grid3DDataVec;
@@ -25,24 +26,25 @@ using grid::shell::DistributedDomain;
 using grid::shell::DomainInfo;
 using grid::shell::SubdomainInfo;
 using linalg::VectorQ1Scalar;
+using linalg::VectorQ1Vec;
 
 using uint_t = unsigned int;
 
-struct UxInterpolator
+struct VelocityInterpolator
 {
-    Grid3DDataVec< double, 3 > grid_;
-    Grid2DDataScalar< double > radii_;
-    Grid4DDataScalar< double > data_;
-    bool                       only_boundary_;
+    Grid3DDataVec< double, 3 >                         grid_;
+    Grid2DDataScalar< double >                         radii_;
+    Grid4DDataVec< double, 3 >                         data_u_;
+    bool                                               only_boundary_;
 
-    UxInterpolator(
-        const Grid3DDataVec< double, 3 >& grid,
-        const Grid2DDataScalar< double >& radii,
-        const Grid4DDataScalar< double >& data,
-        bool                              only_boundary )
+    VelocityInterpolator(
+        const Grid3DDataVec< double, 3 >&                         grid,
+        const Grid2DDataScalar< double >&                         radii,
+        const Grid4DDataVec< double, 3 >&                         data_u,
+        const bool                                                only_boundary )
     : grid_( grid )
     , radii_( radii )
-    , data_( data )
+    , data_u_( data_u )
     , only_boundary_( only_boundary )
     {}
 
@@ -51,61 +53,9 @@ struct UxInterpolator
     {
         const dense::Vec< double, 3 > coords = grid::shell::coords( local_subdomain_id, x, y, r, grid_, radii_ );
 
-        data_( local_subdomain_id, x, y, r ) = coords( 0 ) + coords( 1 ) + coords( 2 );
-    }
-};
-
-struct UyInterpolator
-{
-    Grid3DDataVec< double, 3 > grid_;
-    Grid2DDataScalar< double > radii_;
-    Grid4DDataScalar< double > data_;
-    bool                       only_boundary_;
-
-    UyInterpolator(
-        const Grid3DDataVec< double, 3 >& grid,
-        const Grid2DDataScalar< double >& radii,
-        const Grid4DDataScalar< double >& data,
-        bool                              only_boundary )
-    : grid_( grid )
-    , radii_( radii )
-    , data_( data )
-    , only_boundary_( only_boundary )
-    {}
-
-    KOKKOS_INLINE_FUNCTION
-    void operator()( const int local_subdomain_id, const int x, const int y, const int r ) const
-    {
-        const dense::Vec< double, 3 > coords = grid::shell::coords( local_subdomain_id, x, y, r, grid_, radii_ );
-
-        data_( local_subdomain_id, x, y, r ) = 2.0 * coords( 0 ) + coords( 1 ) + coords( 2 );
-    }
-};
-
-struct UzInterpolator
-{
-    Grid3DDataVec< double, 3 > grid_;
-    Grid2DDataScalar< double > radii_;
-    Grid4DDataScalar< double > data_;
-    bool                       only_boundary_;
-
-    UzInterpolator(
-        const Grid3DDataVec< double, 3 >& grid,
-        const Grid2DDataScalar< double >& radii,
-        const Grid4DDataScalar< double >& data,
-        bool                              only_boundary )
-    : grid_( grid )
-    , radii_( radii )
-    , data_( data )
-    , only_boundary_( only_boundary )
-    {}
-
-    KOKKOS_INLINE_FUNCTION
-    void operator()( const int local_subdomain_id, const int x, const int y, const int r ) const
-    {
-        const dense::Vec< double, 3 > coords = grid::shell::coords( local_subdomain_id, x, y, r, grid_, radii_ );
-
-        data_( local_subdomain_id, x, y, r ) = coords( 0 ) + 3.0 * coords( 1 ) + coords( 2 );
+        data_u_( local_subdomain_id, x, y, r, 0 ) = coords( 0 ) + coords( 1 ) + coords( 2 );
+        data_u_( local_subdomain_id, x, y, r, 1 ) = 2.0 * coords( 0 ) + coords( 1 ) + coords( 2 );
+        data_u_( local_subdomain_id, x, y, r, 2 ) = coords( 0 ) + 3.0 * coords( 1 ) + coords( 2 );
     }
 };
 
@@ -196,9 +146,11 @@ int main( int argc, char** argv )
 
     VectorQ1Scalar< ScalarType > mu( "mu", domain, mask_data );
 
-    VectorQ1Scalar< ScalarType > ux( "ux", domain, mask_data );
-    VectorQ1Scalar< ScalarType > uy( "uy", domain, mask_data );
-    VectorQ1Scalar< ScalarType > uz( "uz", domain, mask_data );
+    // VectorQ1Scalar< ScalarType > ux( "ux", domain, mask_data );
+    // VectorQ1Scalar< ScalarType > uy( "uy", domain, mask_data );
+    // VectorQ1Scalar< ScalarType > uz( "uz", domain, mask_data );
+
+    VectorQ1Vec< ScalarType, 3 > velocity("velocity", domain, mask_data);
 
     VectorQ1Scalar< ScalarType > f_dst( "f_dst", domain, mask_data );
 
@@ -209,9 +161,11 @@ int main( int argc, char** argv )
         coords_shell,
         coords_radii,
         mu.grid_data(),
-        ux.grid_data(),
-        uy.grid_data(),
-        uz.grid_data() );
+        velocity.grid_data()
+        // ux.grid_data(),
+        // uy.grid_data(),
+        // uz.grid_data() 
+    );
 
     Kokkos::parallel_for(
         "u_interpolation",
@@ -227,21 +181,26 @@ int main( int argc, char** argv )
         "mu_interpolation",
         local_domain_md_range_policy_nodes( domain ),
         ViscosityInterpolator( coords_shell, coords_radii, mu.grid_data(), false ) );
-
+   
     Kokkos::parallel_for(
         "ux_interpolation",
         local_domain_md_range_policy_nodes( domain ),
-        UxInterpolator( coords_shell, coords_radii, ux.grid_data(), false ) );
+        VelocityInterpolator( coords_shell, coords_radii, velocity.grid_data(), false ) );
 
-    Kokkos::parallel_for(
-        "uy_interpolation",
-        local_domain_md_range_policy_nodes( domain ),
-        UyInterpolator( coords_shell, coords_radii, uy.grid_data(), false ) );
+    // Kokkos::parallel_for(
+    //     "ux_interpolation",
+    //     local_domain_md_range_policy_nodes( domain ),
+    //     UxInterpolator( coords_shell, coords_radii, ux.grid_data(), false ) );
 
-    Kokkos::parallel_for(
-        "uz_interpolation",
-        local_domain_md_range_policy_nodes( domain ),
-        UzInterpolator( coords_shell, coords_radii, uz.grid_data(), false ) );
+    // Kokkos::parallel_for(
+    //     "uy_interpolation",
+    //     local_domain_md_range_policy_nodes( domain ),
+    //     UyInterpolator( coords_shell, coords_radii, uy.grid_data(), false ) );
+
+    // Kokkos::parallel_for(
+    //     "uz_interpolation",
+    //     local_domain_md_range_policy_nodes( domain ),
+    //     UzInterpolator( coords_shell, coords_radii, uz.grid_data(), false ) );
 
     linalg::apply( shear_heating_operator, T_h, f_dst );
 
