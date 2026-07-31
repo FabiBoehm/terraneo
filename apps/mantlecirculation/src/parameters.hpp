@@ -89,41 +89,36 @@ struct BoundaryConditionsParameters
 enum class ViscosityLaw
 {
     CONSTANT,
-    FRANK_KAMENETSKII,
+    FK_BENCHMARK,
+    FK_TYPE1,
+    FK_TYPE2,
+    FK_TYPE3,
+    ARRHENIUS
 };
 
 struct ViscosityParameters
 {
-    /// Viscosity law selector — see ViscosityLaw above.
+    /// Viscosity law selector — see ViscosityLaw class above.
     ViscosityLaw law = ViscosityLaw::CONSTANT;
 
-    /// Base of the Frank-Kamenetskii viscosity law (Zhong et al. 2008): eta = rmu^(0.5 - T).
-    /// Total cold/hot viscosity contrast = rmu (rmu = 1 → constant viscosity).
+    /// Parameters for temperature- and depth-dependence of viscosity.
+    /// Frank-Kamenetskii (FK) type laws -> eta = eta_ref * exp( -E_a ( T - x ) + V_a * depth ), with x either 0 (type 1), 0.5 (type 2) or T_mean(d) (type 3).
+    /// For benchmarking, another FK-like law is available (Zhong et al. 2008): eta = rmu^( 0.5 - T ), with parameter activation_energy being used in place of rmu.
     /// Ignored when `law == CONSTANT`.
-    double rmu = 1.0;
-
-    /// If true, multiply the temperature-dependent viscosity by a radial reference profile
-    /// eta_ref(r) read from CSV.  The on-disk file gives a 1D profile (radii column +
-    /// viscosity column); cell-wise viscosity is linearly interpolated to the cell radius
-    /// and *multiplied* into the temperature-dependent factor.  Useful for laterally
-    /// uniform but radially varying viscosity (e.g. realistic mantle profiles).
-    bool radial_profile_enabled = false;
+    /// Total viscosity contrast is O( e^activation_energy ) or O( activation_energy ) for FK_BENCHMARK.
+    double activation_energy = 4.605;
+    double activation_volume = 1.5;
 
     /// Path to the CSV file containing the radial viscosity profile.
-    std::string radial_profile_csv_filename = "radial_viscosity_profile.csv";
-    /// CSV column name for the radii (first column).  Radii must be in the same units
-    /// as `radius_min`/`radius_max` (i.e. non-dimensional shell radii).
-    std::string radial_profile_radii_key = "radii";
-    /// CSV column name for the viscosity values (second column), in units of
-    /// `reference_viscosity`.
-    std::string radial_profile_viscosity_key = "viscosity";
+    /// If empty, radially constant viscosity is assumed.
+    std::string viscosity_profile_csv_path = "";
 
-    /// Multiplicative reference viscosity scale.  Final viscosity is
-    /// `reference_viscosity * eta(T) * eta_ref(r)`.
-    /// When `law == CONSTANT` and `radial_profile_enabled == false`, this is just the
-    /// constant viscosity value.
+    /// CSV column name for the viscosity values
+    std::string viscosity_profile_value_key = "Viscosity (Pa s)";
+
     double reference_viscosity = 1e23;
-    double viscosity           = 1.0;
+    double max_viscosity       = 1e25;
+    double min_viscosity       = 1e19;
 };
 
 /// Initial temperature distribution.
@@ -411,6 +406,14 @@ inline void nondimensionalise( Parameters& prm )
         // Surface density
         phys.surface_density_nondim = phys.surface_density_dim / phys.reference_density;
 
+        // Viscosity limits
+        std::clamp(
+            phys.viscosity_parameters.reference_viscosity,
+            phys.viscosity_parameters.min_viscosity,
+            phys.viscosity_parameters.max_viscosity );
+        phys.viscosity_parameters.max_viscosity /= phys.viscosity_parameters.reference_viscosity;
+        phys.viscosity_parameters.min_viscosity /= phys.viscosity_parameters.reference_viscosity;
+
         // Compute characteristic velocity and thermal diffusivity
         phys.characteristic_velocity =
             phys.thermal_conductivity /
@@ -464,6 +467,11 @@ inline void nondimensionalise( Parameters& prm )
         time.t_end               = time.t_end_Ma;
         time.dt_max              = time.dt_max_Ma;
         time.dt_min              = time.dt_min_Ma;
+
+        std::clamp(
+            phys.viscosity_parameters.reference_viscosity,
+            phys.viscosity_parameters.min_viscosity,
+            phys.viscosity_parameters.max_viscosity );
 
         phys.thermal_expansivity  = 1.0;
         phys.thermal_conductivity = 1.0;
@@ -641,51 +649,46 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
     add_option_with_default(
         app, "--reference-viscosity", parameters.physics_parameters.viscosity_parameters.reference_viscosity )
         ->group( "Viscosity" );
-    const auto radial_profile_enabled =
-        add_flag_with_default(
-            app,
-            "--viscosity-radial-profile",
-            parameters.physics_parameters.viscosity_parameters.radial_profile_enabled )
-            ->group( "Viscosity" )
-            ->description(
-                "Add this flag if you want to supply a radial viscosity profile. "
-                "Then use further flags/arguments (starting with --viscosity-radial-profile-<...>) to specify the file path etc. "
-                "If you omit this flag, the viscosity is set to const (eta = 1)." );
     add_option_with_default(
         app,
-        "--viscosity-radial-profile-csv-filename",
-        parameters.physics_parameters.viscosity_parameters.radial_profile_csv_filename )
-        ->needs( radial_profile_enabled )
-        ->group( "Viscosity" );
-    add_option_with_default(
-        app,
-        "--viscosity-radial-profile-radii-key",
-        parameters.physics_parameters.viscosity_parameters.radial_profile_radii_key )
-        ->needs( radial_profile_enabled )
-        ->group( "Viscosity" );
-    add_option_with_default(
-        app,
-        "--viscosity-radial-profile-value-key",
-        parameters.physics_parameters.viscosity_parameters.radial_profile_viscosity_key )
-        ->needs( radial_profile_enabled )
+        "--viscosity-profile-csv-path",
+        parameters.physics_parameters.viscosity_parameters.viscosity_profile_csv_path )
         ->group( "Viscosity" );
 
     std::map< std::string, ViscosityLaw > viscosity_law_map{
         { "constant", ViscosityLaw::CONSTANT },
-        { "frank-kamenetskii", ViscosityLaw::FRANK_KAMENETSKII },
+        { "fk-benchmark", ViscosityLaw::FK_BENCHMARK },
+        { "fk-type1", ViscosityLaw::FK_TYPE1 },
+        { "fk-type2", ViscosityLaw::FK_TYPE2 },
+        { "fk-type3", ViscosityLaw::FK_TYPE3 },
+        { "fk1", ViscosityLaw::FK_TYPE1 },
+        { "fk2", ViscosityLaw::FK_TYPE2 },
+        { "fk3", ViscosityLaw::FK_TYPE3 },
+        { "arrhenius", ViscosityLaw::ARRHENIUS },
     };
 
     add_option_with_default( app, "--viscosity-law", parameters.physics_parameters.viscosity_parameters.law )
         ->transform( CLI::CheckedTransformer( viscosity_law_map, CLI::ignore_case ) )
         ->default_val( "constant" )
         ->group( "Viscosity" )
-        ->description( "Viscosity law to use. 'constant' uses a constant or radial profile. "
-                       "'frank-kamenetskii' computes eta = rmu^(0.5 - T) (Zhong et al. 2008)." );
+        ->description(
+            "Viscosity law to use. 'constant' uses a constant or radial profile. Use 'fk-type{i}'/'fk{i}' with i between 1 and 3 for different variants of FRANK KAMENETSKII type laws that tie to a radial reference profile. 'fk-benchmark' computes eta = rmu^(0.5 - T) (Zhong et al. 2008), with parameter activation_energy in place of rmu." );
 
-    add_option_with_default( app, "--viscosity-rmu", parameters.physics_parameters.viscosity_parameters.rmu )
+    add_option_with_default(
+        app, "--activation-energy", parameters.physics_parameters.viscosity_parameters.activation_energy )
         ->group( "Viscosity" )
-        ->description( "Base of the Frank-Kamenetskii viscosity law: eta = rmu^(0.5 - T) "
-                       "(Zhong et al. 2008). Cold/hot contrast = rmu; rmu = 1 gives constant viscosity." );
+        ->description(
+            "E_a controls magnitude of temp-dependence. Full viscosity contrast is O(e^E_a) for FK types 1 to 3 and O(E_a) for fk-benchmark." );
+    add_option_with_default(
+        app, "--activation_volume", parameters.physics_parameters.viscosity_parameters.activation_volume )
+        ->group( "Viscosity" )
+        ->description(
+            "V_a > 0 adds a further depth-dependence  as exp( E_a * T + V_a * d ). Counteracts the natural decrease of viscosity with depth from pure (absolute) temp-dependence." );
+    add_option_with_default( app, "--max-viscosity", parameters.physics_parameters.viscosity_parameters.max_viscosity )
+        ->group( "Viscosity" )
+        ->description( "Maximum and minimum limits to viscosity" );
+    add_option_with_default( app, "--min-viscosity", parameters.physics_parameters.viscosity_parameters.min_viscosity )
+        ->group( "Viscosity" );
 
     ///////////////////////////////
     /// Initial temperature      ///

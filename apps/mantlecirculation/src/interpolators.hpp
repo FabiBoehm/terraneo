@@ -287,28 +287,55 @@ struct FVNoiseAdder
 /// Computes viscosity from temperature according to the selected viscosity law.
 struct ViscosityFromTemperature
 {
-    ViscosityLaw                   law_;
-    ScalarType                     rmu_;
-    Grid4DDataScalar< ScalarType > eta_;
-    Grid4DDataScalar< ScalarType > T_;
+    ViscosityLaw                         law_;
+    Grid4DDataScalar< ScalarType >       eta_;
+    const Grid4DDataScalar< ScalarType > T_;
+    const Grid2DDataScalar< ScalarType > eta_profile_;
+    const Grid2DDataScalar< ScalarType > coords_radii_;
+    const ScalarType                     activation_energy_;
+    const ScalarType                     activation_volume_;
+    const ScalarType                     radius_max_;
+    const ScalarType                     eta_min_;
+    const ScalarType                     eta_max_;
+    const ScalarType                     c1_ = 0.25;
+    const ScalarType                     c2_ = 1.25;
 
     KOKKOS_INLINE_FUNCTION
     void operator()( const int id, const int x, const int y, const int r ) const
     {
         const ScalarType T_val = T_( id, x, y, r );
+        const ScalarType depth = radius_max_ - coords_radii_( id, r );
+
+        ScalarType eta_val;
 
         switch ( law_ )
         {
-        case ViscosityLaw::FRANK_KAMENETSKII:
+        case ViscosityLaw::FK_BENCHMARK:
             // Zhong et al. (2008) form: mu = rmu^(0.5 - T).
             // Total viscosity contrast (cold/hot) = rmu.
-            eta_( id, x, y, r ) = Kokkos::pow( rmu_, ScalarType( 0.5 ) - T_val );
+            // activation_energy here used in place of rmu.
+            eta_val = Kokkos::pow( activation_energy_, ScalarType( 0.5 ) - T_val );
             break;
+        case ViscosityLaw::FK_TYPE1: // uses T as input
+        case ViscosityLaw::FK_TYPE3: // dT instead of T
+            eta_val =
+                eta_profile_( id, r ) * Kokkos::exp( -1 * activation_energy_ * T_val + activation_volume_ * depth );
+            break;
+        case ViscosityLaw::FK_TYPE2:
+            eta_val =
+                eta_profile_( id, r ) *
+                Kokkos::exp( -1 * activation_energy_ * ( T_val - ScalarType( 0.5 ) ) + activation_volume_ * depth );
+            break;
+        case ViscosityLaw::ARRHENIUS:
+            eta_val = eta_profile_( id, r ) * Kokkos::exp(
+                                                  activation_energy_ * ( ScalarType( 1 ) / ( T_val + c1_ ) - c2_ ) +
+                                                  activation_volume_ * depth );
         case ViscosityLaw::CONSTANT:
         default:
             // eta is already set, nothing to do.
-            break;
+            return;
         }
+        eta_( id, x, y, r ) = Kokkos::clamp( eta_val, eta_min_, eta_max_ );
     }
 };
 
