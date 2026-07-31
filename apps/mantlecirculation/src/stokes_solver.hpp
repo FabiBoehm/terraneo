@@ -238,7 +238,7 @@ class StokesContext
         // Radial profile (constant or CSV-driven), then projected into Q1 on every level.
         std::vector< grid::Grid2DDataScalar< ScalarType > > radial_viscosity_profile;
         radial_viscosity_profile.reserve( num_levels_ );
-        if ( !prm_.physics_parameters.viscosity_parameters.radial_profile_enabled )
+        if ( prm_.physics_parameters.viscosity_parameters.viscosity_profile_csv_path.empty() )
         {
             logroot << "Using constant viscosity profile." << std::endl;
             for ( int level = 0; level < num_levels_; level++ )
@@ -253,10 +253,12 @@ class StokesContext
             for ( int level = 0; level < num_levels_; level++ )
             {
                 radial_viscosity_profile.push_back( shell::interpolate_radial_profile_into_subdomains_from_csv(
-                    prm_.physics_parameters.viscosity_parameters.radial_profile_csv_filename,
-                    prm_.physics_parameters.viscosity_parameters.radial_profile_radii_key,
-                    prm_.physics_parameters.viscosity_parameters.radial_profile_viscosity_key,
-                    coords_radii_[level] ) );
+                    prm_.physics_parameters.viscosity_parameters.viscosity_profile_csv_path,
+                    prm_.physics_parameters.radial_profiles_radii_key,
+                    prm_.physics_parameters.viscosity_parameters.viscosity_profile_value_key,
+                    coords_radii_[level],
+                    ScalarType( 1 ) / prm_.mesh_parameters.mantle_thickness_m,
+                    ScalarType( 1 ) / prm_.physics_parameters.viscosity_parameters.reference_viscosity ) );
             }
         }
 
@@ -273,9 +275,15 @@ class StokesContext
             // GCA still needs an approximation of viscosity on coarse grids
             // for the weighting of the mass matrix.
             geophysics::viscosity::RadialProfileViscosityInterpolator viscosity_interpolator(
-                radial_viscosity_profile[level], prm_.physics_parameters.viscosity_parameters.viscosity );
+                radial_viscosity_profile[level],
+                ScalarType( 1 ),
+                prm_.physics_parameters.viscosity_parameters.min_viscosity,
+                prm_.physics_parameters.viscosity_parameters.max_viscosity );
             viscosity_interpolator.interpolate( eta_[level].grid_data() );
         }
+
+        // Assign radial_viscosity_profile at highest level to class member eta_profile_, since we need the reference profile for viscosity laws
+        eta_profile_ = radial_viscosity_profile[velocity_level_];
 
         // ---------------- GCA element selection ----------------
         GCAElements_  = VectorQ1Scalar< ScalarType >( "GCAElements", *domains_[0], ownership_mask_[0] );
@@ -718,7 +726,7 @@ class StokesContext
     const grid::shell::BoundaryConditions& boundary_conditions() const { return bcs_; }
 
     /// Update the fine-level viscosity from the current temperature using the
-    /// configured viscosity law.  No-op for ViscosityLaw::CONSTANT.  Coarse-
+    /// configured viscosity law. No-op for ViscosityLaw::CONSTANT. Coarse-
     /// level eta (used by MG smoothing/coarse solves) is intentionally not
     /// touched, matching the pre-refactor behavior.
     void update_viscosity( const linalg::VectorQ1Scalar< ScalarType >& T )
@@ -732,9 +740,15 @@ class StokesContext
             grid::shell::local_domain_md_range_policy_nodes( *domains_[velocity_level_] ),
             ViscosityFromTemperature{
                 prm_.physics_parameters.viscosity_parameters.law,
-                prm_.physics_parameters.viscosity_parameters.rmu,
                 eta_[velocity_level_].grid_data(),
-                T.grid_data() } );
+                T.grid_data(),
+                eta_profile_,
+                coords_radii_[velocity_level_],
+                prm_.physics_parameters.viscosity_parameters.activation_energy,
+                prm_.physics_parameters.viscosity_parameters.activation_volume,
+                prm_.mesh_parameters.radius_max,
+                prm_.physics_parameters.viscosity_parameters.min_viscosity,
+                prm_.physics_parameters.viscosity_parameters.max_viscosity } );
         Kokkos::fence();
     }
 
@@ -830,6 +844,7 @@ class StokesContext
     std::vector< grid::Grid2DDataScalar< ScalarType > >                     coords_radii_;
     std::vector< grid::Grid4DDataScalar< grid::NodeOwnershipFlag > >        ownership_mask_;
     std::vector< grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag > > boundary_mask_;
+    grid::Grid2DDataScalar< ScalarType >                                    eta_profile_;
     grid::shell::BoundaryConditions                                         bcs_{}; // velocity BC set (owned copy)
     const Parameters&                                                       prm_;
     std::shared_ptr< util::Table >                                          table_;

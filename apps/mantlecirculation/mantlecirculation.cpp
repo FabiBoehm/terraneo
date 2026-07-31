@@ -213,6 +213,7 @@ Result<> run( const Parameters& prm )
     logroot << "\n----------Simulation parameters-----------" << std::endl;
     logroot << "Rayleigh number: " << prm.physics_parameters.rayleigh_number << std::endl;
     logroot << "Peclet number: " << prm.physics_parameters.peclet_number << std::endl;
+    logroot << "Reference viscosity: " << prm.physics_parameters.viscosity_parameters.reference_viscosity << std::endl;
     logroot << "Thermal diffusivity: " << prm.physics_parameters.thermal_diffusivity_dim << std::endl;
     if ( !prm.devel_parameters.nondimensional_input )
         logroot << "Characteristic velocity: " << prm.physics_parameters.characteristic_velocity << std::endl;
@@ -284,13 +285,6 @@ Result<> run( const Parameters& prm )
         boundary_mask_data[velocity_level],
         prm );
 
-    // If temperature-dependent viscosity is enabled, compute the initial viscosity from the initial T.
-    if ( prm.physics_parameters.viscosity_parameters.law != ViscosityLaw::CONSTANT )
-    {
-        logroot << "Computing initial temperature-dependent viscosity ..." << std::endl;
-        stokes.update_viscosity( T );
-    }
-
     table->add_row( {
         { "tag", "setup" },
         { "dofs_velocity", num_dofs_velocity },
@@ -302,6 +296,11 @@ Result<> run( const Parameters& prm )
 
     table->print_pretty();
     table->clear();
+
+    // Reference conductive temperature profile (also used for the Nusselt number).
+    VectorQ1Scalar< ScalarType > T_cond( "T_cond", ( *domains[velocity_level] ), ownership_mask_data[velocity_level] );
+    compute_reference_conductive_profile(
+        T_cond, ( *domains[velocity_level] ), coords_shell[velocity_level], coords_radii[velocity_level], prm );
 
     // Setting up XDMF output (serves for both checkpointing and visualization).
 
@@ -320,11 +319,6 @@ Result<> run( const Parameters& prm )
         coords_shell[velocity_level],
         coords_radii[velocity_level],
         coords_scale_factor );
-
-    // Reference conductive temperature profile (also used for the Nusselt number).
-    VectorQ1Scalar< ScalarType > T_cond( "T_cond", ( *domains[velocity_level] ), ownership_mask_data[velocity_level] );
-    compute_reference_conductive_profile(
-        T_cond, ( *domains[velocity_level] ), coords_shell[velocity_level], coords_radii[velocity_level], prm );
 
     xdmf_output->add( T.grid_data() );                 // Temperature
     xdmf_output->add( Tdev.grid_data() );              // Temperature deviation
@@ -354,18 +348,24 @@ Result<> run( const Parameters& prm )
             coords_shell[velocity_level],
             coords_radii[velocity_level],
             prm );
-
-        // Refresh viscosity from the loaded T: the IC-based eta computed
-        // earlier would otherwise drive the first Stokes solve with a stale
-        // viscosity field and produce an unphysical velocity at restart.
-        if ( prm.physics_parameters.viscosity_parameters.law != ViscosityLaw::CONSTANT )
-        {
-            stokes.update_viscosity( T );
-        }
     }
 
     // Update Tdev
     subtract_radial_profile( Tdev, T, T_ref, *domains[velocity_level] );
+
+    // Compute temperature-dependent viscosity
+    if ( prm.physics_parameters.viscosity_parameters.law != ViscosityLaw::CONSTANT )
+    {
+        logroot << "Computing initial temperature-dependent viscosity ..." << std::endl;
+        if ( prm.physics_parameters.viscosity_parameters.law == ViscosityLaw::FK_TYPE3 )
+        {
+            stokes.update_viscosity( Tdev );
+        }
+        else
+        {
+            stokes.update_viscosity( T );
+        }
+    }
 
     // Setting XDMF file padding width according to max_timesteps.
     xdmf_output->set_pad_width(
@@ -617,7 +617,14 @@ Result<> run( const Parameters& prm )
             subtract_radial_profile( Tdev, T, T_ref, *domains[velocity_level] );
 
             // Update viscosity from the new temperature field.
-            stokes.update_viscosity( T );
+            if ( prm.physics_parameters.viscosity_parameters.law == ViscosityLaw::FK_TYPE3 )
+            {
+                stokes.update_viscosity( Tdev );
+            }
+            else
+            {
+                stokes.update_viscosity( T );
+            }
 
             // --- Stokes solve ---
             stokes.solve(
