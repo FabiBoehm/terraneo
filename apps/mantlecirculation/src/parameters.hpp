@@ -641,7 +641,7 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
         ->description(
             "File paths for custom radial input profiles. Leave empty for radially constant parameters / predefined solutions." );
     add_option_with_default( app, "--alpha-profile-path", parameters.physics_parameters.alpha_profile_csv_path )
-        ->group( "Radial input profiles " );
+        ->group( "Radial input profiles" );
     add_option_with_default( app, "--cp-profile-path", parameters.physics_parameters.cp_profile_csv_path )
         ->group( "Radial input profiles" );
 

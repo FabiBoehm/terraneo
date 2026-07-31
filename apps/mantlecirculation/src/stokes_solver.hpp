@@ -244,7 +244,7 @@ class StokesContext
             for ( int level = 0; level < num_levels_; level++ )
             {
                 radial_viscosity_profile.push_back(
-                    shell::interpolate_constant_radial_profile( coords_radii_[level], 1.0 ) );
+                    shell::interpolate_constant_radial_profile( coords_radii_[level], ScalarType( 1 ) ) );
             }
         }
         else
@@ -423,7 +423,7 @@ class StokesContext
 
                 VectorQ1Vec< ScalarType > tmp(
                     "inverse_diagonal_tmp" + std::to_string( level ), *domains_[level], ownership_mask_[level] );
-                linalg::assign( tmp, 1.0 );
+                linalg::assign( tmp, ScalarType( 1 ) );
                 if ( level == num_levels_ - 1 )
                 {
                     K_->block_11().set_diagonal( true );
@@ -600,7 +600,7 @@ class StokesContext
                 "inverse_diagonal_tmp" + std::to_string( pressure_level_ ),
                 *domains_[pressure_level_],
                 ownership_mask_[pressure_level_] );
-            linalg::assign( tmp, 1.0 );
+            linalg::assign( tmp, ScalarType( 1 ) );
             linalg::apply( *pmass_, tmp, lumped_diagonal_pmass_ );
         }
         inv_lumped_pmass_ = std::make_unique< PrecSchur >( lumped_diagonal_pmass_ );

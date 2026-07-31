@@ -100,8 +100,8 @@ void initialize_temperature_fields(
                 prm.physics_parameters.radial_profiles_radii_key,
                 init_temp.Tref_profile_value_key,
                 coords_radii,
-                1.0 / prm.mesh_parameters.mantle_thickness_m,
-                1.0 / prm.boundary_parameters.delta_T_K );
+                ScalarType( 1 ) / prm.mesh_parameters.mantle_thickness_m,
+                ScalarType( 1 ) / prm.boundary_parameters.delta_T_K );
         }
 
         else if ( init_temp.profile == InitialTemperatureProfile::CONDUCTIVE )
@@ -318,8 +318,8 @@ void radial_profile_init(
             phys.radial_profiles_radii_key,
             phys.density_profile_value_key,
             coords_radii,
-            1.0 / prm.mesh_parameters.mantle_thickness_m,
-            1.0 / phys.reference_density );
+            ScalarType( 1 ) / prm.mesh_parameters.mantle_thickness_m,
+            ScalarType( 1 ) / phys.reference_density );
     }
     else if ( phys.compressible )
     {
@@ -342,7 +342,7 @@ void radial_profile_init(
     }
     else // Fill with ones if incompressible
     {
-        Kokkos::deep_copy( rho_profile, 1.0 );
+        Kokkos::deep_copy( rho_profile, ScalarType( 1 ) );
     }
 
     // alpha
@@ -353,12 +353,12 @@ void radial_profile_init(
             phys.radial_profiles_radii_key,
             phys.alpha_profile_value_key,
             coords_radii,
-            1.0 / prm.mesh_parameters.mantle_thickness_m,
-            1.0 / phys.thermal_expansivity );
+            ScalarType( 1 ) / prm.mesh_parameters.mantle_thickness_m,
+            ScalarType( 1 ) / phys.thermal_expansivity );
     }
     else // Fill with ones
     {
-        Kokkos::deep_copy( alpha_profile, 1.0 );
+        Kokkos::deep_copy( alpha_profile, ScalarType( 1 ) );
     }
 
     // Cp
@@ -369,12 +369,12 @@ void radial_profile_init(
             phys.radial_profiles_radii_key,
             phys.cp_profile_value_key,
             coords_radii,
-            1.0 / prm.mesh_parameters.mantle_thickness_m,
-            1.0 / phys.specific_heat_capacity );
+            ScalarType( 1 ) / prm.mesh_parameters.mantle_thickness_m,
+            ScalarType( 1 ) / phys.specific_heat_capacity );
     }
     else // Fill with ones
     {
-        Kokkos::deep_copy( cp_profile, 1.0 );
+        Kokkos::deep_copy( cp_profile, ScalarType( 1 ) );
     }
 
     // Kappa
@@ -504,8 +504,8 @@ void load_temperature_checkpoint(
     // Nondimensionalise checkpoint, if necessary
     if ( metadata.is_dimensional )
     {
-        scale( T.grid_data(), 1.0 / prm.boundary_parameters.delta_T_K );
-        scale( u_velocity.grid_data(), 1.0 / prm.physics_parameters.calc_cm_per_year );
+        scale( T.grid_data(), ScalarType( 1 ) / prm.boundary_parameters.delta_T_K );
+        scale( u_velocity.grid_data(), ScalarType( 1 ) / prm.physics_parameters.calc_cm_per_year );
     }
 
     // T_fct is not stored in checkpoints (only Q1 T is).  Recover it via FE→FV
