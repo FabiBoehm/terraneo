@@ -86,10 +86,10 @@ inline Result<> write_xdmf(
         xdmf_output->write( timestep );
 
         // ... and nondimensionalise again.
-        scale( Temperature_data, 1.0 / prm.boundary_parameters.delta_T_K );
-        scale( Velocity_data, 1.0 / prm.physics_parameters.calc_cm_per_year );
-        scale( Viscosity_data, 1.0 / prm.physics_parameters.viscosity_parameters.reference_viscosity );
-        scale( Density_data, 1.0 / prm.physics_parameters.reference_density );
+        scale( Temperature_data, ScalarType( 1 ) / prm.boundary_parameters.delta_T_K );
+        scale( Velocity_data, ScalarType( 1 ) / prm.physics_parameters.calc_cm_per_year );
+        scale( Viscosity_data, ScalarType( 1 ) / prm.physics_parameters.viscosity_parameters.reference_viscosity );
+        scale( Density_data, ScalarType( 1 ) / prm.physics_parameters.reference_density );
         // no need to rescale TemperatureDev, will be recomputed anyway.
 
         // Redim, write and nondim pressure
@@ -126,7 +126,7 @@ inline Result<> compute_and_write_radial_profiles(
     const std::vector< double >&        radial_coords,
     const Parameters&                   prm,
     const int                           timestep,
-    const ScalarType                    field_scale  = 1.0,
+    const ScalarType                    field_scale  = ScalarType( 1 ),
     const std::string&                  radial_label = "radius" )
 {
     const auto profiles = shell::radial_profiles_to_table< ScalarType >(
@@ -168,7 +168,7 @@ inline Result<> compute_and_write_velocity_radial_profiles(
     const grid::Grid4DDataScalar< grid::NodeOwnershipFlag >& mask,
     const Parameters&                                        prm,
     const int                                                timestep,
-    const ScalarType                                         field_scale  = 1.0,
+    const ScalarType                                         field_scale  = ScalarType( 1 ),
     const std::string&                                       radial_label = "radius" )
 {
     VectorQ1Scalar< ScalarType > u_r( "u_r", domain, mask );
