@@ -334,6 +334,11 @@ struct EnergySolverParameters
     double ev_alpha_max = 0.078; ///< First-order upwind cap on ν_h (= 0.026·d in 3D).
     double ev_alpha_E   = 1.0;   ///< Residual-branch scale.
 
+    /// Assemble the entropy-viscosity artificial diffusion implicitly (LHS,
+    /// ASPECT-style) instead of the explicit RHS lag. Removes the explicit-diffusion
+    /// CFL limit ~alpha_max*CFL. Preconditioner diagonal still omits nu_h.
+    bool implicit_nu_h = false;
+
     /// If true, log global min/max/mean of the per-wedge ν_h field once per
     /// output_frequency to <outdir>/nu_h_stats.csv (timestep, min, max, mean).
     bool ev_dump_nu_h = false;
@@ -967,6 +972,10 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
         ->group( "Energy Solver" );
     add_option_with_default( app, "--ev-dump-nu-h", parameters.energy_solver_parameters.ev_dump_nu_h )
         ->group( "Energy Solver" );
+    add_option_with_default( app, "--ev-implicit-nu-h", parameters.energy_solver_parameters.implicit_nu_h )
+        ->group( "Energy Solver" )
+        ->description( "Assemble the entropy-viscosity artificial diffusion implicitly (LHS, "
+                       "ASPECT-style) instead of the explicit RHS lag." );
 
     //////////////////////
     /// Input / output ///

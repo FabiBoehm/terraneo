@@ -96,6 +96,12 @@ class UnsteadyAdvectionDiffusionSUPGKerngen
     ScalarT diffusivity_;
     ScalarT dt_;
 
+    // Optional per-wedge artificial (entropy) viscosity, ADDED to diffusivity_ in the
+    // diffusion term when use_nu_h_ is set. Lets the EV solver fold nu_h implicitly
+    // into this fused operator (ASPECT-style) instead of a separate matvec.
+    grid::Grid5DDataScalar< ScalarT > nu_h_wedge_;
+    bool                              use_nu_h_ = false;
+
     bool    treat_boundary_;
     bool    diagonal_;
     ScalarT mass_scaling_;
@@ -216,6 +222,8 @@ class UnsteadyAdvectionDiffusionSUPGKerngen
     const ScalarT& dt() const { return dt_; }
 
     void set_supg_enabled( bool on ) { supg_enabled_ = on; }
+    void set_nu_h_field( const grid::Grid5DDataScalar< ScalarT >& nu ) { nu_h_wedge_ = nu; use_nu_h_ = true; }
+    void clear_nu_h_field() { use_nu_h_ = false; }
     bool supg_enabled() const { return supg_enabled_; }
 
     const char* path_name() const { return kernel_path_ == KernelPath::Slow ? "slow" : "fast"; }
@@ -428,7 +436,7 @@ class UnsteadyAdvectionDiffusionSUPGKerngen
                         const auto grad_j  = J_inv_transposed * grad_shape( j, quad_points[q] );
 
                         const auto mass       = shape_i * shape_j;
-                        const auto diffusion  = diffusivity_ * grad_i.dot( grad_j );
+                        const auto diffusion  = ( diffusivity_ + ( use_nu_h_ ? nu_h_wedge_( s, x_cell, y_cell, r_cell, wedge ) : ScalarT( 0 ) ) ) * grad_i.dot( grad_j );
                         const auto advection  = vel.dot( grad_j ) * shape_i;
                         const auto streamline = streamline_diffusivity[wedge] * vel.dot( grad_j ) * vel.dot( grad_i );
 
@@ -689,6 +697,11 @@ class UnsteadyAdvectionDiffusionSUPGKerngen
                 const double P1[3] = { coords_sh( v1, 0 ), coords_sh( v1, 1 ), coords_sh( v1, 2 ) };
                 const double P2[3] = { coords_sh( v2, 0 ), coords_sh( v2, 1 ), coords_sh( v2, 2 ) };
 
+                // Per-wedge effective diffusivity = physical kappa + artificial nu_h
+                // (folded implicitly; nu_h == 0 unless the EV solver set the field).
+                const double diff_coeff = double( diffusivity_ )
+                    + ( use_nu_h_ ? double( nu_h_wedge_( local_subdomain_id, x_cell, y_cell, r_cell_abs, w ) ) : 0.0 );
+
                 // Differences, hoisted (used per quad).
                 const double dP1_P0[3] = { P1[0] - P0[0], P1[1] - P0[1], P1[2] - P0[2] };
                 const double dP2_P0[3] = { P2[0] - P0[0], P2[1] - P0[1], P2[2] - P0[2] };
@@ -811,7 +824,7 @@ class UnsteadyAdvectionDiffusionSUPGKerngen
                         // For LumpedMass: exclude the mass term from A_scalar (handled in diagonal acc below).
                         const double mass_in_scalar = LumpedMass ? 0.0 : ( double( mass_scaling_ ) * T_hat );
                         const double A_scalar = mass_in_scalar + double( dt_ ) * u_dot_gT;
-                        const double dkappa   = double( dt_ ) * double( diffusivity_ );
+                        const double dkappa   = double( dt_ ) * diff_coeff;
                         const double dtau     = double( dt_ ) * tau_wedge * u_dot_gT;
                         const double Bx = dkappa * gT0 + dtau * ux;
                         const double By = dkappa * gT1 + dtau * uy;
@@ -851,7 +864,7 @@ class UnsteadyAdvectionDiffusionSUPGKerngen
                                 const double Ti  = T_sh( nid, lvl );
 
                                 const double u_dot_gi = ux * gi0 + uy * gi1 + uz * gi2;
-                                const double diff_ii  = double( diffusivity_ ) * ( gi0 * gi0 + gi1 * gi1 + gi2 * gi2 );
+                                const double diff_ii  = diff_coeff * ( gi0 * gi0 + gi1 * gi1 + gi2 * gi2 );
                                 const double adv_ii   = pi * u_dot_gi;
                                 const double supg_ii  = tau_wedge * u_dot_gi * u_dot_gi;
                                 const double A_ii     = diff_ii + adv_ii + supg_ii;

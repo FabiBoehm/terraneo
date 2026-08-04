@@ -106,39 +106,77 @@ void initialize_temperature_fields(
             const int l_max = init_temp.sph_degree_max;
             logroot << " + eps * broadband SH sum, l in [" << l_min << "," << l_max << "], seed "
                     << init_temp.sph_random_seed << std::endl;
-            // Draw coefficients once on the host (reproducible), fold each mode into
-            // the device grid; amplitude-normalise by 1/sqrt(#modes).
+            // Draw coefficients once on the host (reproducible), amplitude-normalise by
+            // 1/sqrt(#modes). FUSED evaluation: for each shell node we call plmbar ONCE
+            // (the full Legendre triangle up to l_max) and accumulate every mode, instead
+            // of building one device grid + fence per mode. Cost is O(N * l_max^2) on the
+            // host with a single host->device copy, versus the previous
+            // O(N * l_max^4) with a device round-trip and global fence per mode -- the
+            // latter made large l_max (e.g. 96 -> 9345 modes) effectively hang for hours.
+            // Equivalent field: same modes, same coefficient draw order; plmbar's P_l^m
+            // recurrence is independent of the max degree requested, so per-mode values
+            // match (accumulation is done in double).
             std::mt19937                             rng( init_temp.sph_random_seed );
             std::uniform_real_distribution< double > dist( -1.0, 1.0 );
             int                                      nmodes = 0;
             for ( int l = l_min; l <= l_max; ++l )
                 nmodes += ( 2 * l + 1 );
-            const ScalarType norm =
-                ( nmodes > 0 ) ? ScalarType( 1 ) / std::sqrt( static_cast< ScalarType >( nmodes ) ) : ScalarType( 1 );
+            const double norm = ( nmodes > 0 ) ? 1.0 / std::sqrt( static_cast< double >( nmodes ) ) : 1.0;
+
+            // Coefficient for every (l,m), drawn in the original (l: l_min..l_max, m: -l..l) order.
+            std::vector< double > coeff;
+            coeff.reserve( static_cast< size_t >( nmodes > 0 ? nmodes : 0 ) );
+            for ( int l = l_min; l <= l_max; ++l )
+                for ( int m = -l; m <= l; ++m )
+                    coeff.push_back( dist( rng ) * norm );
+
             sph_coeffs = grid::Grid3DDataScalar< ScalarType >(
                 "sph_coeffs_broadband",
                 static_cast< int >( coords_shell.extent( 0 ) ),
                 static_cast< int >( coords_shell.extent( 1 ) ),
                 static_cast< int >( coords_shell.extent( 2 ) ) );
-            for ( int l = l_min; l <= l_max; ++l )
+
+            auto sph_coeffs_host   = Kokkos::create_mirror_view( Kokkos::HostSpace{}, sph_coeffs );
+            auto coords_shell_host = Kokkos::create_mirror_view( Kokkos::HostSpace{}, coords_shell );
+            Kokkos::deep_copy( coords_shell_host, coords_shell );
+
+            shell::SphericalHarmonicsTool sph_tool( static_cast< unsigned int >( l_max ) );
+            const int             plm_size = ( l_max + 1 ) * ( l_max + 2 ) / 2;
+            std::vector< double > plm( static_cast< size_t >( plm_size ) );
+
+            const int n_sd = static_cast< int >( sph_coeffs.extent( 0 ) );
+            const int n_i  = static_cast< int >( sph_coeffs.extent( 1 ) );
+            const int n_j  = static_cast< int >( sph_coeffs.extent( 2 ) );
+            for ( int sd = 0; sd < n_sd; ++sd )
             {
-                for ( int m = -l; m <= l; ++m )
+                for ( int i = 0; i < n_i; ++i )
                 {
-                    const ScalarType c = static_cast< ScalarType >( dist( rng ) ) * norm;
-                    auto             g = shell::spherical_harmonics_coefficients_grid< ScalarType, ScalarType >(
-                        l, m, coords_shell );
-                    auto sc = sph_coeffs;
-                    Kokkos::parallel_for(
-                        "accumulate broadband sph",
-                        Kokkos::MDRangePolicy< Kokkos::Rank< 3 > >(
-                            { 0, 0, 0 },
-                            { static_cast< int >( g.extent( 0 ) ),
-                              static_cast< int >( g.extent( 1 ) ),
-                              static_cast< int >( g.extent( 2 ) ) } ),
-                        KOKKOS_LAMBDA( int sd, int x, int y ) { sc( sd, x, y ) += c * g( sd, x, y ); } );
-                    Kokkos::fence();
+                    for ( int j = 0; j < n_j; ++j )
+                    {
+                        const double x   = static_cast< double >( coords_shell_host( sd, i, j, 0 ) );
+                        const double y   = static_cast< double >( coords_shell_host( sd, i, j, 1 ) );
+                        const double z   = static_cast< double >( coords_shell_host( sd, i, j, 2 ) );
+                        const double rad = std::sqrt( x * x + y * y + z * z );
+                        const double phi = std::atan2( y, x );
+                        sph_tool.plmbar( plm.data(), static_cast< unsigned int >( l_max ), z / rad );
+
+                        double acc = 0.0;
+                        int    k   = 0;
+                        for ( int l = l_min; l <= l_max; ++l )
+                        {
+                            const int base = l * ( l + 1 ) / 2;
+                            for ( int m = -l; m <= l; ++m, ++k )
+                            {
+                                const int    order = ( m < 0 ) ? -m : m;
+                                const double trig  = ( m > 0 ) ? std::sin( order * phi ) : std::cos( order * phi );
+                                acc += coeff[static_cast< size_t >( k )] * plm[static_cast< size_t >( base + order )] * trig;
+                            }
+                        }
+                        sph_coeffs_host( sd, i, j ) = static_cast< ScalarType >( acc );
+                    }
                 }
             }
+            Kokkos::deep_copy( sph_coeffs, sph_coeffs_host );
         }
         else if ( has_sph )
         {

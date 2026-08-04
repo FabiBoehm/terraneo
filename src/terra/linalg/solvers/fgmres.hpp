@@ -106,7 +106,8 @@ class FGMRES
     /// @param A Operator (matrix) to solve with.
     /// @param x Solution vector (input: initial guess, output: final solution).
     /// @param b Right-hand side vector (input).
-    void solve_impl( OperatorType& A, SolutionVectorType& x, const RHSVectorType& b )
+    template < typename OpT >
+    void solve_impl( OpT& A, SolutionVectorType& x, const RHSVectorType& b )
     {
         util::Timer timer_fgmres_solve( "fgmres_solve" );
 

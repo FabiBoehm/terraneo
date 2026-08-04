@@ -339,6 +339,65 @@ class SUPGSolver : public EnergySolver< ScalarType >
 /// Implicit Galerkin energy solve with explicit lagged entropy-viscosity
 /// stabilization (KHB / ASPECT recipe).  LHS is pure-Galerkin AD (SUPG OFF);
 /// stabilization is added to the RHS as `-dt · DivKGrad(ν_h) · T^n`.
+/// Composite LHS operator making the entropy-viscosity artificial diffusion
+/// IMPLICIT:   C*x = A_*x  +  dt * P_int( A_evdiff_*x ),
+/// where P_int zeros the nu_h contribution at Dirichlet boundary nodes so the
+/// composite keeps A_'s diagonalized boundary rows.  Mirrors ASPECT (LHS assembly)
+/// instead of the explicit RHS lag.  Enabled via --ev-implicit-nu-h.
+template < typename ScalarT, typename BaseOp, typename EVOp >
+class ImplicitEVAdvDiffOperator
+{
+  public:
+    using SrcVectorType = linalg::VectorQ1Scalar< ScalarT >;
+    using DstVectorType = linalg::VectorQ1Scalar< ScalarT >;
+    using ScalarType    = ScalarT;
+
+    ImplicitEVAdvDiffOperator(
+        BaseOp&                                                         base,
+        EVOp&                                                           ev,
+        const grid::shell::DistributedDomain&                          domain,
+        const grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag >& boundary_mask,
+        SrcVectorType&                                                  scratch )
+    : base_( base ), ev_( ev ), domain_( domain ), boundary_mask_( boundary_mask ), scratch_( scratch )
+    {
+    }
+
+    ScalarT& dt() { return dt_; }
+
+    void apply_impl( const SrcVectorType& src, DstVectorType& dst )
+    {
+        linalg::apply( base_, src, dst );      // dst     = A_*src
+        linalg::apply( ev_, src, scratch_ );   // scratch = A_evdiff_*src
+
+        // Zero the nu_h contribution at Dirichlet boundary node rows so the
+        // composite keeps A_'s diagonalized boundary rows (A_evdiff_ has none).
+        {
+            auto       s    = scratch_.grid_data();
+            const auto mask = boundary_mask_;
+            Kokkos::parallel_for(
+                "impl_ev_zero_boundary_rows",
+                grid::shell::local_domain_md_range_policy_nodes( domain_ ),
+                KOKKOS_LAMBDA( const int sd, const int x, const int y, const int r ) {
+                    const auto f = mask( sd, x, y, r );
+                    if ( f == grid::shell::ShellBoundaryFlag::CMB ||
+                         f == grid::shell::ShellBoundaryFlag::SURFACE )
+                        s( sd, x, y, r ) = ScalarT( 0 );
+                } );
+            Kokkos::fence();
+        }
+
+        linalg::lincomb( dst, { ScalarT( 1 ), dt_ }, { dst, scratch_ } );  // dst += dt*scratch
+    }
+
+  private:
+    BaseOp&                                                         base_;
+    EVOp&                                                           ev_;
+    const grid::shell::DistributedDomain&                          domain_;
+    const grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag >& boundary_mask_;
+    SrcVectorType&                                                 scratch_;
+    ScalarT                                                        dt_ = ScalarT( 1 );
+};
+
 template < typename ScalarType >
 class EVSolver : public EnergySolver< ScalarType >
 {
@@ -470,6 +529,17 @@ class EVSolver : public EnergySolver< ScalarType >
         // each step by compute_nu_h.
         A_evdiff_ = std::make_unique< EVDiffOp >( *domain_, coords_shell_, coords_radii_, nu_h_wedge_ );
 
+        // OPT: fold nu_h implicitly into the fused kerngen advection-diffusion operator
+        // (ASPECT-style) instead of a separate WedgeConstantDivKGrad matvec per Krylov
+        // iteration. Wiring it into all three instances also puts nu_h into the
+        // preconditioner diagonal and the Dirichlet lift. Enabled by --ev-implicit-nu-h.
+        if ( prm_.energy_solver_parameters.implicit_nu_h )
+        {
+            A_->set_nu_h_field( nu_h_wedge_ );
+            A_neumann_->set_nu_h_field( nu_h_wedge_ );
+            A_neumann_diag_->set_nu_h_field( nu_h_wedge_ );
+        }
+
         A_neumann_diag_->dt() = ScalarType( 1e-4 );
         linalg::assign( diag_, ScalarType( 0 ) );
         {
@@ -518,6 +588,7 @@ class EVSolver : public EnergySolver< ScalarType >
         {
             heating_source_  = linalg::VectorQ1Scalar< ScalarType >( "ev_heating_source", *domain_, ownership_mask_ );
             heating_scratch_ = linalg::VectorQ1Scalar< ScalarType >( "ev_heating_scratch", *domain_, ownership_mask_ );
+            heating_base_    = linalg::VectorQ1Scalar< ScalarType >( "ev_heating_base", *domain_, ownership_mask_ );
             diag_ones_       = linalg::VectorQ1Scalar< ScalarType >( "ev_diag_ones", *domain_, ownership_mask_ );
             linalg::assign( diag_ones_, ScalarType( 1 ) );
             shear_op_        = std::make_unique< fe::wedge::operators::shell::ShearHeatingKerngen< ScalarType > >(
@@ -897,6 +968,21 @@ class EVSolver : public EnergySolver< ScalarType >
                                      static_cast< ScalarType >( prm_.physics_parameters.internal_heating_rate ) :
                                      ScalarType( 0 );
 
+        // OPT: shear-heating Phi depends only on (velocity, viscosity), both constant
+        // across the energy substeps (Stokes + update_viscosity run once per outer
+        // step). Build the velocity-only base F_base = gamma + (Di/Ra)*Phi_shear ONCE
+        // here instead of every substep; each substep then only adds the T-dependent
+        // adiabatic term. Numerically identical to per-substep assembly.
+        if ( prm_.physics_parameters.compressible )
+        {
+            const ScalarType Di_h = static_cast< ScalarType >( prm_.physics_parameters.dissipation_number );
+            const ScalarType Ra_h = static_cast< ScalarType >( prm_.physics_parameters.rayleigh_number );
+            linalg::assign( heating_base_, gamma );
+            shear_op_->assemble_phi_nodal( velocity_, heating_scratch_ );
+            const ScalarType visc_scale_h = ( Ra_h != ScalarType( 0 ) ) ? Di_h / Ra_h : ScalarType( 0 );
+            linalg::lincomb( heating_base_, { ScalarType( 1 ), visc_scale_h }, { heating_base_, heating_scratch_ } );
+        }
+
         for ( int i = 0; i < prm_.time_stepping_parameters.energy_substeps; ++i )
         {
             util::logroot << "Solving energy (EV, substep " << i << ") ..." << std::endl;
@@ -909,19 +995,8 @@ class EVSolver : public EnergySolver< ScalarType >
             if ( prm_.physics_parameters.compressible )
             {
                 const ScalarType Di = static_cast< ScalarType >( prm_.physics_parameters.dissipation_number );
-                const ScalarType Ra = static_cast< ScalarType >( prm_.physics_parameters.rayleigh_number );
-
-                // internal heating (constant) as the base field
-                linalg::assign( heating_source_, gamma );
-
-                // + (Di/Ra) · Φ_shear  (Φ projected to nodes). ρ̄-FREE, matching HyTeG:
-                // its shear-heating scaling is (Pe·Di)/(C_p·Ra) with no density factor,
-                // and the shear operator takes viscosity, not ρ̄. (An earlier 1/ρ̄
-                // weighting here broke the ⟨Φ⟩=⟨W⟩ balance and caused a slow runaway.)
-                shear_op_->assemble_phi_nodal( velocity_, heating_scratch_ );
-                const ScalarType visc_scale = ( Ra != ScalarType( 0 ) ) ? Di / Ra : ScalarType( 0 );
-                linalg::lincomb(
-                    heating_source_, { ScalarType( 1 ), visc_scale }, { heating_source_, heating_scratch_ } );
+                // F_base (= gamma + (Di/Ra)*Phi_shear, velocity-only) was assembled
+                // once before the substep loop; only the adiabatic term is per-substep.
 
                 // + S_adiabatic = −Di·(u·n)·T   (rising material cools; α is in Di).
                 //   This term is ρ̄-free in BOTH formulations: canonical King divides
@@ -939,14 +1014,16 @@ class EVSolver : public EnergySolver< ScalarType >
                                             ScalarType( -1 ) } );
                 Kokkos::fence();
                 linalg::lincomb(
-                    heating_source_, { ScalarType( 1 ), ScalarType( 1 ) }, { heating_source_, heating_scratch_ } );
+                    heating_source_, { ScalarType( 1 ), ScalarType( 1 ) }, { heating_base_, heating_scratch_ } );
             }
 
-            // 1+2) per-wedge lap projection and ν_h.  Skipped on Picard
-            // iterations > 0 of the first substep so all Picard sweeps see
-            // the same explicit-lagged stabilization field; substeps beyond
-            // the first always recompute since T evolves between them.
-            const bool need_nu_h = ( i > 0 ) || !nu_h_locked_for_step_;
+            // 1+2) per-wedge lap projection and ν_h.  Computed ONCE per outer step
+            // (substep 0 / first Picard sweep) and frozen across the remaining
+            // substeps: T evolves only mildly over the substeps, so reusing the
+            // substep-0 stabilization field (ASPECT-style ν_h lagging) is a valid
+            // speed/accuracy trade and removes the global Laplacian matvec +
+            // entropy-stats + compute_nu_h from 4 of every 5 substeps.
+            const bool need_nu_h = !nu_h_locked_for_step_;
             if ( need_nu_h )
             {
                 // 1) Global Q1-nodal lap projection: lap_T = (K · T) / M_lumped
@@ -1009,12 +1086,16 @@ class EVSolver : public EnergySolver< ScalarType >
                 nu_h_locked_for_step_ = true;
             }
 
-            // 3) Explicit EV diffusion contribution: rhs_ev = ∫ ν_h ∇T · ∇φ_i.
-            linalg::apply( *A_evdiff_, T_, rhs_ev_ );
-
-            // 4) RHS:  q = M·T^n  -  dt · rhs_ev.
+            // 3+4) RHS:  q = M*T^n.  The entropy-viscosity term is either
+            //   explicit (default): q -= dt*(A_evdiff*T^n)  [nu_h lagged on RHS], or
+            //   implicit (--ev-implicit-nu-h): nu_h is folded into the LHS composite
+            //   operator below, so nothing is added to the RHS here.
             linalg::apply( *M_, T_, q_ );
-            linalg::lincomb( q_, { ScalarType( 1 ), -dt }, { q_, rhs_ev_ } );
+            if ( !prm_.energy_solver_parameters.implicit_nu_h )
+            {
+                linalg::apply( *A_evdiff_, T_, rhs_ev_ );
+                linalg::lincomb( q_, { ScalarType( 1 ), -dt }, { q_, rhs_ev_ } );
+            }
 
             // 4b) Heat-source RHS: q += dt · M · F.
             //     Compressible: F = internal + shear + adiabatic (heating_source_).
@@ -1060,7 +1141,11 @@ class EVSolver : public EnergySolver< ScalarType >
             fe::strong_algebraic_dirichlet_enforcement_poisson_like(
                 *A_neumann_, *A_neumann_diag_, g_, tmp_, q_, boundary_mask_, grid::shell::ShellBoundaryFlag::BOUNDARY );
 
-            // 7) Solve (M + dt · A_galerkin) T^{n+1} = q.
+            // 7) Solve.  Explicit: (M + dt*A_galerkin)*T^{n+1} = q.
+            //           Implicit nu_h: (M + dt*A_galerkin + dt*A_evdiff)*T^{n+1} = q.
+            // nu_h is folded implicitly into A_ (set_nu_h_field in the ctor) when
+            // --ev-implicit-nu-h; otherwise A_ is plain advection-diffusion and nu_h is
+            // added on the RHS (explicit). Either way the solve operator is *A_.
             if ( use_float_basis_ )
                 solve( *solver_float_, *A_, T_, q_ );
             else
@@ -1099,8 +1184,14 @@ class EVSolver : public EnergySolver< ScalarType >
         const ScalarType phi_int = linalg::dot( diag_ones_, heating_scratch_ );
         const ScalarType Phi     = ( Ra != ScalarType( 0 ) ) ? ( Di / Ra ) * phi_int : ScalarType( 0 );
 
-        // W: nodal integrand Di·(u·n)·T, integrated via the lumped mass
-        // (∫w dV = dot(w, M_lumped)). Reuse AdiabaticHeatingSource with +1.
+        // W: nodal integrand Di·ρ̄·(u·n)·T, integrated via the lumped mass
+        // (∫w dV = dot(w, M_lumped)). AdiabaticHeatingSource builds the ρ̄-FREE
+        // Di·(u·n)·T — the form used in the SOLVED energy equation (divided by
+        // ρ̄c̄ₚ, so ρ̄ cancels). The dissipation theorem compares the UN-divided
+        // volumetric rates, so re-apply the reference density ρ̄ here (diagnostic
+        // only) to put W in the same convention as Φ = (Di/Ra)·∫2η ε̇:ε̇ (which is
+        // likewise the un-divided form). Without this weighting Φ/W is biased by
+        // the mean ρ̄ (~0.86 in a Di≈0.45 shell) even when the physics is correct.
         Kokkos::parallel_for(
             "ev_dissip_W",
             local_domain_md_range_policy_nodes( *domain_ ),
@@ -1112,6 +1203,17 @@ class EVSolver : public EnergySolver< ScalarType >
                                     Di,
                                     ScalarType( 1 ) } );
         Kokkos::fence();
+        {
+            auto       w_v   = heating_source_.grid_data();
+            const auto rho_v = rho_;
+            Kokkos::parallel_for(
+                "ev_dissip_W_rho_weight",
+                Kokkos::MDRangePolicy< Kokkos::Rank< 4, Kokkos::Iterate::Right, Kokkos::Iterate::Right > >(
+                    { 0, 0, 0, 0 },
+                    { w_v.extent( 0 ), w_v.extent( 1 ), w_v.extent( 2 ), w_v.extent( 3 ) } ),
+                KOKKOS_LAMBDA( int s, int x, int y, int r ) { w_v( s, x, y, r ) *= rho_v( s, x, y, r ); } );
+            Kokkos::fence();
+        }
         const ScalarType W = linalg::dot( heating_source_, M_lumped_ );
 
         const ScalarType ratio = ( W != ScalarType( 0 ) ) ? Phi / W : ScalarType( 0 );
@@ -1141,6 +1243,7 @@ class EVSolver : public EnergySolver< ScalarType >
     // compressible.
     linalg::VectorQ1Scalar< ScalarType >                                             heating_source_;
     linalg::VectorQ1Scalar< ScalarType >                                             heating_scratch_;
+    linalg::VectorQ1Scalar< ScalarType >                                             heating_base_;
     linalg::VectorQ1Scalar< ScalarType >                                             diag_ones_;
     std::unique_ptr< fe::wedge::operators::shell::ShearHeatingKerngen< ScalarType > > shear_op_;
 
