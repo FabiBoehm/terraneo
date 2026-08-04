@@ -146,7 +146,7 @@ void test( int level, int timesteps, double dt, const std::shared_ptr< util::Tab
 
     if ( vtk )
     {
-        xdmf_output.write();
+        xdmf_output.write( 0 );
     }
 
     double l2_error = 0;
@@ -193,7 +193,7 @@ void test( int level, int timesteps, double dt, const std::shared_ptr< util::Tab
 
         if ( vtk )
         {
-            xdmf_output.write();
+            xdmf_output.write( ts );
         }
     }
 
@@ -242,7 +242,7 @@ void test( int level, int timesteps, double dt, const std::shared_ptr< util::Tab
 
         if ( vtk )
         {
-            xdmf_output.write();
+            xdmf_output.write( ts );
         }
     }
 

@@ -121,7 +121,7 @@ void test( const int level, const int subdomain_level )
     xdmf.add( mask_data_double );
     xdmf.add( ones_comm );
     xdmf.add( grid_diamond_id );
-    xdmf.write();
+    xdmf.write( 0 );
 }
 
 int main( int argc, char** argv )

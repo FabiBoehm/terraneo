@@ -118,7 +118,7 @@ void test( int level, bool treat_boundary, bool diagonal )
         xdmf.add( dst_b.grid_data() );
         xdmf.add( error_b.grid_data() );
         xdmf.add( error_c.grid_data() );
-        xdmf.write();
+        xdmf.write( 0 );
     }
 }
 

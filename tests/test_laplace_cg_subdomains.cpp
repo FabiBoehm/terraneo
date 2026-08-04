@@ -183,7 +183,7 @@ double test( int level, int level_subdomains, const std::shared_ptr< util::Table
         xdmf.add( u.grid_data() );
         xdmf.add( solution.grid_data() );
         xdmf.add( error.grid_data() );
-        xdmf.write();
+        xdmf.write( 0 );
     }
 
     table->add_row(

@@ -99,7 +99,7 @@ int main( int argc, char** argv )
 
     logroot << "Writing output to directory: " << parameters.output_directory << "\n\n";
 
-    xdmf.write();
+    xdmf.write( 0 );
 
     logroot << "Bye :)" << std::endl;
 

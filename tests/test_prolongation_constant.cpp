@@ -185,12 +185,12 @@ double test( int level, const std::shared_ptr< util::Table >& table )
         xdmf_output_fine.add( solution_fine.grid_data() );
         xdmf_output_fine.add( error_fine.grid_data() );
 
-        xdmf_output_fine.write();
+        xdmf_output_fine.write( 0 );
 
         io::XDMFOutput xdmf_output_coarse( ".", domain_coarse, subdomain_shell_coords_coarse, subdomain_radii_coarse );
         xdmf_output_coarse.add( u_coarse.grid_data() );
 
-        xdmf_output_coarse.write();
+        xdmf_output_coarse.write( 0 );
     }
 
     return error_norm;

@@ -553,7 +553,7 @@ std::tuple< double, double, int > test( int min_level, int max_level, const std:
         "out_eps", domains[velocity_level], coords_shell[velocity_level], coords_radii[velocity_level] );
     xdmf.add( stok_vecs["f"].block_1().grid_data() );
 
-    //   xdmf.write();
+    //   xdmf.write( 0 );
     //   exit(0);
     // Set up solvers.
 
@@ -731,7 +731,7 @@ std::tuple< double, double, int > test( int min_level, int max_level, const std:
     xdmf.add( u.block_1().grid_data() );
     xdmf.add( solution.block_1().grid_data() );
 
-    xdmf.write();
+    xdmf.write( 0 );
 
     // output normals< ScalarType, ScalarType >
     // trafo velocity solution to nt space

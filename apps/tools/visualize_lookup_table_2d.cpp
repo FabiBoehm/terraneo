@@ -404,7 +404,7 @@ int main( int argc, char** argv )
     Kokkos::fence();
 
     logroot << "\nWriting output to: " << p.output_directory << "\n";
-    xdmf.write();
+    xdmf.write( 0 );
 
     logroot << "Bye :)\n";
     return 0;

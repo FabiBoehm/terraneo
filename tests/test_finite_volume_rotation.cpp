@@ -291,7 +291,7 @@ void test( const int level, const Method method )
     if ( vtk )
     {
         fv::hex::l2_project_fv_to_fe( T_fe, T, domain, coords_shell, coords_radii, tmps_fe );
-        xdmf.write();
+        xdmf.write( 0 );
     }
 
     // Dirichlet BCs: pin T = 0 at both the CMB and the outer surface.
@@ -339,7 +339,7 @@ void test( const int level, const Method method )
         if ( vtk && ts % vtk_interval == 0 )
         {
             fv::hex::l2_project_fv_to_fe( T_fe, T, domain, coords_shell, coords_radii, tmps_fe );
-            xdmf.write();
+            xdmf.write( ts );
         }
 
         const ScalarType t     = ts * dt;

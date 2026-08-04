@@ -242,7 +242,7 @@ void test( int level )
     xdmf.add( b.grid_data() );
     xdmf.add( no_normal.grid_data() );
     xdmf.add( no_tangent.grid_data() );
-    xdmf.write();
+    xdmf.write( 0 );
 }
 
 int main( int argc, char** argv )

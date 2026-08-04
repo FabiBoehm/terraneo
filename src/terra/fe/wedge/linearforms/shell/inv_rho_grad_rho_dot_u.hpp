@@ -54,9 +54,13 @@ class InvRhoGradRhoDotU
 
   private:
     grid::shell::DistributedDomain domain_;
+    grid::shell::DistributedDomain domain_fine_;
 
     grid::Grid3DDataVec< ScalarT, 3 > grid_;
     grid::Grid2DDataScalar< ScalarT > radii_;
+
+    grid::Grid3DDataVec< ScalarT, 3 > grid_fine_;
+    grid::Grid2DDataScalar< ScalarT > radii_fine_;
 
     linalg::VectorQ1Scalar< ScalarT >              rho_;
     linalg::VectorQ1Vec< ScalarT, VelocityVecDim > velocity_;
@@ -75,18 +79,24 @@ class InvRhoGradRhoDotU
   public:
     InvRhoGradRhoDotU(
         const grid::shell::DistributedDomain&                 domain,
+        const grid::shell::DistributedDomain&                 domain_fine,
         const grid::Grid3DDataVec< ScalarT, 3 >&              grid,
+        const grid::Grid3DDataVec< ScalarT, 3 >&              grid_fine,
         const grid::Grid2DDataScalar< ScalarT >&              radii,
-        const linalg::VectorQ1Scalar< ScalarT >&              rho,
-        const linalg::VectorQ1Vec< ScalarT, VelocityVecDim >& velocity,
+        const grid::Grid2DDataScalar< ScalarT >&              radii_fine,
+        const linalg::VectorQ1Scalar< ScalarT >&              rho_fine,
+        const linalg::VectorQ1Vec< ScalarT, VelocityVecDim >& velocity_fine,
         const linalg::OperatorApplyMode         operator_apply_mode = linalg::OperatorApplyMode::Replace,
         const linalg::OperatorCommunicationMode operator_communication_mode =
             linalg::OperatorCommunicationMode::CommunicateAdditively )
     : domain_( domain )
+    , domain_fine_( domain_fine )
     , grid_( grid )
+    , grid_fine_( grid_fine )
     , radii_( radii )
-    , rho_( rho )
-    , velocity_( velocity )
+    , radii_fine_( radii_fine )
+    , rho_( rho_fine )
+    , velocity_( velocity_fine )
     , operator_apply_mode_( operator_apply_mode )
     , operator_communication_mode_( operator_communication_mode )
     , send_buffers_( domain )
@@ -105,7 +115,7 @@ class InvRhoGradRhoDotU
         vel_grid_ = velocity_.grid_data();
 
         Kokkos::parallel_for(
-            "inv_rho_grad_rho_dot_u", grid::shell::local_domain_md_range_policy_cells( domain_ ), *this );
+            "inv_rho_grad_rho_dot_u", grid::shell::local_domain_md_range_policy_cells( domain_fine_ ), *this );
         Kokkos::fence();
 
         if ( operator_communication_mode_ == linalg::OperatorCommunicationMode::CommunicateAdditively )
@@ -125,10 +135,10 @@ class InvRhoGradRhoDotU
         // Geometry
         // -----------------------------------------------------------------------
         dense::Vec< ScalarT, 3 > wedge_phy_surf[num_wedges_per_hex_cell][num_nodes_per_wedge_surface] = {};
-        wedge_surface_physical_coords( wedge_phy_surf, grid_, local_subdomain_id, x_cell, y_cell );
+        wedge_surface_physical_coords( wedge_phy_surf, grid_fine_, local_subdomain_id, x_cell, y_cell );
 
-        const ScalarT r_1 = radii_( local_subdomain_id, r_cell );
-        const ScalarT r_2 = radii_( local_subdomain_id, r_cell + 1 );
+        const ScalarT r_1 = radii_fine_( local_subdomain_id, r_cell );
+        const ScalarT r_2 = radii_fine_( local_subdomain_id, r_cell + 1 );
 
         // -----------------------------------------------------------------------
         // Quadrature
@@ -159,6 +169,8 @@ class InvRhoGradRhoDotU
         // -----------------------------------------------------------------------
         dense::Vec< ScalarT, num_nodes_per_wedge > contrib[num_wedges_per_hex_cell] = {};
 
+        const int fine_radial_wedge_index = r_cell % 2;
+
         for ( int q = 0; q < num_quad_points; q++ )
         {
             const ScalarT w = quad_weights[q];
@@ -168,6 +180,8 @@ class InvRhoGradRhoDotU
                 const auto J                = jac( wedge_phy_surf[wedge], r_1, r_2, quad_points[q] );
                 const auto det              = Kokkos::abs( J.det() );
                 const auto J_inv_transposed = J.inv().transposed();
+
+                const int fine_lateral_wedge_index = fine_lateral_wedge_idx( x_cell, y_cell, wedge );
 
                 // ----------------------------------------------------------------
                 // Interpolate rho and compute physical gradient of rho at quad pt
@@ -211,12 +225,14 @@ class InvRhoGradRhoDotU
                 // ----------------------------------------------------------------
                 for ( int i = 0; i < num_nodes_per_wedge; i++ )
                 {
-                    contrib[wedge]( i ) += w * integrand * shape( i, quad_points[q] ) * det;
+                    auto shape_coarse_i = shape_coarse( i, fine_radial_wedge_index, fine_lateral_wedge_index, quad_points[q] );
+                    contrib[wedge]( i ) += w * integrand * shape_coarse_i * det;
+                    // contrib[wedge]( i ) += w * integrand * shape( i, quad_points[q] ) * det;
                 }
             }
         }
 
-        atomically_add_local_wedge_scalar_coefficients( dst_, local_subdomain_id, x_cell, y_cell, r_cell, contrib );
+        atomically_add_local_wedge_scalar_coefficients( dst_, local_subdomain_id, x_cell / 2, y_cell / 2, r_cell / 2, contrib );
     }
 };
 

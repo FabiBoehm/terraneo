@@ -189,7 +189,7 @@ double test( int level, const std::shared_ptr< util::Table >& table )
     {
         io::XDMFOutput xdmf( ".", domain_fine, subdomain_shell_coords_fine, subdomain_radii_fine );
         xdmf.add( u_fine.grid_data() );
-        xdmf.write();
+        xdmf.write( 0 );
     }
 
     return error_norm;
