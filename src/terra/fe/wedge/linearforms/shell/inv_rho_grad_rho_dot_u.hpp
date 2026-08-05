@@ -1,5 +1,7 @@
 #pragma once
 
+#include <type_traits>
+
 #include "../../quadrature/quadrature.hpp"
 #include "communication/shell/communication.hpp"
 #include "dense/vec.hpp"
@@ -9,6 +11,15 @@
 #include "linalg/linear_form.hpp"
 #include "linalg/operator.hpp"
 #include "linalg/vector_q1.hpp"
+
+namespace terra::fe::wedge::linearforms::shell::detail {
+
+template < typename T >
+concept HasGridData = requires( const T& t )
+{
+    t.grid.data();
+};
+} // namespace terra::fe::wedge::linearforms::shell::detail
 
 namespace terra::fe::wedge::linearforms::shell {
 
@@ -21,6 +32,9 @@ namespace terra::fe::wedge::linearforms::shell {
 /// \f]
 /// into a scalar finite element coefficient vector, where \f$\phi_i\f$ are the scalar Q1 test
 /// functions on the spherical shell mesh.
+///
+/// Update: Templated class now supports density \f$\rho\f$ as either a scalar FE function 
+/// (VectorQ1Scalar / Grid4DDataScalar) or as radial profile (Grid2DDataScalar).
 ///
 /// This term arises in the pressure equation of the Truncated Anelastic Liquid Approximation
 /// (TALA) and the Projected Density Approximation (PDA) for compressible Stokes flow in
@@ -45,12 +59,18 @@ namespace terra::fe::wedge::linearforms::shell {
 /// The default `OperatorApplyMode::Replace` zeroes \p dst before accumulation. Pass
 /// `OperatorApplyMode::Add` to add into an existing vector instead.
 ///
-template < typename ScalarT, int VelocityVecDim = 3 >
+template < typename ScalarT, typename RhoFieldType, int VelocityVecDim = 3 >
 class InvRhoGradRhoDotU
 {
   public:
     using DstVectorType = linalg::VectorQ1Scalar< ScalarT >;
     using ScalarType    = ScalarT;
+
+    // Evaluate whether rho is VectorQ1Scalar (3-D) or radial profile
+    static constexpr bool rho_is_radial_profile = std::is_same_v< RhoFieldType, grid::Grid2DDataScalar< ScalarT > >;
+
+    using RhoGridType = std::
+        conditional_t< rho_is_radial_profile, grid::Grid2DDataScalar< ScalarT >, grid::Grid4DDataScalar< ScalarT > >;
 
   private:
     grid::shell::DistributedDomain domain_;
@@ -62,7 +82,8 @@ class InvRhoGradRhoDotU
     grid::Grid3DDataVec< ScalarT, 3 > grid_fine_;
     grid::Grid2DDataScalar< ScalarT > radii_fine_;
 
-    linalg::VectorQ1Scalar< ScalarT >              rho_;
+    RhoFieldType rho_;
+
     linalg::VectorQ1Vec< ScalarT, VelocityVecDim > velocity_;
 
     linalg::OperatorApplyMode         operator_apply_mode_;
@@ -73,7 +94,7 @@ class InvRhoGradRhoDotU
 
     // Kokkos views set in apply_impl() before the parallel launch.
     grid::Grid4DDataScalar< ScalarType >              dst_;
-    grid::Grid4DDataScalar< ScalarType >              rho_grid_;
+    RhoGridType                                       rho_grid_;
     grid::Grid4DDataVec< ScalarType, VelocityVecDim > vel_grid_;
 
   public:
@@ -84,10 +105,10 @@ class InvRhoGradRhoDotU
         const grid::Grid3DDataVec< ScalarT, 3 >&              grid_fine,
         const grid::Grid2DDataScalar< ScalarT >&              radii,
         const grid::Grid2DDataScalar< ScalarT >&              radii_fine,
-        const linalg::VectorQ1Scalar< ScalarT >&              rho_fine,
+        const RhoFieldType&                                   rho_fine,
         const linalg::VectorQ1Vec< ScalarT, VelocityVecDim >& velocity_fine,
-        const linalg::OperatorApplyMode         operator_apply_mode = linalg::OperatorApplyMode::Replace,
-        const linalg::OperatorCommunicationMode operator_communication_mode =
+        const linalg::OperatorApplyMode                       operator_apply_mode = linalg::OperatorApplyMode::Replace,
+        const linalg::OperatorCommunicationMode               operator_communication_mode =
             linalg::OperatorCommunicationMode::CommunicateAdditively )
     : domain_( domain )
     , domain_fine_( domain_fine )
@@ -111,8 +132,13 @@ class InvRhoGradRhoDotU
         }
 
         dst_      = dst.grid_data();
-        rho_grid_ = rho_.grid_data();
         vel_grid_ = velocity_.grid_data();
+
+        // unwrap rho if necessary
+        if constexpr ( detail::HasGridData< RhoFieldType > )
+            rho_grid_ = rho_.grid_data();
+        else
+            rho_grid_ = rho_;
 
         Kokkos::parallel_for(
             "inv_rho_grad_rho_dot_u", grid::shell::local_domain_md_range_policy_cells( domain_fine_ ), *this );
@@ -152,10 +178,17 @@ class InvRhoGradRhoDotU
         quadrature::quad_felippa_3x2_quad_weights( quad_weights );
 
         // -----------------------------------------------------------------------
-        // Extract local coefficients: rho (scalar) and u (vector per dimension)
+        // Extract local coefficients: rho (scalar, 3-D case only) and u (vector per dimension)
         // -----------------------------------------------------------------------
         dense::Vec< ScalarT, 6 > rho_coeffs[num_wedges_per_hex_cell] = {};
-        extract_local_wedge_scalar_coefficients( rho_coeffs, local_subdomain_id, x_cell, y_cell, r_cell, rho_grid_ );
+
+        // Coefficient extraction only makes sense for the 3-D FE field;
+        // radial profile is read directly per-shell inside the quad-point loop below.
+        if constexpr ( !rho_is_radial_profile )
+        {
+            extract_local_wedge_scalar_coefficients(
+                rho_coeffs, local_subdomain_id, x_cell, y_cell, r_cell, rho_grid_ );
+        }
 
         dense::Vec< ScalarT, 6 > vel_coeffs[VelocityVecDim][num_wedges_per_hex_cell];
         for ( int d = 0; d < VelocityVecDim; d++ )
@@ -186,16 +219,44 @@ class InvRhoGradRhoDotU
                 // ----------------------------------------------------------------
                 // Interpolate rho and compute physical gradient of rho at quad pt
                 // ----------------------------------------------------------------
-                ScalarT              rho_q    = 0;
+                ScalarT                  rho_q      = 0;
                 dense::Vec< ScalarT, 3 > grad_rho_q = {};
 
-                for ( int j = 0; j < num_nodes_per_wedge; j++ )
+                // 3-D FE interpolation path
+                if constexpr ( !rho_is_radial_profile )
                 {
-                    const ScalarT phi_j         = shape( j, quad_points[q] );
-                    const auto    grad_phi_j_phy = J_inv_transposed * grad_shape( j, quad_points[q] );
+                    for ( int j = 0; j < num_nodes_per_wedge; j++ )
+                    {
+                        const ScalarT phi_j          = shape( j, quad_points[q] );
+                        const auto    grad_phi_j_phy = J_inv_transposed * grad_shape( j, quad_points[q] );
 
-                    rho_q    += rho_coeffs[wedge]( j ) * phi_j;
-                    grad_rho_q = grad_rho_q + rho_coeffs[wedge]( j ) * grad_phi_j_phy;
+                        rho_q += rho_coeffs[wedge]( j ) * phi_j;
+                        grad_rho_q = grad_rho_q + rho_coeffs[wedge]( j ) * grad_phi_j_phy;
+                    }
+                }
+
+                // radial-profile path -- rho = rho(r)
+                // Physical radius and direction come from the same affine maps used
+                // to build the Jacobian above (forward_map_rad / forward_map_lat).
+                else
+                {
+                    const ScalarT xi   = quad_points[q]( 0 );
+                    const ScalarT eta  = quad_points[q]( 1 );
+                    const ScalarT zeta = quad_points[q]( 2 );
+
+                    const auto lat_dir = forward_map_lat(
+                        wedge_phy_surf[wedge][0], wedge_phy_surf[wedge][1], wedge_phy_surf[wedge][2], xi, eta );
+                    const auto    r_hat  = lat_dir.normalized();
+                    const ScalarT r_phys = forward_map_rad( r_1, r_2, zeta );
+
+                    const ScalarT rho_1 = rho_grid_( local_subdomain_id, r_cell );
+                    const ScalarT rho_2 = rho_grid_( local_subdomain_id, r_cell + 1 );
+
+                    const ScalarT t = ( r_phys - r_1 ) / ( r_2 - r_1 );
+                    rho_q           = rho_1 + t * ( rho_2 - rho_1 );
+
+                    const ScalarT drho_dr = ( rho_2 - rho_1 ) / ( r_2 - r_1 );
+                    grad_rho_q            = drho_dr * r_hat;
                 }
 
                 // ----------------------------------------------------------------
@@ -225,17 +286,20 @@ class InvRhoGradRhoDotU
                 // ----------------------------------------------------------------
                 for ( int i = 0; i < num_nodes_per_wedge; i++ )
                 {
-                    auto shape_coarse_i = shape_coarse( i, fine_radial_wedge_index, fine_lateral_wedge_index, quad_points[q] );
+                    auto shape_coarse_i =
+                        shape_coarse( i, fine_radial_wedge_index, fine_lateral_wedge_index, quad_points[q] );
                     contrib[wedge]( i ) += w * integrand * shape_coarse_i * det;
                     // contrib[wedge]( i ) += w * integrand * shape( i, quad_points[q] ) * det;
                 }
             }
         }
 
-        atomically_add_local_wedge_scalar_coefficients( dst_, local_subdomain_id, x_cell / 2, y_cell / 2, r_cell / 2, contrib );
+        atomically_add_local_wedge_scalar_coefficients(
+            dst_, local_subdomain_id, x_cell / 2, y_cell / 2, r_cell / 2, contrib );
     }
 };
 
-static_assert( linalg::LinearFormLike< InvRhoGradRhoDotU< double > > );
+static_assert( linalg::LinearFormLike< InvRhoGradRhoDotU< double, linalg::VectorQ1Scalar< double > > > );
+static_assert( linalg::LinearFormLike< InvRhoGradRhoDotU< double, grid::Grid2DDataScalar< double > > > );
 
 } // namespace terra::fe::wedge::linearforms::shell

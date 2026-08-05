@@ -168,6 +168,14 @@ struct InitialTemperatureParameters
     double sph_factor_2   = 0.0;
 };
 
+// Work in progress
+enum class CompressibleForm
+{
+    TALA,
+    PDA,
+    PDA_ENTROPY
+};
+
 struct PhysicsParameters
 {
     double gravity = 9.81;
@@ -194,7 +202,8 @@ struct PhysicsParameters
     bool   internal_heating      = false;
     double internal_heating_rate = 3e-12;
 
-    bool compressible = false;
+    bool             compressible      = false;
+    CompressibleForm compressible_form = CompressibleForm::TALA;
 
     double calc_cm_per_year = 3e-4; // from non-dim velocity to cm/a
     double calc_time_Ma     = 1e6;  // from non-dim time to Ma
@@ -622,6 +631,19 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
     //////////////////////////////
     add_flag_with_default( app, "--compressible", parameters.physics_parameters.compressible )
         ->group( "Physical Parameters" );
+
+    std::map< std::string, CompressibleForm > compressible_form_map{
+        { "tala", CompressibleForm::TALA },
+        { "pda", CompressibleForm::PDA },
+        { "pda-entropy", CompressibleForm::PDA_ENTROPY },
+    };
+    add_option_with_default( app, "--compressibility-formulation", parameters.physics_parameters.compressible_form )
+        ->transform( CLI::CheckedTransformer( compressible_form_map, CLI::ignore_case ) )
+        ->default_val( "tala" )
+        ->group( "Physical Parameters" )
+        ->description(
+            "Formulation of compressibility, if active: Choose between 'tala', 'pda' (not yet supported) and 'pda-entropy' (not yet supported). See Gassmöller et al. (2020)." );
+
     add_flag_with_default( app, "--internal-heating-enabled", parameters.physics_parameters.internal_heating )
         ->group( "Physical Parameters" );
     add_option_with_default( app, "--internal-heating-rate", parameters.physics_parameters.internal_heating_rate )
