@@ -230,7 +230,14 @@ Result<> run( const Parameters& prm )
     logroot << "------------------------------------------\n" << std::endl;
 
     // Fill radial profile arrays
-    radial_profile_init( rho_profile, alpha_profile, cp_profile, kappa_profile, coords_radii[velocity_level], prm );
+    radial_profile_init(
+        rho_profile,
+        alpha_profile,
+        cp_profile,
+        kappa_profile,
+        *domains[velocity_level],
+        coords_radii[velocity_level],
+        prm );
 
     // Initialise density Q1 field from radial profile -- before Stokes solver setup
     if ( pda_form )
@@ -430,9 +437,9 @@ Result<> run( const Parameters& prm )
 
     // Pass full 3-D density to Stokes for PDA, else radial density profile.
     // Contrary to Tdev, 3-D density is passed already unwrapped, to accomodate
-    // the data structure differences: VectorQ1Scalar class (3-D rho) 
+    // the data structure differences: VectorQ1Scalar class (3-D rho)
     // serves as a wrapper around the raw Kokkos::View Grid4DDataScalar,
-    // whereas rho_profile (Grid2DDataScalar) is already a plain Kokkos::View. 
+    // whereas rho_profile (Grid2DDataScalar) is already a plain Kokkos::View.
     if ( pda_form )
         stokes.solve(
             Tdev, density->grid_data(), alpha_profile, prm.physics_parameters.compressible, /*log_convergence=*/true );
@@ -678,7 +685,7 @@ Result<> run( const Parameters& prm )
 
             // --- Stokes solve ---
             // Using full density for PDA, radial density profile else.
-            // 3-D density for pda_form is passed unwrapped, see comment at 
+            // 3-D density for pda_form is passed unwrapped, see comment at
             // initial stokes solve.
             if ( pda_form )
                 stokes.solve(

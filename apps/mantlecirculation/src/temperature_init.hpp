@@ -110,8 +110,7 @@ void initialize_temperature_fields(
 
             Kokkos::parallel_for(
                 "ComputeConductiveProfile",
-                Kokkos::MDRangePolicy< Kokkos::Rank< 2 > >(
-                    { 0, 0 }, { coords_radii.extent( 0 ), coords_radii.extent( 1 ) } ),
+                grid::shell::local_domain_md_range_policy_radial( domain ),
                 ComputeConductiveProfile{
                     prm.mesh_parameters.radius_min,
                     prm.mesh_parameters.radius_max,
@@ -126,8 +125,7 @@ void initialize_temperature_fields(
 
             Kokkos::parallel_for(
                 "ComputePowerLawProfile",
-                Kokkos::MDRangePolicy< Kokkos::Rank< 2 > >(
-                    { 0, 0 }, { coords_radii.extent( 0 ), coords_radii.extent( 1 ) } ),
+                grid::shell::local_domain_md_range_policy_radial( domain ),
                 ComputePowerLawProfile{
                     prm.mesh_parameters.radius_min,
                     prm.mesh_parameters.radius_max,
@@ -305,6 +303,7 @@ void radial_profile_init(
     grid::Grid2DDataScalar< ScalarType >&       alpha_profile,
     grid::Grid2DDataScalar< ScalarType >&       cp_profile,
     grid::Grid2DDataScalar< ScalarType >&       kappa_profile,
+    const grid::shell::DistributedDomain&       domain,
     const grid::Grid2DDataScalar< ScalarType >& coords_radii,
     const Parameters&                           prm )
 {
@@ -331,8 +330,7 @@ void radial_profile_init(
         // Adiabatic compression
         Kokkos::parallel_for(
             "adiabatic compression",
-            Kokkos::MDRangePolicy< Kokkos::Rank< 2 > >(
-                { 0, 0 }, { coords_radii.extent( 0 ), coords_radii.extent( 1 ) } ),
+            grid::shell::local_domain_md_range_policy_radial( domain ),
             KOKKOS_LAMBDA( int id, int r ) {
                 rho_profile( id, r ) =
                     surface_density *
@@ -381,7 +379,7 @@ void radial_profile_init(
     // Compute diffusivity profile from k (=1), cp_profile and rho_profile
     Kokkos::parallel_for(
         "compute kappa_profile",
-        Kokkos::MDRangePolicy< Kokkos::Rank< 2 > >( { 0, 0 }, { coords_radii.extent( 0 ), coords_radii.extent( 1 ) } ),
+        grid::shell::local_domain_md_range_policy_radial( domain ),
         KOKKOS_LAMBDA( int id, int r ) {
             kappa_profile( id, r ) = ScalarType( 1 ) / ( rho_profile( id, r ) * cp_profile( id, r ) );
         } );
