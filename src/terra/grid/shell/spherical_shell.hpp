@@ -2769,6 +2769,15 @@ inline Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >
           distributed_domain.domain_info().subdomain_num_nodes_radially() } );
 }
 
+inline Kokkos::MDRangePolicy< Kokkos::Rank< 2 > >
+    local_domain_md_range_policy_radial( const DistributedDomain& distributed_domain )
+{
+    return Kokkos::MDRangePolicy< Kokkos::Rank< 2 > >(
+        { 0, 0 },
+	{ static_cast< long long >( distributed_domain.subdomains().size() ),
+	  distributed_domain.domain_info().subdomain_num_nodes_radially() } );
+}
+
 // loop only lateral dimensions of each subdomain. Used in the precomputation of lateral parts of the
 // Jacobian (-> Oliver)
 inline Kokkos::MDRangePolicy< Kokkos::Rank< 3 > >
