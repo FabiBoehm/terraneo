@@ -169,9 +169,19 @@ Result<> run( const Parameters& prm )
     VectorQ1Scalar< ScalarType > T( "T", ( *domains[velocity_level] ), ownership_mask_data[velocity_level] );
     VectorQ1Scalar< ScalarType > Tdev( "Tdev", ( *domains[velocity_level] ), ownership_mask_data[velocity_level] );
 
+    // True when compressibility is on and any PDA form is used.
+    const bool pda_form =
+        ( prm.physics_parameters.compressible &&
+          ( prm.physics_parameters.compressible_form == CompressibleForm::PDA ||
+            prm.physics_parameters.compressible_form == CompressibleForm::PDA_ENTROPY ) );
+
+    // Optional 3-D density field for PDA
     // Density is needed in Stokes and energy -- so we set it up here
-    VectorQ1Scalar< ScalarType > density(
-        "density", ( *domains[velocity_level] ), ownership_mask_data[velocity_level] );
+    std::optional< VectorQ1Scalar< ScalarType > > density;
+    if ( pda_form )
+    {
+        density.emplace( "density", ( *domains[velocity_level] ), ownership_mask_data[velocity_level] );
+    }
 
     // Radial parameter profiles
     Grid2DDataScalar< ScalarType > T_ref(
@@ -223,11 +233,14 @@ Result<> run( const Parameters& prm )
     radial_profile_init( rho_profile, alpha_profile, cp_profile, kappa_profile, coords_radii[velocity_level], prm );
 
     // Initialise density Q1 field from radial profile -- before Stokes solver setup
-    Kokkos::parallel_for(
-        "RadialProfileToQ1",
-        grid::shell::local_domain_md_range_policy_nodes( *domains[velocity_level] ),
-        RadialProfileToQ1{ density.grid_data(), rho_profile } );
-    Kokkos::fence();
+    if ( pda_form )
+    {
+        Kokkos::parallel_for(
+            "RadialProfileToQ1",
+            grid::shell::local_domain_md_range_policy_nodes( *domains[velocity_level] ),
+            RadialProfileToQ1{ density->grid_data(), rho_profile } );
+        Kokkos::fence();
+    }
 
     // Setting up Stokes velocity boundary conditions.
     //
@@ -324,7 +337,8 @@ Result<> run( const Parameters& prm )
     xdmf_output->add( Tdev.grid_data() );              // Temperature deviation
     xdmf_output->add( u.block_1().grid_data() );       // Velocity
     xdmf_output->add( stokes.eta_fine().grid_data() ); // Viscosity
-    xdmf_output->add( density.grid_data() );           // Density
+    if ( pda_form )
+        xdmf_output->add( density->grid_data() ); // Density
 
     if ( prm.io_parameters.output_pressure )
     {
@@ -385,7 +399,16 @@ Result<> run( const Parameters& prm )
     // ----- Initial Stokes solve -----
     logroot << "\n--------- Initial Stokes solve -----------------\n" << std::endl;
 
-    stokes.solve( Tdev, density, alpha_profile, prm.physics_parameters.compressible, /*log_convergence=*/true );
+    // Pass full 3-D density to Stokes for PDA, else radial density profile.
+    // Contrary to Tdev, 3-D density is passed already unwrapped, to accomodate
+    // the data structure differences: VectorQ1Scalar class (3-D rho) 
+    // serves as a wrapper around the raw Kokkos::View Grid4DDataScalar,
+    // whereas rho_profile (Grid2DDataScalar) is already a plain Kokkos::View. 
+    if ( pda_form )
+        stokes.solve(
+            Tdev, density->grid_data(), alpha_profile, prm.physics_parameters.compressible, /*log_convergence=*/true );
+    else
+        stokes.solve( Tdev, rho_profile, alpha_profile, prm.physics_parameters.compressible, /*log_convergence=*/true );
 
     if ( prm.devel_parameters.extended_diagnostics )
         log_hbm( "after first Stokes solve (peak)" );
@@ -477,7 +500,7 @@ Result<> run( const Parameters& prm )
             Tdev.grid_data(),
             u.block_1().grid_data(),
             stokes.eta_fine().grid_data(),
-            density.grid_data(),
+            density->grid_data(),
             u.block_2().grid_data() );
     }
 
@@ -627,12 +650,23 @@ Result<> run( const Parameters& prm )
             }
 
             // --- Stokes solve ---
-            stokes.solve(
-                Tdev,
-                density,
-                alpha_profile,
-                prm.physics_parameters.compressible,
-                /*log_convergence=*/( picard == num_picard - 1 ) );
+            // Using full density for PDA, radial density profile else.
+            // 3-D density for pda_form is passed unwrapped, see comment at 
+            // initial stokes solve.
+            if ( pda_form )
+                stokes.solve(
+                    Tdev,
+                    density->grid_data(),
+                    alpha_profile,
+                    prm.physics_parameters.compressible,
+                    /*log_convergence=*/( picard == num_picard - 1 ) );
+            else
+                stokes.solve(
+                    Tdev,
+                    rho_profile,
+                    alpha_profile,
+                    prm.physics_parameters.compressible,
+                    /*log_convergence=*/( picard == num_picard - 1 ) );
 
         } // end Picard loop
 
@@ -654,7 +688,7 @@ Result<> run( const Parameters& prm )
                 Tdev.grid_data(),
                 u.block_1().grid_data(),
                 stokes.eta_fine().grid_data(),
-                density.grid_data(),
+                density->grid_data(),
                 u.block_2().grid_data() );
         }
 

@@ -153,7 +153,6 @@ class StokesContext
     using Prolongation     = fe::wedge::operators::shell::ProlongationVecConstant< ScalarType >;
     using Restriction      = fe::wedge::operators::shell::RestrictionVecConstant< ScalarType >;
     using PressureMass     = fe::wedge::operators::shell::KMass< ScalarType >;
-    using TALARHS          = fe::wedge::linearforms::shell::InvRhoGradRhoDotU< ScalarType >;
     using Smoother         = linalg::solvers::Chebyshev< Viscous >;
     using CoarseGridSolver = linalg::solvers::PCG< Viscous >;
     using VelGridData      = grid::Grid4DDataVec< ScalarType, 3 >;
@@ -756,9 +755,10 @@ class StokesContext
     /// FGMRES + MG/Schur preconditioner.  When `log_convergence` is true,
     /// the per-step Stokes and coarse-grid PCG tables are printed;
     /// in either case the table is cleared at the end of the call.
+    template < typename RhoFieldType >
     void solve(
         const linalg::VectorQ1Scalar< ScalarType >& T_for_buoyancy,
-        const linalg::VectorQ1Scalar< ScalarType >& rho,
+        const RhoFieldType&                         rho,
         const grid::Grid2DDataScalar< ScalarType >& alpha,
         bool                                        compressible,
         bool                                        log_convergence )
@@ -775,7 +775,7 @@ class StokesContext
                 coords_radii_[velocity_level_],
                 triangular_prec_tmp_.block_1().grid_data(),
                 T_for_buoyancy.grid_data(),
-                rho.grid_data(),
+                rho,
                 alpha,
                 prm_.physics_parameters.rayleigh_number,
                 1.0 ) );
@@ -796,7 +796,9 @@ class StokesContext
         // Apply TALA RHS to mass equation if needed...
         if ( compressible )
         {
-            TALARHS tala_rhs(
+            using MassRHS = fe::wedge::linearforms::shell::InvRhoGradRhoDotU< ScalarType, RhoFieldType >;
+
+            MassRHS mass_rhs(
                 *domains_[pressure_level_],
                 *domains_[velocity_level_],
                 coords_shell_[pressure_level_],
@@ -806,7 +808,7 @@ class StokesContext
                 rho,
                 stok_vecs_["u_prev"].block_1() );
 
-            linalg::apply( tala_rhs, stok_vecs_["f"].block_2() );
+            linalg::apply( mass_rhs, stok_vecs_["f"].block_2() );
         }
 
         util::logroot << "Solving Stokes ..." << std::endl;
