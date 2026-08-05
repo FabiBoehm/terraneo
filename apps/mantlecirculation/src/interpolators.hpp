@@ -81,13 +81,14 @@ struct ConductiveProfileInterpolator
     }
 };
 
+template < typename RhoFieldType >
 struct BuoyancyForceAssembly
 {
     Grid3DDataVec< ScalarType, 3 > grid_;
     Grid2DDataScalar< ScalarType > radii_;
     Grid4DDataVec< ScalarType, 3 > data_f_;
     Grid4DDataScalar< ScalarType > data_T_;
-    Grid4DDataScalar< ScalarType > data_rho_;
+    RhoFieldType                   data_rho_;
     Grid2DDataScalar< ScalarType > alpha_;
     ScalarType                     rayleigh_number_;
     ScalarType                     prefactor_;
@@ -97,7 +98,7 @@ struct BuoyancyForceAssembly
         const Grid2DDataScalar< ScalarType >& radii,
         const Grid4DDataVec< ScalarType, 3 >& data_f,
         const Grid4DDataScalar< ScalarType >& data_T,
-        const Grid4DDataScalar< ScalarType >& data_rho,
+        const RhoFieldType&                   data_rho,
         const Grid2DDataScalar< ScalarType >& alpha,
         const ScalarType                      rayleigh_number,
         const ScalarType                      prefactor = ScalarType( 1 ) )
@@ -115,13 +116,20 @@ struct BuoyancyForceAssembly
     void operator()( const int id, const int x, const int y, const int r ) const
     {
         const dense::Vec< ScalarType, 3 > coords = grid::shell::coords( id, x, y, r, grid_, radii_ );
+        const auto                        n      = coords.normalized();
 
-        const auto n = coords.normalized();
+        // Check if data_rho_ is radial profile or 3-D field.
+        // TALA compressibility requires radial profile, PDA requires full 3-D density.
+        ScalarType rho_val;
+        if constexpr ( std::is_same_v< RhoFieldType, Grid2DDataScalar< ScalarType > > )
+            rho_val = data_rho_( id, r );
+        else
+            rho_val = data_rho_( id, x, y, r );
 
         for ( int d = 0; d < 3; d++ )
         {
-            data_f_( id, x, y, r, d ) = prefactor_ * rayleigh_number_ * n( d ) * alpha_( id, r ) *
-                                        data_rho_( id, x, y, r ) * data_T_( id, x, y, r );
+            data_f_( id, x, y, r, d ) =
+                prefactor_ * rayleigh_number_ * n( d ) * alpha_( id, r ) * rho_val * data_T_( id, x, y, r );
         }
     }
 };
