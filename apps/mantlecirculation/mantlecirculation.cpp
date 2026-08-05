@@ -352,6 +352,35 @@ Result<> run( const Parameters& prm )
         xdmf_output_pressure->add( u.block_2().grid_data() ); // Pressure
     }
 
+    // Helper function to gather all xdmf output fields for write_xdmf().
+    // Combine with corresponding scaling factor for redimensionalisation and a flag specifying if the nondimensional field should be restored or not.
+    auto collect_xdmf_fields = [&]() -> XdmfFields {
+        XdmfFields fields;
+
+        fields.scalar_fields = {
+            { T.grid_data(), prm.boundary_parameters.delta_T_K, true },
+            { Tdev.grid_data(), prm.boundary_parameters.delta_T_K, false },
+            { stokes.eta_fine().grid_data(), prm.physics_parameters.viscosity_parameters.reference_viscosity, true },
+        };
+
+        fields.vector_fields = {
+            { u.block_1().grid_data(), prm.physics_parameters.calc_cm_per_year, true },
+        };
+
+        if ( pda_form ) // Add density output
+            fields.scalar_fields.push_back( { density->grid_data(), prm.physics_parameters.reference_density, true } );
+
+        if ( prm.io_parameters.output_pressure )
+            fields.pressure_field.emplace(
+                u.block_2().grid_data(),
+                prm.physics_parameters.viscosity_parameters.reference_viscosity *
+                    prm.physics_parameters.characteristic_velocity / prm.mesh_parameters.mantle_thickness_m,
+                true );
+
+        return fields;
+    };
+
+    // Loading checkpoint
     if ( prm.io_parameters.load_checkpoint )
     {
         load_temperature_checkpoint(
@@ -491,17 +520,15 @@ Result<> run( const Parameters& prm )
         logroot << "Writing initial XDMF ..." << std::endl;
 
         // Write to xdmf
+        auto fields = collect_xdmf_fields();
         write_xdmf(
             xdmf_output,
             xdmf_output_pressure,
-            prm,
             prm.time_stepping_parameters.timestep_initial,
-            T.grid_data(),
-            Tdev.grid_data(),
-            u.block_1().grid_data(),
-            stokes.eta_fine().grid_data(),
-            density->grid_data(),
-            u.block_2().grid_data() );
+            prm.devel_parameters.output_dimensional,
+            fields.scalar_fields,
+            fields.vector_fields,
+            fields.pressure_field );
     }
 
     // ---Radial profiles---
@@ -679,17 +706,16 @@ Result<> run( const Parameters& prm )
         if ( write_output && !prm.io_parameters.no_xdmf )
         {
             // Write to xdmf
+            auto fields = collect_xdmf_fields();
+
             write_xdmf(
                 xdmf_output,
                 xdmf_output_pressure,
-                prm,
                 timestep,
-                T.grid_data(),
-                Tdev.grid_data(),
-                u.block_1().grid_data(),
-                stokes.eta_fine().grid_data(),
-                density->grid_data(),
-                u.block_2().grid_data() );
+                prm.devel_parameters.output_dimensional,
+                fields.scalar_fields,
+                fields.vector_fields,
+                fields.pressure_field );
         }
 
         // Energy-solver-specific diagnostics dump first — refreshes EV
