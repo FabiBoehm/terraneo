@@ -1184,8 +1184,8 @@ class FCTSolver : public EnergySolver< ScalarType >
             // Enforce Dirichlet BCs on the Q1 temperature.
             auto       T_grid    = T_.grid_data();
             auto       mask      = boundary_mask_;
-            const auto T_cmb_val = static_cast< ScalarType >( prm_.boundary_parameters.temperature_min );
-            const auto T_top_val = static_cast< ScalarType >( prm_.boundary_parameters.temperature_max );
+            const auto T_cmb_val = static_cast< ScalarType >( prm_.boundary_parameters.temperature_max );
+            const auto T_top_val = static_cast< ScalarType >( prm_.boundary_parameters.temperature_min );
             Kokkos::parallel_for(
                 "enforce_T_dirichlet_bcs",
                 grid::shell::local_domain_md_range_policy_nodes( *domain_ ),

@@ -314,7 +314,7 @@ struct ViscosityFromTemperature
         const ScalarType T_val = T_( id, x, y, r );
         const ScalarType depth = radius_max_ - coords_radii_( id, r );
 
-        ScalarType eta_val;
+        ScalarType eta_val = 0.0;
 
         switch ( law_ )
         {
@@ -338,6 +338,7 @@ struct ViscosityFromTemperature
             eta_val = eta_profile_( id, r ) * Kokkos::exp(
                                                   activation_energy_ * ( ScalarType( 1 ) / ( T_val + c1_ ) - c2_ ) +
                                                   activation_volume_ * depth );
+            break;
         case ViscosityLaw::CONSTANT:
         default:
             // eta is already set, nothing to do.
