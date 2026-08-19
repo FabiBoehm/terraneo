@@ -20,17 +20,18 @@
 
 #pragma once
 
-#include <fstream>
 #include <csignal>
-
-#include "util/logging.hpp"
+#include <fstream>
 
 #include "terra/plates/json.hpp"
 #include "terra/plates/types.hpp"
+#include "util/logging.hpp"
 
-using util::logroot;
+namespace terra {
+
 using util::logall;
-// namespace terraneo {
+using util::logroot;
+
 namespace io {
 
 // using walberla::real_c;
@@ -43,114 +44,114 @@ namespace io {
 /// \return ifstream for the file
 inline std::ifstream openFileForReading( std::string& fileName )
 {
-   std::ifstream infile( fileName, std::ios::in );
-   if ( !infile.is_open() )
-   {
-      logall << "Failed to open file '" << fileName << "' for reading!" << std::endl;
-      std::abort();
-   }
-   return infile;
+    std::ifstream infile( fileName, std::ios::in );
+    if ( !infile.is_open() )
+    {
+        logall << "Failed to open file '" << fileName << "' for reading!" << std::endl;
+        std::abort();
+    }
+    return infile;
 }
 
 /// Imports a file in JSON format
 inline nlohmann::json readJsonFile( std::string filename )
 {
-   if ( mpi::rank == 0 )
-   {
-      logroot << "Starting to read datafile '" << filename << "' \n" ;
-   }
-   std::ifstream  infile{ openFileForReading( filename ) };
-   nlohmann::json inobj;
-   infile >> inobj;
-   if ( mpi::rank == 0 )
-   {
-      logroot << "Finished reading datafile '" << filename << "' \n" ;
-   }
-   return inobj;
+    if ( mpi::rank() == 0 )
+    {
+        logroot << "Starting to read datafile '" << filename << "' \n";
+    }
+    std::ifstream  infile{ openFileForReading( filename ) };
+    nlohmann::json inobj;
+    infile >> inobj;
+    if ( mpi::rank() == 0 )
+    {
+        logroot << "Finished reading datafile '" << filename << "' \n";
+    }
+    return inobj;
 }
 
 /// Imports data from a text file with rotation information
 inline std::vector< plates::RotationInfo > readRotationsFile( std::string filename )
 {
-   // if ( mpi::rank == 0 )
-   // {
-      logroot << "Starting to read datafile '" << filename << "' \n" ;
-   // }
-   std::ifstream file{ openFileForReading( filename ) };
+    // if ( mpi::rank() == 0 )
+    // {
+    logroot << "Starting to read datafile '" << filename << "' \n";
+    // }
+    std::ifstream file{ openFileForReading( filename ) };
 
-   // Determine number of lines in file for reserving space
-   std::string line;
-   uint_t      numRotations{ 0 };
-   while ( std::getline( file, line ) )
-   {
-      numRotations++;
-   }
-   file.clear();    // clear EOF
-   file.seekg( 0 ); // rewind stream
+    // Determine number of lines in file for reserving space
+    std::string line;
+    uint_t      numRotations{ 0 };
+    while ( std::getline( file, line ) )
+    {
+        numRotations++;
+    }
+    file.clear();    // clear EOF
+    file.seekg( 0 ); // rewind stream
 
-   // if ( mpi::rank == 0 )
-   // {
-      logroot << "Found " << numRotations << " rotations in data-file \n";
-   // }
-   std::vector< plates::RotationInfo > rotations( numRotations, plates::RotationInfo() );
+    // if ( mpi::rank == 0 )
+    // {
+    logroot << "Found " << numRotations << " rotations in data-file \n";
+    // }
+    std::vector< plates::RotationInfo > rotations( numRotations, plates::RotationInfo() );
 
-   std::size_t charsUsed;
-   uint_t      k{ 0 };
+    std::size_t charsUsed;
+    uint_t      k{ 0 };
 
 // this was primarily introduced for the regression testing during the
 // refactoring of the original coding attempt; the accuracy of the data
 // in the input file is smaller than even binary32 ;-)
 // #ifdef WALBERLA_DOUBLE_ACCURACY
 #define PLATES_IO_STR_TO_FP std::stod
-// #else
-// #define PLATES_IO_STR_TO_FP std::stof
-// #endif
+    // #else
+    // #define PLATES_IO_STR_TO_FP std::stof
+    // #endif
 
-   while ( std::getline( file, line ) )
-   {
-      // position inside line-string
-      std::size_t pos{ 0 };
+    while ( std::getline( file, line ) )
+    {
+        // position inside line-string
+        std::size_t pos{ 0 };
 
-      rotations[k].plateID = std::stoul( line, &charsUsed );
+        rotations[k].plateID = std::stoul( line, &charsUsed );
 
-      pos += charsUsed;
-      rotations[k].time = static_cast< double >( PLATES_IO_STR_TO_FP( line.substr( pos ), &charsUsed ) );
+        pos += charsUsed;
+        rotations[k].time = static_cast< double >( PLATES_IO_STR_TO_FP( line.substr( pos ), &charsUsed ) );
 
-      pos += charsUsed;
-      rotations[k].latitude = static_cast< double >( PLATES_IO_STR_TO_FP( line.substr( pos ), &charsUsed ) );
+        pos += charsUsed;
+        rotations[k].latitude = static_cast< double >( PLATES_IO_STR_TO_FP( line.substr( pos ), &charsUsed ) );
 
-      pos += charsUsed;
-      rotations[k].longitude = static_cast< double >( PLATES_IO_STR_TO_FP( line.substr( pos ), &charsUsed ) );
+        pos += charsUsed;
+        rotations[k].longitude = static_cast< double >( PLATES_IO_STR_TO_FP( line.substr( pos ), &charsUsed ) );
 
-      pos += charsUsed;
-      rotations[k].angle = static_cast< double >( PLATES_IO_STR_TO_FP( line.substr( pos ), &charsUsed ) );
+        pos += charsUsed;
+        rotations[k].angle = static_cast< double >( PLATES_IO_STR_TO_FP( line.substr( pos ), &charsUsed ) );
 
-      pos += charsUsed;
-      rotations[k].conjugateID = std::stoul( line.substr( pos ), &charsUsed );
+        pos += charsUsed;
+        rotations[k].conjugateID = std::stoul( line.substr( pos ), &charsUsed );
 
-      // don't forget to increment index into vector
-      ++k;
-   }
+        // don't forget to increment index into vector
+        ++k;
+    }
 
-   // Safety check
-   if ( k != numRotations )
-   {
-      // if ( mpi::rank == 0 ) 
-      // {
-         logroot << " Imported " << k << " rotations,\n"
-                   << " but should have been " << numRotations << std::endl;
-      // }
-      logall << "Data import error" << std::endl;
-      std::abort();
-   }
-   
-   // if ( mpi::rank == 0 )
-   // {
-      logroot << "Finished reading datafile '" << filename << "' \n";
-   // }
+    // Safety check
+    if ( k != numRotations )
+    {
+        // if ( mpi::rank == 0 )
+        // {
+        logroot << " Imported " << k << " rotations,\n"
+                << " but should have been " << numRotations << std::endl;
+        // }
+        logall << "Data import error" << std::endl;
+        std::abort();
+    }
 
-   return rotations;
+    // if ( mpi::rank == 0 )
+    // {
+    logroot << "Finished reading datafile '" << filename << "' \n";
+    // }
+
+    return rotations;
 }
 
 } // namespace io
-// } // namespace terraneo
+} // namespace terra

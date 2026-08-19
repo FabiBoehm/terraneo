@@ -20,6 +20,7 @@
 
 #pragma once
 
+namespace terra{
 namespace plates {
 
 /// \defgroup SmoothingStrategies SmoothingStrategies
@@ -59,3 +60,4 @@ class LinearDistanceSmoother
 
 /// @}
 } // namespace plates
+} // namespace terra

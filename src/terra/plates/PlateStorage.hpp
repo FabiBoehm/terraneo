@@ -34,10 +34,12 @@
 #include "terra/plates/utilities.hpp"
 #include "util/logging.hpp"
 
-using util::logroot;
-using util::logall;
+using terra::util::logroot;
+using terra::util::logall;
 
-// namespace terraneo {
+using uint_t = unsigned int;
+
+namespace terra {
 namespace plates {
 
 /// Class for managing plate topology information
@@ -180,4 +182,4 @@ class PlateStorage
 };
 
 } // namespace plates
-// } // namespace terraneo
+} // namespace terra

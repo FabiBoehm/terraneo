@@ -25,10 +25,11 @@
 #include "terra/dense/mat.hpp"
 
 // namespace terraneo {
-namespace plates {
 
-using vec3D = dense::Vec< double, 3 >; 
-using mat3D = dense::Mat< ScalarType, 3, 3 >
+using vec3D = terra::dense::Vec< double, 3 >; 
+using mat3D = terra::dense::Mat< double, 3, 3 >;
+namespace terra{
+namespace plates {
 
 using uint_t = unsigned int;
 
@@ -37,10 +38,10 @@ inline constexpr long double pi = 3.14159265358979323846L;
 /// Struct to bundle information on the rotation of a plate
 struct RotationInfo
 {
-   double time{ real_c( 0 ) };      //!< time for which the finite rotation is given
-   double longitude{ real_c( 0 ) }; //!< longitude of finite rotation
-   double latitude{ real_c( 0 ) };  //!< latitude of finite rotation
-   double angle{ real_c( 0 ) };     //!< finite rotation angle
+   double time{ static_cast< double >( 0 ) };      //!< time for which the finite rotation is given
+   double longitude{ static_cast< double >( 0 ) }; //!< longitude of finite rotation
+   double latitude{ static_cast< double >( 0 ) };  //!< latitude of finite rotation
+   double angle{ static_cast< double >( 0 ) };     //!< finite rotation angle
    uint_t plateID{ 0 };             //!< ID of the plate itself
    uint_t conjugateID{ 0 };         //!< ID of the conjugate plate (needed to "hop" to reference plate)
 };
@@ -64,12 +65,13 @@ using Polygon = std::vector< vec3D >;
 /// as we might want to simulate other planets at some point.
 struct constants
 {
-   // static constexpr double earthRadiusInKm{real_c( 6371 )};
+   // static constexpr double earthRadiusInKm{static_cast< double >( 6371 )};
    // fails with:
-   // call to non-‘constexpr’ function ‘walberla::double walberla::real_c(T)
+   // call to non-‘constexpr’ function ‘walberla::double walberla::static_cast< double >(T)
    // [with T = int; walberla::double = double]’
    static constexpr double earthRadiusInKm{ 6371.0 };
 };
 
 } // namespace plates
+}
 // } // namespace terraneo

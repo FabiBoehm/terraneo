@@ -24,7 +24,7 @@
 #include "terra/plates/types.hpp"
 // #include "terraneo/dataimport/FileIO.hpp"
 
-// namespace terraneo {
+namespace terra {
 namespace plates {
 
 /// Class storing and providing access to plate rotation information
@@ -48,4 +48,4 @@ class PlateRotationProvider
 };
 
 } // namespace plates
-// } // namespace terraneo
+} // namespace terra

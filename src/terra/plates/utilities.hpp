@@ -27,11 +27,13 @@
 
 #define PLATES_IO_STR_TO_FP std::stod
 
-// namespace terraneo {
-namespace plates {
 
-using vec3D = dense::Vec< double, 3 >; 
-using mat3D = dense::Mat< ScalarType, 3, 3 >
+
+using vec3D = terra::dense::Vec< double, 3 >; 
+using mat3D = terra::dense::Mat< double, 3, 3 >;
+
+namespace terra {
+namespace plates {
 
 using uint_t = unsigned int;
 
@@ -53,7 +55,7 @@ inline std::string ageToKeyStr( const double age )
 }
 
 } // namespace plates
-// } // namespace terraneo
+} // namespace terra
 
 
 /// Specialise std::less for vec3D

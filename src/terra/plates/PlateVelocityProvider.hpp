@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025 Berta Vilacis, Marcus Mohr, Nils Kohl.
+ * Copyright (c) 2022-2025 Berta Vilacis, Marcus Mohr, Nils Kohl, Andreas Burkhart, Fatemeh Rezaei.
  *
  * This file is part of HyTeG
  * (see https://i10git.cs.fau.de/hyteg/hyteg).
@@ -20,7 +20,6 @@
 
 #pragma once
 
-// #include "terraneo/dataimport/FileIO.hpp"
 #include "terra/plates/PlateNotFoundHandlers.hpp"
 #include "terra/plates/PlateRotationProvider.hpp"
 #include "terra/plates/PlateStorage.hpp"
@@ -28,10 +27,11 @@
 #include "terra/plates/conversions.hpp"
 
 // preserve ordering of includes
-#include "LocalAveragingPointWeightProvider.hpp"
+#include "terra/plates/FileIO.hpp"
+#include "terra/plates/LocalAveragingPointWeightProvider.hpp"
 #include "terra/plates/functionsForPlates.hpp"
 
-// namespace terraneo {
+namespace terra {
 namespace plates {
 
 /// API class for computation of velocities from plate reconstructions
@@ -58,9 +58,9 @@ class PlateVelocityProvider
         bool   plateFound{ false };
         double distance{ static_cast< double >( -1 ) };
 
-        // Transform the point to Lon, Lat, Radius - to preform all caculations
+        // Transform the point to Lon, Lat, Radius - to perform all caculations
         // We use the Lon, Lat coordinates
-        const vec3D pointLonLat = terraneo::conversions::cart2sph( point );
+        const vec3D pointLonLat = conversions::cart2sph( point );
 
         std::tie( plateFound, plateID, distance ) =
             findPlateAndDistance( age, plateTopologies_, pointLonLat, idWhenNoPlateFound );
@@ -102,6 +102,14 @@ class PlateVelocityProvider
     vec3D getPointVelocity( const vec3D& point, const double age )
     { return getPointVelocity( point, age, LinearDistanceSmoother{ 0.015 }, DefaultPlateNotFoundHandler{} ); }
 
+    /// Alternative: Interpolated linearly in time between the current and next plate age stage. Defaults to the boundaries of
+    /// plateTopologies_.getListOfPlateStages() if age lies out of bounds of plateTopologies_.getListOfPlateStages().
+    vec3D getPointVelocityInterpolatedInTime( const vec3D& point, const double age )
+    {
+        return getPointVelocityInterpolatedInTime(
+            point, age, LinearDistanceSmoother{ 0.015 }, DefaultPlateNotFoundHandler{} );
+    }
+
     /// Returns velocity vector for a point determined from the velocity of the associated plate at given age stage
     ///
     /// This is the expert version of the method which allows to explicitly set a SmoothingStrategy and
@@ -117,7 +125,7 @@ class PlateVelocityProvider
         bool   plateFound{ false };
         double distance{ static_cast< double >( -1 ) };
 
-        // Transform the point to Lon, Lat, Radius - to preform all calculations
+        // Transform the point to Lon, Lat, Radius - to perform all calculations
         // We use the Lon, Lat coordinates
         vec3D pointLonLat = conversions::cart2sph( point );
 
@@ -136,11 +144,74 @@ class PlateVelocityProvider
         const double smoothingFactor = computeSmoothing( distance );
         // if ( mpi::rank == 0 )
         // {
-            logroot << "Smoothing Factor: " << smoothingFactor << "\n"
-                      << "Plate ID: " << plateID << std::endl;
+        logroot << "Smoothing Factor: " << smoothingFactor << "\n"
+                << "Plate ID: " << plateID << std::endl;
         // }
 
         return computeCartesianVelocityVector( plateRotations_, plateID, age, pointLonLat, smoothingFactor );
+    }
+
+    /// Find the age in the plateStages list and return the surrounding ages in the list
+    /// Crop to plateStages if age lies outside.
+    ///
+    /// Returns a double tuple s.t. tuple[0] <= age <= tuple[1].
+    /// tuple[2] is a linear interpolation factor s.t. age = (1-tuple[2])*tuple[0] + tuple[2]*tuple[1]
+    std::tuple< double, double, double > getSurroundingAges( const double age )
+    {
+        std::vector< double > plateStages = plateTopologies_.getListOfPlateStages();
+        // find the age in the plateStages list, crop to plateStages if age lies outside
+        uint_t indexFloor;
+        uint_t indexCeil;
+        double interpolationFactor;
+        if ( age >= plateStages.back() )
+        {
+            indexFloor          = plateStages.size() - 1;
+            indexCeil           = indexFloor;
+            interpolationFactor = static_cast< double >( 1.0 );
+        }
+        else if ( age <= plateStages.front() )
+        {
+            indexFloor          = 0;
+            indexCeil           = 0;
+            interpolationFactor = static_cast< double >( 1.0 );
+        }
+        else
+        {
+            auto iteratorLowerBound = std::lower_bound( plateStages.begin(), plateStages.end(), age );
+            indexCeil               = static_cast< uint_t >( std::distance( plateStages.begin(), iteratorLowerBound ) );
+            indexFloor              = indexCeil - 1;
+            interpolationFactor =
+                ( age - plateStages.at( indexFloor ) ) / ( plateStages.at( indexCeil ) - plateStages.at( indexFloor ) );
+        }
+
+        return { plateStages.at( indexFloor ), plateStages.at( indexCeil ), interpolationFactor };
+    }
+
+    /// Returns velocity vector for a point determined from the velocity of the associated plate at given age stage
+    ///
+    /// Interpolated linearly in time between the current and next plate age stage. Defaults to the boundaries of
+    /// plateTopologies_.getListOfPlateStages() if age lies out of bounds of plateTopologies_.getListOfPlateStages().
+    ///
+    /// This is the version using a SmoothingStrategy like LinearDistanceSmoother.
+    template < typename SmoothingStrategy, typename PlateNotFoundStrategy >
+    vec3D getPointVelocityInterpolatedInTime(
+        const vec3D&            point,
+        const double            age,
+        SmoothingStrategy       computeSmoothing,
+        PlateNotFoundStrategy&& errorHandler )
+    {
+        // find surrounding plate ages and interpolation factor
+        double ageFloor;
+        double ageCeil;
+        double interpolationFactor;
+        std::tie( ageFloor, ageCeil, interpolationFactor ) = getSurroundingAges( age );
+
+        // call getPointVelocity twice
+        vec3D vecFloor = getPointVelocity( point, ageFloor, computeSmoothing, errorHandler );
+        vec3D vecCeil  = getPointVelocity( point, ageCeil, computeSmoothing, errorHandler );
+
+        // linear interpolation in time
+        return vecFloor + interpolationFactor * ( vecCeil - vecFloor );
     }
 
     /// Computes a weighted average of the velocity around the given point using the provided point and weights.
@@ -169,7 +240,7 @@ class PlateVelocityProvider
             return errorHandler( point, age );
         }
 
-        vec3D  avgVelCart( 0, 0, 0 );
+        vec3D  avgVelCart{ 0, 0, 0 };
         double weightSum = 0;
 
         if ( pointWeightProvider.maxDistance( pointLonLat ) < distance )
@@ -177,7 +248,7 @@ class PlateVelocityProvider
             // We do not apply averaging since all points that would be used for averaging are on the same plate.
             // if ( mpi::rank() == 0 )
             // {
-                logroot << "No averaging.\n" << "Plate ID: " << plateID << std::endl;
+            // logroot << "No averaging.\n" << "Plate ID: " << plateID << std::endl;
             // }
 
             return computeCartesianVelocityVector( plateRotations_, plateID, age, pointLonLat, 1.0 );
@@ -201,13 +272,19 @@ class PlateVelocityProvider
                 // out the normal component. It would be better to average in the "lonlat-space" and then convert and return the
                 // cartesian vector. On the other hand, averaging the plate velocities is already a somewhat arbitrary and physically
                 // meaningless approximation in the first place, so this might just work.
-                avgVelCart += weight * computeCartesianVelocityVector(
-                                           plateRotations_, avgPointPlateID, age, samplePointSphLonLat, 1.0 );
+                avgVelCart( 0 ) += weight * computeCartesianVelocityVector(
+                                                plateRotations_, avgPointPlateID, age, samplePointSphLonLat, 1.0 )( 0 );
+                avgVelCart( 1 ) += weight * computeCartesianVelocityVector(
+                                                plateRotations_, avgPointPlateID, age, samplePointSphLonLat, 1.0 )( 1 );
+                avgVelCart( 2 ) += weight * computeCartesianVelocityVector(
+                                                plateRotations_, avgPointPlateID, age, samplePointSphLonLat, 1.0 )( 2 );
                 weightSum += weight;
             }
         }
 
-        avgVelCart /= weightSum;
+        avgVelCart( 0 ) /= weightSum;
+        avgVelCart( 1 ) /= weightSum;
+        avgVelCart( 2 ) /= weightSum;
 
         const auto n                = point.normalized();
         const auto dot              = n.dot( avgVelCart );
@@ -215,6 +292,33 @@ class PlateVelocityProvider
         const auto tangentComponent = avgVelCart - normalComponent;
 
         return tangentComponent;
+    }
+
+    /// Returns velocity vector for a point determined from the velocity of the associated plate at given age stage
+    ///
+    /// Interpolated linearly in time between the current and next plate age stage. Defaults to the boundaries of
+    /// plateTopologies_.getListOfPlateStages() if age lies out of bounds of plateTopologies_.getListOfPlateStages().
+    ///
+    /// This is the version using a weighted average of the velocity around the given point given a LocalAveragingPointWeightProvider.
+    template < typename PlateNotFoundStrategy >
+    vec3D getLocallyAveragedPointVelocityInterpolatedInTime(
+        const vec3D&                             point,
+        const double                             age,
+        const LocalAveragingPointWeightProvider& pointWeightProvider,
+        PlateNotFoundStrategy&&                  errorHandler )
+    {
+        // find surrounding plate ages and interpolation factor
+        double ageFloor;
+        double ageCeil;
+        double interpolationFactor;
+        std::tie( ageFloor, ageCeil, interpolationFactor ) = getSurroundingAges( age );
+
+        // call getLocallyAveragedPointVelocity twice
+        vec3D vecFloor = getLocallyAveragedPointVelocity( point, ageFloor, pointWeightProvider, errorHandler );
+        vec3D vecCeil  = getLocallyAveragedPointVelocity( point, ageCeil, pointWeightProvider, errorHandler );
+
+        // linear interpolation in time
+        return vecFloor + interpolationFactor * ( vecCeil - vecFloor );
     }
 
     /// Query function to obtain a vector of plate stages available in the datafiles
@@ -232,4 +336,4 @@ class PlateVelocityProvider
 };
 
 } // namespace plates
-// } // namespace terraneo
+} // namespace terra

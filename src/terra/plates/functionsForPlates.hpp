@@ -30,16 +30,17 @@
 #include "terra/plates/functionsForGeometry.hpp"
 #include "terra/plates/functionsForRotations.hpp"
 #include "terra/plates/types.hpp"
+#include "terra/plates/PlateStorage.hpp"
 
-// namespace terraneo {
+namespace terra {
 namespace plates {
 
-inline vec3D sph2cart( const std::vector< real_t >& lonlat, const real_t radius = static_cast< double >( 1 ) )
+inline vec3D sph2cart( const std::vector< double >& lonlat, const double radius = static_cast< double >( 1 ) )
 {
    vec3D xyz;
-   xyz[0] = radius * cos( conversions::degToRad( lonlat[1] ) ) * cos( conversions::degToRad( lonlat[0] ) );
-   xyz[1] = radius * cos( conversions::degToRad( lonlat[1] ) ) * sin( conversions::degToRad( lonlat[0] ) );
-   xyz[2] = radius * sin( conversions::degToRad( lonlat[1] ) );
+   xyz(0) = radius * cos( conversions::degToRad( lonlat[1] ) ) * cos( conversions::degToRad( lonlat[0] ) );
+   xyz(1) = radius * cos( conversions::degToRad( lonlat[1] ) ) * sin( conversions::degToRad( lonlat[0] ) );
+   xyz(2) = radius * sin( conversions::degToRad( lonlat[1] ) );
    return xyz;
 }
 
@@ -62,7 +63,7 @@ inline std::tuple< bool, uint_t, double >
    double distance{ std::numeric_limits< double >::max() };
 
    // Create the point in the surface of a sphere from the library boost::geometry 
-   spherical_point pntSph(point[0], point[1]);
+   spherical_point pntSph(point(0), point(1));
 
    //loop over the plates available
    for ( auto& currentPlate : plates )
@@ -115,10 +116,12 @@ inline vec3D eulerVectorToVelocity( const vec3D& point, vec3D& wXYZ, const doubl
    eVector = conversions::degToRad( wXYZ ) * static_cast< double >( 1e-6 );
 
    // Transform to the point to the xyz in a sphere of earthRadius;
-   pxyz    = conversions::sph2cart( { point[0], point[1] }, earthRadius );
+   pxyz    = conversions::sph2cart( { point(0), point(1) }, earthRadius );
    vec3D v = eVector.cross( pxyz );
 
-   v *= smoothing / toms;
+   v(0) *= smoothing / toms;
+   v(1) *= smoothing / toms;
+   v(2) *= smoothing / toms;
 
    return v;
 }
@@ -172,11 +175,11 @@ inline vec3D computeCartesianVelocityVector( const PlateRotationProvider& rotDat
 
    // compute Euler Vector
    vec3D lonlatang = plates::stagePoleF( finNahs[0].lonLatAng, finNahs[1].lonLatAng );
-   lonlatang[2]    = lonlatang[2] / ( finNahs[1].time - finNahs[0].time );
-   vec3D wXYZ      = conversions::sph2cart( { lonlatang[0], lonlatang[1] }, lonlatang[2] );
+   lonlatang(2)    = lonlatang(2) / ( finNahs[1].time - finNahs[0].time );
+   vec3D wXYZ      = conversions::sph2cart( { lonlatang(0), lonlatang(1) }, lonlatang(2) );
 
    return eulerVectorToVelocity( point, wXYZ, smoothing );
 }
 
 } // namespace plates
-// } // namespace terraneo
+} // namespace terra

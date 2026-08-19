@@ -22,12 +22,17 @@
 
 #include <algorithm>
 #include <vector>
+#include <set>
+#include <iostream>
+#include <iomanip>
 
-#include "core/mpi/BufferDataTypeExtensions.h"
-#include "core/mpi/Gatherv.h"
+// #include "core/mpi/BufferDataTypeExtensions.h"
+// #include "core/mpi/Gatherv.h"
 
 #include "terra/plates/utilities.hpp"
+#include "mpi/mpi.hpp"
 
+namespace terra {
 namespace plates {
 
 /// \defgroup PlateNotFoundHandlers PlateNotFoundHandlers
@@ -62,7 +67,7 @@ class StatisticsPlateNotFoundHandler
 
    vec3D operator()( const vec3D& point, const double age )
    {
-      pointsNotFound_[ageToKeyStr( age )].insert( point );
+      pointsNotFound_[plates::ageToKeyStr( age )].insert( point );
       return {static_cast< double >( 0 ), static_cast< double >( 0 ), static_cast< double >( 0 )};
    }
 
@@ -123,10 +128,10 @@ class StatisticsPlateNotFoundHandler
       // sendBuffer << pointsNotFound_;
       // walberla::mpi::RecvBuffer recvBuffer;
       // walberla::mpi::gathervBuffer( sendBuffer, recvBuffer );
-      std::cout << "BIG BIG BIG TROUBLE; WE'RE IN collectDataOnRoot \n\n"
+      std::cout << "BIG BIG BIG TROUBLE; WE'RE IN collectDataOnRoot \n\n";
       std::abort();
       const auto myRank = mpi::rank();
-      const auto nProcs = mpi::num_processes();
+      const unsigned int nProcs = mpi::num_processes();
 
       map_t globalMap;
 
@@ -136,7 +141,7 @@ class StatisticsPlateNotFoundHandler
          map_t singleMap;
          for ( uint_t k = 0; k < nProcs; ++k )
          {
-            recvBuffer >> singleMap;
+            // recvBuffer >> singleMap;
             combineMaps( globalMap, singleMap );
          }
       }
@@ -148,5 +153,5 @@ class StatisticsPlateNotFoundHandler
 };
 
 /// @}
-
+}
 } // namespace plates

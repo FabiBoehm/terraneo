@@ -24,7 +24,7 @@
 // #include <Eigen/Array>
 #include "terra/plates/types.hpp"
 
-// namespace terraneo {
+namespace terra {
 namespace plates {
 
 using plates::FiniteRotation;
@@ -79,18 +79,18 @@ inline vec3D rotMatrix2LonLatW( const mat3D& Rot )
    if ( sqrtRot == static_cast< double >( 0 ) ) // <- direct comparision of FP value for zero?
                                  // should probably add a tolerance
    {
-      lonlatang[1] = static_cast< double >( 0 );
+      lonlatang(1) = static_cast< double >( 0 );
    }
    else
    {
-      lonlatang[1] = asin( ( Rot( 1, 0 ) - Rot( 0, 1 ) ) / sqrtRot );
+      lonlatang(1) = asin( ( Rot( 1, 0 ) - Rot( 0, 1 ) ) / sqrtRot );
    }
 
    // longitude
-   lonlatang[0] = atan2( Rot( 0, 2 ) - Rot( 2, 0 ), Rot( 2, 1 ) - Rot( 1, 2 ) );
+   lonlatang(0) = atan2( Rot( 0, 2 ) - Rot( 2, 0 ), Rot( 2, 1 ) - Rot( 1, 2 ) );
 
    // angle
-   lonlatang[2] = atan2( sqrtRot, Rot( 0, 0 ) + Rot( 1, 1 ) + Rot( 2, 2 ) - static_cast< double >( 1 ) );
+   lonlatang(2) = atan2( sqrtRot, Rot( 0, 0 ) + Rot( 1, 1 ) + Rot( 2, 2 ) - static_cast< double >( 1 ) );
    lonlatang    = conversions::radToDeg( lonlatang );
 
    return lonlatang;
@@ -99,8 +99,8 @@ inline vec3D rotMatrix2LonLatW( const mat3D& Rot )
 /// Calculate stage Pole for a pair of rotations
 inline vec3D stagePoleF( const vec3D& rot1, const vec3D& rot2 )
 {
-   mat3D R1     = rotationMatrix( rot1[0], rot1[1], rot1[2] );
-   mat3D R2     = rotationMatrix( rot2[0], rot2[1], rot2[2] * static_cast< double >( -1 ) );
+   mat3D R1     = rotationMatrix( rot1(0), rot1(1), rot1(2) );
+   mat3D R2     = rotationMatrix( rot2(0), rot2(1), rot2(2) * static_cast< double >( -1 ) );
    mat3D stageR = R1 * R2;
    return rotMatrix2LonLatW( stageR );
 }
@@ -112,7 +112,7 @@ inline vec3D
    double dT        = ( rot2.time - time ) / ( rot2.time - rot1.time );
    mat3D  R2        = rotationMatrix( rot2.longitude, rot2.latitude, rot2.angle );
    vec3D  lonlatang = stagePoleF( { rot1.longitude, rot1.latitude, rot1.angle }, { rot2.longitude, rot2.latitude, rot2.angle } );
-   mat3D  stgR      = rotationMatrix( lonlatang[0], lonlatang[1], lonlatang[2] * dT );
+   mat3D  stgR      = rotationMatrix( lonlatang(0), lonlatang(1), lonlatang(2) * dT );
    mat3D  intR      = stgR * R2;
 
    return rotMatrix2LonLatW( intR );
@@ -193,8 +193,8 @@ inline std::array< FiniteRotation, 2 > combineSeriesOfFiniteRotations( const std
 
       for ( int ii = jj; ii < FinRot.size(); ii = ii + 2 )
       {
-         mat3D Rot1           = rotationMatrix( absFin[jj].lonLatAng[0], absFin[jj].lonLatAng[1], absFin[jj].lonLatAng[2] );
-         mat3D Rot2           = rotationMatrix( FinRot[ii].lonLatAng[0], FinRot[ii].lonLatAng[1], FinRot[ii].lonLatAng[2] );
+         mat3D Rot1           = rotationMatrix( absFin[jj].lonLatAng(0), absFin[jj].lonLatAng(1), absFin[jj].lonLatAng(2) );
+         mat3D Rot2           = rotationMatrix( FinRot[ii].lonLatAng(0), FinRot[ii].lonLatAng(1), FinRot[ii].lonLatAng(2) );
          Rot1                 = Rot2 * Rot1;
          absFin[jj].lonLatAng = rotMatrix2LonLatW( Rot1 );
          absFin[jj].time      = FinRot[ii].time;
@@ -205,4 +205,4 @@ inline std::array< FiniteRotation, 2 > combineSeriesOfFiniteRotations( const std
 }
 
 } // namespace plates
-// } // namespace terraneo
+} // namespace terra

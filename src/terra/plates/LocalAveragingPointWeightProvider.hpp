@@ -27,6 +27,7 @@
 // #include "terraneo/helpers/typeAliases.hpp"
 #include "terra/plates/functionsForGeometry.hpp"
 
+namespace terra {
 namespace plates {
 
 /// Computes the Gaussian weight based on the distance from the center (d) and the standard deviation sigma (σ).
@@ -55,7 +56,7 @@ inline std::vector< std::pair< vec3D, double > >
                                                    const std::vector< std::pair< vec3D, double > >& sampleOffsets2DCart )
 {
    const vec3D pointOnSurfaceCart =
-       conversions::sph2cart( { pointOnSurfaceLonLat[0], pointOnSurfaceLonLat[1] }, pointOnSurfaceLonLat[2] );
+       conversions::sph2cart( { pointOnSurfaceLonLat(0), pointOnSurfaceLonLat(1) }, pointOnSurfaceLonLat(2) );
 
    const auto [fst, snd] = findOrthogonalVectorsCart( pointOnSurfaceCart );
 
@@ -63,9 +64,9 @@ inline std::vector< std::pair< vec3D, double > >
 
    for ( const auto& [p, w] : sampleOffsets2DCart )
    {
-      const auto sampleCart = pointOnSurfaceCart + p[0] * fst + p[1] * snd;
+      const auto sampleCart = pointOnSurfaceCart + p(0) * fst + p(1) * snd;
       auto       sampleSph  = conversions::cart2sph( sampleCart );
-      sampleSph.z()         = pointOnSurfaceLonLat.z();
+      sampleSph(2)         = pointOnSurfaceLonLat(2);
 
       samples.emplace_back( sampleSph, w );
    }
@@ -113,7 +114,7 @@ class UniformCirclesPointWeightProvider final : public LocalAveragingPointWeight
    {
       bool evenCircle = true;
 
-      sampleOffsets2DCart_.emplace_back( vec3D( 0, 0, 0 ), computeGaussianWeight( 0, gaussianWeightSigma ) );
+      sampleOffsets2DCart_.emplace_back( vec3D{ 0, 0, 0 }, computeGaussianWeight( 0, gaussianWeightSigma ) );
 
       for ( const auto& [radius, numPoints] : radiiAndNumPoints )
       {
@@ -124,14 +125,14 @@ class UniformCirclesPointWeightProvider final : public LocalAveragingPointWeight
 
          for ( int i = 0; i < numPoints; ++i )
          {
-            const vec3D  offset( radius * std::cos( radOffset + i * radH ), radius * std::sin( radOffset + i * radH ), 0 );
+            const vec3D  offset{ radius * std::cos( radOffset + i * radH ), radius * std::sin( radOffset + i * radH ), 0 };
             const vec3D  point( offset );
             const double weight = computeGaussianWeight( radius, gaussianWeightSigma );
             sampleOffsets2DCart_.emplace_back( point, weight );
          }
       }
 
-      const vec3D centerLonLat( 0, 0, 1 );
+      const vec3D centerLonLat{ 0, 0, 1 };
       const auto  pointsAndWeights = samplePointsAndWeightsLonLat( centerLonLat );
       maxDistance_                 = 0.0;
       for ( const auto& [samplePointSphLonLat, weight] : pointsAndWeights )
@@ -178,7 +179,7 @@ class FibonacciLatticePointWeightProvider final : public LocalAveragingPointWeig
          const auto r      = radius * std::sqrt( static_cast< double >( i ) / static_cast< double >( ( numPoints - 1 ) ) );
          const auto x      = r * std::cos( theta );
          const auto y      = r * std::sin( theta );
-         const auto offset = vec3D( x, y, 0 );
+         const auto offset = vec3D{ x, y, 0 };
          const auto dist   = offset.norm();
 
          const double weight = computeGaussianWeight( dist, gaussianWeightSigma );
@@ -186,7 +187,7 @@ class FibonacciLatticePointWeightProvider final : public LocalAveragingPointWeig
          sampleOffsets2DCart_.emplace_back( offset, weight );
       }
 
-      const vec3D centerLonLat( 0, 0, 1 );
+      const vec3D centerLonLat{ 0, 0, 1 };
       const auto  pointsAndWeights = samplePointsAndWeightsLonLat( centerLonLat );
       maxDistance_                 = 0.0;
       for ( const auto& [samplePointSphLonLat, weight] : pointsAndWeights )
@@ -208,3 +209,5 @@ class FibonacciLatticePointWeightProvider final : public LocalAveragingPointWeig
 };
 
 } // namespace plates
+
+} // namespace terra

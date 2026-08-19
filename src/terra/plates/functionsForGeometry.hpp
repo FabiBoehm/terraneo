@@ -26,6 +26,7 @@
 #include "terra/plates/types.hpp"
 #include "terra/plates/conversions.hpp"
 
+namespace terra{
 namespace plates {
 
 
@@ -33,10 +34,10 @@ namespace plates {
 /// distance between them in km using the Haversine formula
 inline double distancePointPoint( const vec3D& lonlat1, const vec3D& lonlat2 )
 {
-   double phi1 = conversions::degToRad( lonlat1[1] );
-   double phi2 = conversions::degToRad( lonlat2[1] );
-   double dphi = conversions::degToRad( lonlat2[1] - lonlat1[1] );
-   double dlam = conversions::degToRad( lonlat2[0] - lonlat1[0] );
+   double phi1 = conversions::degToRad( lonlat1(1) );
+   double phi2 = conversions::degToRad( lonlat2(1) );
+   double dphi = conversions::degToRad( lonlat2(1) - lonlat1(1) );
+   double dlam = conversions::degToRad( lonlat2(0) - lonlat1(0) );
 
    double a = std::sin( dphi * static_cast< double >( 0.5 ) ) * std::sin( dphi * static_cast< double >( 0.5 ) ) +
               std::cos( phi1 ) * std::cos( phi2 ) * std::sin( dlam * static_cast< double >( 0.5 ) ) * std::sin( dlam * static_cast< double >( 0.5 ) );
@@ -47,9 +48,9 @@ inline double distancePointPoint( const vec3D& lonlat1, const vec3D& lonlat2 )
 vec3D cart2sph( const vec3D& xyz )
 {
    vec3D lonlatrad;
-   lonlatrad[0] = conversions::radToDeg( atan2( xyz[1], xyz[0] ) );
-   lonlatrad[1] = conversions::radToDeg( atan2( xyz[2], sqrt( xyz[0] * xyz[0] + xyz[1] * xyz[1] ) ) );
-   lonlatrad[2] = xyz.norm();
+   lonlatrad(0) = conversions::radToDeg( atan2( xyz(1), xyz(0) ) );
+   lonlatrad(1) = conversions::radToDeg( atan2( xyz(2), sqrt( xyz(0) * xyz(0) + xyz(1) * xyz(1) ) ) );
+   lonlatrad(2) = xyz.norm();
 
    return lonlatrad;
 }
@@ -59,7 +60,9 @@ vec3D cart2sph( const vec3D& xyz )
 /// https://github.com/geopy/geopy/blob/master/geopy/distance.py
 inline vec3D intersectPointWithLine( const vec3D& point, const vec3D& lineStart, const vec3D& lineEnd )
 {
-   assert( lineStart != lineEnd, "Line in intersectPointWithLine() should not be degenerate." );
+   assert( lineStart(0) != lineEnd(0) && lineStart(1) != lineEnd(1) && lineStart(2) != lineEnd(2) );
+
+   std::cout << "Line in intersectPointWithLine() should not be degenerate.\n";
 
    // find the intersect point (the projected point) on the line
    vec3D  lineVec    = ( lineEnd - lineStart );
@@ -109,18 +112,18 @@ inline double getDistanceLinePoint( const vec3D& point, const vec3D& pini, const
 inline std::pair< vec3D, vec3D > findOrthogonalVectorsCart( const vec3D& normalCart )
 {
    // Choose an arbitrary vector (not parallel) to normal
-   double smallest = std::fabs( normalCart.x() );
-   vec3D  u1( 1, 0, 0 );
+   double smallest = std::fabs( normalCart(0) );
+   vec3D  u1{ 1, 0, 0 };
 
-   if ( std::fabs( normalCart.y() ) < smallest )
+   if ( std::fabs( normalCart(1) ) < smallest )
    {
-      smallest = std::fabs( normalCart.y() );
-      u1       = vec3D( 0, 1, 0 );
+      smallest = std::fabs( normalCart(1) );
+      u1       = vec3D{ 0, 1, 0 };
    }
 
-   if ( std::fabs( normalCart.z() ) < smallest )
+   if ( std::fabs( normalCart(2) ) < smallest )
    {
-      u1 = vec3D( 0, 0, 1 );
+      u1 = vec3D{ 0, 0, 1 };
    }
 
    // Compute the first orthogonal vector
@@ -133,3 +136,4 @@ inline std::pair< vec3D, vec3D > findOrthogonalVectorsCart( const vec3D& normalC
 }
 
 } // namespace plates
+} // namespace terra
