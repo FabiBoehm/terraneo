@@ -416,7 +416,7 @@ inline void nondimensionalise( Parameters& prm )
         phys.surface_density_nondim = phys.surface_density_dim / phys.reference_density;
 
         // Viscosity limits
-        std::clamp(
+        phys.viscosity_parameters.reference_viscosity = std::clamp(
             phys.viscosity_parameters.reference_viscosity,
             phys.viscosity_parameters.min_viscosity,
             phys.viscosity_parameters.max_viscosity );
