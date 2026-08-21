@@ -17,7 +17,7 @@ namespace terra::fe::wedge::linearforms::shell::detail {
 template < typename T >
 concept HasGridData = requires( const T& t )
 {
-    t.grid.data();
+    t.grid_data();
 };
 } // namespace terra::fe::wedge::linearforms::shell::detail
 
@@ -33,7 +33,7 @@ namespace terra::fe::wedge::linearforms::shell {
 /// into a scalar finite element coefficient vector, where \f$\phi_i\f$ are the scalar Q1 test
 /// functions on the spherical shell mesh.
 ///
-/// Update: Templated class now supports density \f$\rho\f$ as either a scalar FE function 
+/// Update: Templated class now supports density \f$\rho\f$ as either a scalar FE function
 /// (VectorQ1Scalar / Grid4DDataScalar) or as radial profile (Grid2DDataScalar).
 ///
 /// This term arises in the pressure equation of the Truncated Anelastic Liquid Approximation
