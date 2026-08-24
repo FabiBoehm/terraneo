@@ -99,18 +99,19 @@ std::tuple< uint_t, uint_t > decodeRangeString( std::string& rangeStr )
     return std::make_tuple( stageInit, stageStop );
 }
 
-struct PlateIDInterpolator
+template < typename GridType, typename RadiiType, typename DataType >
+struct PlateIDInterpolator 
 {
-    Grid3DDataVec< double, 3 > grid_;
-    Grid2DDataScalar< double > radii_;
-    Grid4DDataScalar< double > data_;
+    GridType  grid_;
+    RadiiType radii_;
+    DataType  data_;
 
     std::function< double( const vec3D& ) > findPlateID;
 
-    PlateIDInterpolator(
-        const Grid3DDataVec< double, 3 >&       grid,
-        const Grid2DDataScalar< double >&       radii,
-        const Grid4DDataScalar< double >&       data,
+    PlateIDInterpolator( 
+        const GridType&  grid, 
+        const RadiiType& radii,
+        const DataType&  data,      
         std::function< double( const vec3D& ) > plateIDFn )
     : grid_( grid )
     , radii_( radii )
@@ -128,18 +129,19 @@ struct PlateIDInterpolator
     }
 };
 
+template < typename GridType, typename RadiiType, typename DataType >
 struct PlateVelocityInterpolator
 {
-    Grid3DDataVec< double, 3 > grid_;
-    Grid2DDataScalar< double > radii_;
-    Grid4DDataScalar< double > data_;
+    GridType  grid_;
+    RadiiType radii_;
+    DataType  data_;
 
     std::function< double( const vec3D& ) > computeVelocityComponent;
 
     PlateVelocityInterpolator(
-        const Grid3DDataVec< double, 3 >&       grid,
-        const Grid2DDataScalar< double >&       radii,
-        const Grid4DDataScalar< double >        data,
+        const GridType&  grid,
+        const RadiiType& radii,
+        const DataType&  data, 
         std::function< double( const vec3D& ) > velocityFn )
     : grid_( grid )
     , radii_( radii )
@@ -227,12 +229,22 @@ void performComputations(
 
     using HostExecSpace = Kokkos::DefaultHostExecutionSpace;
 
+    // Mirror Kokkos::Views for host-access
+    auto coords_shell_host = Kokkos::create_mirror_view( coords_shell[level] );
+    Kokkos::deep_copy( coords_shell_host, coords_shell[level] );
+
+    auto coords_radii_host = Kokkos::create_mirror_view( coords_radii[level] );
+    Kokkos::deep_copy( coords_radii_host, coords_radii[level] );
+
+    auto plateID_host = Kokkos::create_mirror_view( *plateID );
+    auto surfaceVelocity_host = Kokkos::create_mirror_view( *surfaceVelocity );
+
     Kokkos::parallel_for(
         "Plate ID interpolation",
         Kokkos::MDRangePolicy< HostExecSpace, Kokkos::Rank< 3 > >(
             { 0, 0, 0 },
-            { coords_shell[level].extent( 0 ), coords_shell[level].extent( 1 ), coords_shell[level].extent( 2 ) } ),
-        PlateIDInterpolator( coords_shell[level], coords_radii[level], ( *plateID ), findPlateID ) );
+            { coords_shell_host.extent( 0 ), coords_shell_host.extent( 1 ), coords_shell_host.extent( 2 ) } ),
+        PlateIDInterpolator( coords_shell_host, coords_radii_host, ( plateID_host ), findPlateID ) );
 
     Kokkos::fence();
 
@@ -240,11 +252,16 @@ void performComputations(
         "Plate Velocity interpolation",
         Kokkos::MDRangePolicy< HostExecSpace, Kokkos::Rank< 3 > >(
             { 0, 0, 0 },
-            { coords_shell[level].extent( 0 ), coords_shell[level].extent( 1 ), coords_shell[level].extent( 2 ) } ),
+            { coords_shell_host.extent( 0 ), coords_shell_host.extent( 1 ), coords_shell_host.extent( 2 ) } ),
         PlateVelocityInterpolator(
-            coords_shell[level], coords_radii[level], ( *surfaceVelocity ), computeVelocityComponent ) );
+            coords_shell_host, coords_radii_host, ( surfaceVelocity_host ), computeVelocityComponent ) );
 
     Kokkos::fence();
+
+    // Copy results back to original Views
+    Kokkos::deep_copy( *plateID, plateID_host );
+    Kokkos::deep_copy( *surfaceVelocity, surfaceVelocity_host );
+
     // export results
     std::string fName = genOutputFileName( age );
 
