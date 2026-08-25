@@ -53,16 +53,6 @@ using util::logroot;
 
 namespace plates {
 
-template < typename T >
-std::string demangledTypeName( const T& obj )
-{
-    int         status    = 0;
-    char*       demangled = abi::__cxa_demangle( typeid( obj ).name(), nullptr, nullptr, &status );
-    std::string result    = ( status == 0 ) ? demangled : typeid( obj ).name();
-    free( demangled );
-    return result;
-}
-
 typedef enum
 {
     PLATE_IDS,
@@ -72,35 +62,8 @@ typedef enum
 
 using uint_t = unsigned int;
 
-std::string genOutputFileName( double age )
-{
-    std::stringstream sstr;
-    sstr << "PlateVelocitiesDemo_age=";
-    sstr << std::setfill( '0' );
-    sstr << std::setw( 5 );
-    sstr << std::fixed;
-    sstr << std::setprecision( 1 );
-    sstr << age;
-    return sstr.str();
-}
-
-std::tuple< uint_t, uint_t > decodeRangeString( std::string& rangeStr )
-{
-    size_t fPos = rangeStr.find( '-' );
-    if ( fPos == std::string::npos )
-    {
-        logall << "Cannot decode range string '" << rangeStr << "'\n";
-        std::abort();
-    }
-
-    uint_t stageInit = stoul( rangeStr.substr( 0, fPos ) );
-    uint_t stageStop = stoul( rangeStr.substr( fPos + 1 ) );
-
-    return std::make_tuple( stageInit, stageStop );
-}
-
 template < typename GridType, typename RadiiType, typename DataType >
-struct PlateIDInterpolator 
+struct PlateIDInterpolator
 {
     GridType  grid_;
     RadiiType radii_;
@@ -108,10 +71,10 @@ struct PlateIDInterpolator
 
     std::function< double( const vec3D& ) > findPlateID;
 
-    PlateIDInterpolator( 
-        const GridType&  grid, 
-        const RadiiType& radii,
-        const DataType&  data,      
+    PlateIDInterpolator(
+        const GridType&                         grid,
+        const RadiiType&                        radii,
+        const DataType&                         data,
         std::function< double( const vec3D& ) > plateIDFn )
     : grid_( grid )
     , radii_( radii )
@@ -139,9 +102,9 @@ struct PlateVelocityInterpolator
     std::function< double( const vec3D& ) > computeVelocityComponent;
 
     PlateVelocityInterpolator(
-        const GridType&  grid,
-        const RadiiType& radii,
-        const DataType&  data, 
+        const GridType&                         grid,
+        const RadiiType&                        radii,
+        const DataType&                         data,
         std::function< double( const vec3D& ) > velocityFn )
     : grid_( grid )
     , radii_( radii )
@@ -159,23 +122,22 @@ struct PlateVelocityInterpolator
     }
 };
 
-// =================================================================================
+// ================================================================================
 //  Function to test computation of a velocity field from plate reconstruction data
 //  for all DoFs on the surface of a sphere
-// =================================================================================
-// template < typename terra::grid::Grid4DDataScalar< double > >
+// ================================================================================
+
+template < typename GridType, typename RadiiType >
 void performComputations(
-    uint_t                                    level,
-    std::vector< DistributedDomain >          domains,
-    std::vector< Grid3DDataVec< double, 3 > > coords_shell,
-    std::vector< Grid2DDataScalar< double > > coords_radii,
-    double                                    age,
-    job_t                                     jobType,
-    plates::PlateVelocityProvider&            oracle,
-    std::string                               indent,
-    std::string                               xdmf_dir,
-    io::XDMFOutput< double >                  xdmf_output,
-    uint_t                                    currentStage )
+    GridType                          coords_shell,
+    RadiiType                         coords_radii,
+    double                            age,
+    job_t                             jobType,
+    plates::PlateVelocityProvider&    oracle,
+    grid::Grid4DDataScalar< double >& surfaceVelocity,
+    grid::Grid4DDataScalar< double >& plateID,
+    std::string                       xdmf_dir,
+    io::XDMFOutput< double >&         xdmf_output )
 {
     // need that here, to capture it below ;-)
     uint_t                                 coordIdx = 0;
@@ -185,16 +147,18 @@ void performComputations(
     plates::UniformCirclesPointWeightProvider avgPointProvider( { { 1.0 / 100.0, 6 } }, 1e-1 );
 
     // callback function for computing the velocity components
-    std::function< double( const vec3D& ) > computeVelocityComponent =
-        [&oracle, age, &coordIdx, &handlerWithStatistics, &avgPointProvider]( const vec3D& point ) {
-            vec3D coords{ point( 0 ), point( 1 ), point( 2 ) };
+    std::function< double( const vec3D& ) > computeVelocityComponent = [&oracle,
+                                                                        age,
+                                                                        &coordIdx,
+                                                                        &handlerWithStatistics,
+                                                                        &avgPointProvider]( const vec3D& point ) {
+        vec3D coords{ point( 0 ), point( 1 ), point( 2 ) };
 
-            vec3D velocity =
-                oracle.getLocallyAveragedPointVelocity( coords, age, avgPointProvider, handlerWithStatistics );
-            // vec3D velocity =
-            //     oracle.getPointVelocity( coords, age, terraneo::plates::LinearDistanceSmoother{ 0.015 }, handlerWithStatistics );
-            return velocity( static_cast< int >( coordIdx ) );
-        };
+        vec3D velocity = oracle.getLocallyAveragedPointVelocity( coords, age, avgPointProvider, handlerWithStatistics );
+        // vec3D velocity =
+        //     oracle.getPointVelocity( coords, age, terraneo::plates::LinearDistanceSmoother{ 0.015 }, handlerWithStatistics );
+        return velocity( static_cast< int >( coordIdx ) );
+    };
 
     // callback function for determining plate IDs
     std::function< double( const vec3D& ) > findPlateID = [&oracle, age, &handlerWithStatistics]( const vec3D& point ) {
@@ -207,70 +171,33 @@ void performComputations(
         return id;
     };
 
-    // use pointers so that we only request memory for function in the desired jobType
-    std::shared_ptr< terra::grid::Grid4DDataScalar< double > > surfaceVelocity{ nullptr };
-    std::shared_ptr< terra::grid::Grid4DDataScalar< double > > plateID{ nullptr };
-
-    surfaceVelocity = std::make_shared< terra::grid::Grid4DDataScalar< double > >(
-        "plateVelocities",
-        coords_shell[level].extent( 0 ),
-        coords_shell[level].extent( 1 ),
-        coords_shell[level].extent( 2 ),
-        coords_radii[level].extent( 1 ) );
-
-    plateID = std::make_shared< terra::grid::Grid4DDataScalar< double > >(
-        "plateID",
-        coords_shell[level].extent( 0 ),
-        coords_shell[level].extent( 1 ),
-        coords_shell[level].extent( 2 ),
-        coords_radii[level].extent( 1 ) );
-
-    std::cout << " Kokkos::DefaultExecutionSpace::name() " << Kokkos::DefaultExecutionSpace::name() << std::endl;
-
     using HostExecSpace = Kokkos::DefaultHostExecutionSpace;
 
     // Mirror Kokkos::Views for host-access
-    auto coords_shell_host = Kokkos::create_mirror_view( coords_shell[level] );
-    Kokkos::deep_copy( coords_shell_host, coords_shell[level] );
-
-    auto coords_radii_host = Kokkos::create_mirror_view( coords_radii[level] );
-    Kokkos::deep_copy( coords_radii_host, coords_radii[level] );
-
-    auto plateID_host = Kokkos::create_mirror_view( *plateID );
-    auto surfaceVelocity_host = Kokkos::create_mirror_view( *surfaceVelocity );
+    auto plateID_host         = Kokkos::create_mirror_view( plateID );
+    auto surfaceVelocity_host = Kokkos::create_mirror_view( surfaceVelocity );
 
     Kokkos::parallel_for(
         "Plate ID interpolation",
         Kokkos::MDRangePolicy< HostExecSpace, Kokkos::Rank< 3 > >(
-            { 0, 0, 0 },
-            { coords_shell_host.extent( 0 ), coords_shell_host.extent( 1 ), coords_shell_host.extent( 2 ) } ),
-        PlateIDInterpolator( coords_shell_host, coords_radii_host, ( plateID_host ), findPlateID ) );
+            { 0, 0, 0 }, { coords_shell.extent( 0 ), coords_shell.extent( 1 ), coords_shell.extent( 2 ) } ),
+        PlateIDInterpolator( coords_shell, coords_radii, ( plateID_host ), findPlateID ) );
 
     Kokkos::fence();
 
     Kokkos::parallel_for(
         "Plate Velocity interpolation",
         Kokkos::MDRangePolicy< HostExecSpace, Kokkos::Rank< 3 > >(
-            { 0, 0, 0 },
-            { coords_shell_host.extent( 0 ), coords_shell_host.extent( 1 ), coords_shell_host.extent( 2 ) } ),
-        PlateVelocityInterpolator(
-            coords_shell_host, coords_radii_host, ( surfaceVelocity_host ), computeVelocityComponent ) );
+            { 0, 0, 0 }, { coords_shell.extent( 0 ), coords_shell.extent( 1 ), coords_shell.extent( 2 ) } ),
+        PlateVelocityInterpolator( coords_shell, coords_radii, ( surfaceVelocity_host ), computeVelocityComponent ) );
 
     Kokkos::fence();
 
     // Copy results back to original Views
-    Kokkos::deep_copy( *plateID, plateID_host );
-    Kokkos::deep_copy( *surfaceVelocity, surfaceVelocity_host );
+    Kokkos::deep_copy( plateID, plateID_host );
+    Kokkos::deep_copy( surfaceVelocity, surfaceVelocity_host );
 
-    // export results
-    std::string fName = genOutputFileName( age );
-
-    logroot << indent << "Exporting simulation data to file with basename '" << fName << "'" << std::endl;
-
-    xdmf_output.add( *plateID );
-    xdmf_output.add( *surfaceVelocity );
-
-    xdmf_output.set_write_counter( currentStage );
+    xdmf_output.set_write_counter( age );
     xdmf_output.write();
 }
 } // namespace plates
@@ -283,8 +210,8 @@ struct Parameters
     double      r_min     = 1.2;
     double      r_max     = 2.2;
     std::string jobType   = "both";
-    int         beginAge  = 27;
-    int         endAge    = 30;
+    int         beginAge  = 30;
+    int         endAge    = 27;
     std::string outdir    = "./output";
 };
 
@@ -327,21 +254,24 @@ int main( int argc, char** argv )
     terra::util::prepare_empty_directory_or_abort( timer_trees_dir );
 
     logroot << "Running with the following steering parameters:" << std::endl;
-    logroot << "--max-level" << parameters.max_level << std::endl;
-    logroot << "--min-level" << parameters.min_level << std::endl;
-    logroot << "--r-min" << parameters.r_min << std::endl;
-    logroot << "--r-max" << parameters.r_max << std::endl;
-    logroot << "--jobType" << parameters.jobType << std::endl;
-    logroot << "--beginAge" << parameters.beginAge << std::endl;
-    logroot << "--endAge" << parameters.endAge << std::endl;
+    logroot << "--max-level " << parameters.max_level << std::endl;
+    logroot << "--min-level " << parameters.min_level << std::endl;
+    logroot << "--r-min " << parameters.r_min << std::endl;
+    logroot << "--r-max " << parameters.r_max << std::endl;
+    logroot << "--jobType " << parameters.jobType << std::endl;
+    logroot << "--beginAge " << parameters.beginAge << std::endl;
+    logroot << "--endAge " << parameters.endAge << std::endl;
+
+    // make sure beginAge > endAge -- we simulate forward in time
+    if ( parameters.endAge > parameters.beginAge )
+    {
+        logroot << "## Specified endAge is larger than beginAge. Aborting.." << std::endl;
+        std::abort();
+    }
 
     // determine job type
     terra::plates::job_t jobType;
     jobType = terra::plates::VELOCITIES_AND_IDS;
-
-    // determine age indices
-    std::string rangeStr        = " 10 - 11 ";
-    auto [stageInit, stageStop] = terra::plates::decodeRangeString( rangeStr );
 
     // ---------
     //  Meshing
@@ -357,9 +287,8 @@ int main( int argc, char** argv )
     {
         const int idx = level - parameters.min_level;
 
-        domains.push_back(
-            terra::grid::shell::DistributedDomain::create_uniform_single_subdomain_per_diamond(
-                level, level, parameters.r_min, parameters.r_max ) );
+        domains.push_back( terra::grid::shell::DistributedDomain::create_uniform_single_subdomain_per_diamond(
+            level, level, parameters.r_min, parameters.r_max ) );
         coords_shell.push_back(
             terra::grid::shell::subdomain_unit_sphere_single_shell_coords< double >( domains[idx] ) );
         coords_radii.push_back( terra::grid::shell::subdomain_shell_radii< double >( domains[idx] ) );
@@ -367,7 +296,13 @@ int main( int argc, char** argv )
 
     const auto   num_levels     = domains.size();
     const uint_t velocity_level = num_levels - 1;
-    std::cout << "velocity level : " << velocity_level << std::endl;
+    logroot << "velocity level : " << velocity_level << std::endl;
+
+    // Mirror mesh details to host
+    auto coords_shell_host = Kokkos::create_mirror_view( coords_shell[velocity_level] );
+    Kokkos::deep_copy( coords_shell_host, coords_shell[velocity_level] );
+    auto coords_radii_host = Kokkos::create_mirror_view( coords_radii[velocity_level] );
+    Kokkos::deep_copy( coords_radii_host, coords_radii[velocity_level] );
 
     // --------
     //  Oracle
@@ -383,14 +318,14 @@ int main( int argc, char** argv )
     logroot << "*** STEP 4: Checking plate stages to work with" << std::endl;
 
     auto stages = oracle.getListOfPlateStages();
-    if ( stageStop >= stages.size() )
+
+    if ( parameters.beginAge > oracle.getMaxAge() || parameters.endAge < oracle.getMinAge() )
     {
-        logall << "ageRange parameter does not work for available plate stages!" << std::endl;
+        logroot << "Specified age range extends beyond available plate data. " << std::endl;
         std::abort();
     }
 
-    logroot << " - Running from stage[" << stageInit << "] = " << stages[stageInit] << " Ma back to stage[" << stageStop
-            << "] = " << stages[stageStop] << " Ma" << std::endl;
+    logroot << " - Running from " << parameters.beginAge << " Ma to " << parameters.endAge << " Ma" << std::endl;
 
     // ------------
     //  Delegation
@@ -398,26 +333,44 @@ int main( int argc, char** argv )
 
     logroot << "*** STEP 5: Running the actual computations" << std::endl;
 
+    // use pointers so that we only request memory for function in the desired jobType
+    std::shared_ptr< terra::grid::Grid4DDataScalar< double > > surfaceVelocity{ nullptr };
+    std::shared_ptr< terra::grid::Grid4DDataScalar< double > > plateID{ nullptr };
+
+    surfaceVelocity = std::make_shared< terra::grid::Grid4DDataScalar< double > >(
+        "plateVelocities",
+        coords_shell[velocity_level].extent( 0 ),
+        coords_shell[velocity_level].extent( 1 ),
+        coords_shell[velocity_level].extent( 2 ),
+        coords_radii[velocity_level].extent( 1 ) );
+
+    plateID = std::make_shared< terra::grid::Grid4DDataScalar< double > >(
+        "plateID",
+        coords_shell[velocity_level].extent( 0 ),
+        coords_shell[velocity_level].extent( 1 ),
+        coords_shell[velocity_level].extent( 2 ),
+        coords_radii[velocity_level].extent( 1 ) );
+
     terra::io::XDMFOutput xdmf_output(
         xdmf_dir, ( domains[velocity_level] ), coords_shell[velocity_level], coords_radii[velocity_level] );
 
-    for ( uint_t currentStage = stageInit; currentStage <= stageStop; ++currentStage )
+    xdmf_output.add( *surfaceVelocity );
+    xdmf_output.add( *plateID );
+
+    for ( int currentAge = parameters.beginAge; currentAge >= parameters.endAge; --currentAge )
     {
-        logroot << " - stage[" << std::setw( 3 ) << currentStage << "] = " << std::fixed << std::setprecision( 1 )
-                << stages[currentStage] << " Ma" << std::endl;
+        logroot << " - age = " << currentAge << " Ma" << std::endl;
 
         performComputations(
-            velocity_level,
-            domains,
-            coords_shell,
-            coords_radii,
-            stages[currentStage],
+            coords_shell_host,
+            coords_radii_host,
+            currentAge,
             jobType,
             oracle,
-            "   ",
+            *surfaceVelocity,
+            *plateID,
             xdmf_dir,
-            xdmf_output,
-            currentStage );
+            xdmf_output );
     }
 
     return EXIT_SUCCESS;
