@@ -695,19 +695,29 @@ Result<> run( const Parameters& prm )
 
         // Plate data extraction before picard loop, will then be written to velocity field every picard iteration.
         // Update plate_age here already for plate update
+        bool end_simulation_after_solve = false;
         if ( prm.boundary_parameters.plate_parameters.apply_plate_velocities )
         {
             // plate_age should never go beyond the specified final_plate_age
-            const ScalarType max_dt_for_plates =
+            const ScalarType dt_to_final_age =
                 ( plate_age_Ma - prm.boundary_parameters.plate_parameters.final_plate_age ) /
                 prm.physics_parameters.calc_time_Ma;
-            dt = std::min( dt, max_dt_for_plates );
 
-            plate_age_Ma -= dt * prm.physics_parameters.calc_time_Ma;
+            // Explicit last step to deal with floating-point rounding errors around zero
+            if ( dt >= dt_to_final_age )
+            {
+                dt           = dt_to_final_age;
+                plate_age_Ma = prm.boundary_parameters.plate_parameters.final_plate_age;
 
-            // Avoid negative zero due to floating-point rounding
-            if ( plate_age_Ma == ScalarType( 0 ) )
-                plate_age_Ma = ScalarType( 0 );
+                logroot << "Last timestep changed to " << dt * prm.physics_parameters.calc_time_Ma
+                        << " Ma to hit final plate age." << std::endl;
+
+                end_simulation_after_solve = true;
+            }
+            else
+            {
+                plate_age_Ma -= dt * prm.physics_parameters.calc_time_Ma;
+            }
 
             // Update plates every timestep if interpolate_plates_in_time, else update every 1 Ma.
             bool plate_update = true;
@@ -960,7 +970,7 @@ Result<> run( const Parameters& prm )
 
         if ( prm.boundary_parameters.plate_parameters.apply_plate_velocities )
         {
-            if ( plate_age_Ma <= prm.boundary_parameters.plate_parameters.final_plate_age )
+            if ( end_simulation_after_solve )
             {
                 logroot << "Final plate age " << prm.boundary_parameters.plate_parameters.final_plate_age
                         << " Ma reached. Exiting simulation." << std::endl;
