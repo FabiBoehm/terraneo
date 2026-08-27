@@ -197,8 +197,7 @@ void performComputations(
     Kokkos::deep_copy( plateID, plateID_host );
     Kokkos::deep_copy( surfaceVelocity, surfaceVelocity_host );
 
-    xdmf_output.set_write_counter( age );
-    xdmf_output.write();
+    xdmf_output.write( age );
 }
 } // namespace plates
 } // namespace terra
@@ -210,8 +209,8 @@ struct Parameters
     double      r_min     = 1.2;
     double      r_max     = 2.2;
     std::string jobType   = "both";
-    int         beginAge  = 30;
-    int         endAge    = 27;
+    int         beginAge  = 10;
+    int         endAge    = 0;
     std::string outdir    = "./output";
 };
 
@@ -310,9 +309,10 @@ int main( int argc, char** argv )
 
     logroot << "*** STEP 3: Generating an Oracle" << std::endl;
 
-    std::string dataDir{ "/import/freenas-m-04-students/frezaei/TerraNeoX/TERRA-NG/apps/PlateVelocities/data/plates/" };
-    std::string fnameTopologies      = dataDir + "topologies0-100Ma.geojson";
-    std::string fnameReconstructions = dataDir + "Global_EarthByte_230-0Ma_GK07_AREPS.rot";
+    //std::string dataDir{ "/import/freenas-m-04-students/frezaei/TerraNeoX/TERRA-NG/apps/PlateVelocities/data/plates/" };
+    std::string dataDir{ "../../../TERRA-NG/data/plates/Chen2025-tomopac/" };
+    std::string fnameTopologies      = dataDir + "topologies_0-410Ma.geojson";
+    std::string fnameReconstructions = dataDir + "TomoPAC2.rot";
     terra::plates::PlateVelocityProvider oracle( fnameTopologies, fnameReconstructions );
 
     logroot << "*** STEP 4: Checking plate stages to work with" << std::endl;
