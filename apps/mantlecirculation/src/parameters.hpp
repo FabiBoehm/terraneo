@@ -154,7 +154,7 @@ struct InitialTemperatureParameters
     InitialPerturbation       perturbation = InitialPerturbation::SPHERICAL_HARMONICS;
 
     // Reference temperature from file
-    std::string Tref_profile_csv_path  = "TemperatureProfile_3800K.csv";
+    std::string Tref_profile_csv_path  = "../../../TERRA-NG/data/radialprofiles/TemperatureProfile_3800K.csv";
     std::string Tref_profile_value_key = "Temperature (K)";
 
     double perturbation_amplitude = 5e-2;
@@ -239,7 +239,7 @@ struct PhysicsParameters
     double calc_cm_per_year = 3e-4; // from non-dim velocity to cm/a
     double calc_time_Ma     = 1e6;  // from non-dim time to Ma
 
-    // Parameter radial profiles -- to be done
+    // Parameter radial profiles
     std::string density_profile_csv_path = "";
     std::string alpha_profile_csv_path   = "";
     std::string cp_profile_csv_path      = "";
@@ -358,7 +358,7 @@ struct TimeSteppingParameters
     double t_end_Ma   = 100.0;
     double t_end      = 1.0;
     double dt_max_Ma  = 5.0;
-    double dt_min_Ma  = 0.1;
+    double dt_min_Ma  = 0.001;
     double dt_max     = 1.0;
     double dt_min     = 1.0;
 
