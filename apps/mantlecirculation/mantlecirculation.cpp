@@ -43,6 +43,7 @@
 #include "src/io.hpp"
 #include "src/parameters.hpp"
 #include "src/pda_utils.hpp"
+#include "src/plates.hpp"
 #include "src/stokes_solver.hpp"
 #include "src/temperature_init.hpp"
 #include "src/utils/energy_coefficients.hpp"
@@ -409,6 +410,45 @@ Result<> run( const Parameters& prm )
         xdmf_output_pressure->set_is_dimensional( prm.devel_parameters.output_dimensional );
     }
 
+    // Initialise and update plates, if applicable
+
+    // Model age for plate data; only dimensional needed
+    ScalarType plate_age_Ma = static_cast< ScalarType >( prm.boundary_parameters.plate_parameters.initial_plate_age );
+    int        last_plate_update_time = prm.boundary_parameters.plate_parameters.initial_plate_age;
+
+    const ScalarType plate_velocity_nondim_scale = ScalarType( 1 ) / prm.physics_parameters.characteristic_velocity *
+                                                   ( prm.boundary_parameters.plate_parameters.plate_velocity_scaling );
+
+    std::shared_ptr< plates::PlateVelocityProvider > oracle;
+    std::optional< Grid3DDataVec< ScalarType, 3 > >  plate_velocities;
+
+    if ( prm.boundary_parameters.plate_parameters.apply_plate_velocities )
+    {
+        // Initialise plate velocity grid
+        plate_velocities.emplace(
+            "plate_velocities",
+            coords_shell[velocity_level].extent( 0 ),
+            coords_shell[velocity_level].extent( 1 ),
+            coords_shell[velocity_level].extent( 2 ) );
+
+        oracle = initialise_plates(
+            prm.boundary_parameters.plate_parameters.plates_topologies_path,
+            prm.boundary_parameters.plate_parameters.plates_reconstructions_path );
+
+        // Extract plate velocities at initial_plate_age and write to velocity field for initial stokes solve.
+        extract_plate_velocities(
+            plate_age_Ma,
+            *plate_velocities,
+            *oracle,
+            coords_shell[velocity_level],
+            coords_radii[velocity_level],
+            prm.boundary_parameters.plate_parameters.interpolate_plates_in_time,
+            plate_velocity_nondim_scale );
+
+        apply_plate_velocities(
+            *plate_velocities, u.block_1().grid_data(), coords_radii[velocity_level].extent( 1 ) - 1 );
+    }
+
     // If we start from a checkpoint but it is not supposed to be a continuation of the simulation
     // (continue_simulation == false), determine initial velocities through stokes solve.
     // Else, use the velocities read from checkpoint and skip stokes solve.
@@ -651,7 +691,49 @@ Result<> run( const Parameters& prm )
         energy->snapshot_for_picard();
 
         // Compute dt once from current velocity (before Picard loop).
-        const ScalarType dt = energy->compute_dt( timestep );
+        ScalarType dt = energy->compute_dt( timestep );
+
+        // Plate data extraction before picard loop, will then be written to velocity field every picard iteration.
+        // Update plate_age here already for plate update
+        if ( prm.boundary_parameters.plate_parameters.apply_plate_velocities )
+        {
+            // plate_age should never go beyond the specified final_plate_age
+            const ScalarType max_dt_for_plates =
+                ( plate_age_Ma - prm.boundary_parameters.plate_parameters.final_plate_age ) /
+                prm.physics_parameters.calc_time_Ma;
+            dt = std::min( dt, max_dt_for_plates );
+
+            plate_age_Ma -= dt * prm.physics_parameters.calc_time_Ma;
+
+            // Avoid negative zero due to floating-point rounding
+            if ( plate_age_Ma == ScalarType( 0 ) )
+                plate_age_Ma = ScalarType( 0 );
+
+            // Update plates every timestep if interpolate_plates_in_time, else update every 1 Ma.
+            bool plate_update = true;
+            if ( !prm.boundary_parameters.plate_parameters.interpolate_plates_in_time )
+            {
+                // Don't update if we have not passed at least 1 Ma since last update.
+                if ( std::ceil( plate_age_Ma ) < last_plate_update_time )
+                {
+                    plate_update           = true;
+                    last_plate_update_time = static_cast< int >( std::ceil( plate_age_Ma ) );
+                }
+                else
+                    plate_update = false;
+            }
+            if ( plate_update )
+            {
+                extract_plate_velocities(
+                    plate_age_Ma,
+                    *plate_velocities,
+                    *oracle,
+                    coords_shell[velocity_level],
+                    coords_radii[velocity_level],
+                    prm.boundary_parameters.plate_parameters.interpolate_plates_in_time,
+                    plate_velocity_nondim_scale );
+            }
+        }
 
         for ( int picard = 0; picard < num_picard; picard++ )
         {
@@ -679,6 +761,13 @@ Result<> run( const Parameters& prm )
             else
             {
                 stokes.update_viscosity( T );
+            }
+
+            // Re-apply plate velocities every picard iteration
+            if ( prm.boundary_parameters.plate_parameters.apply_plate_velocities )
+            {
+                apply_plate_velocities(
+                    *plate_velocities, u.block_1().grid_data(), coords_radii[velocity_level].extent( 1 ) - 1 );
             }
 
             // --- Stokes solve ---
@@ -829,18 +918,33 @@ Result<> run( const Parameters& prm )
         }
 
         // Log time progress
-        if ( prm.devel_parameters.output_dimensional )
+        if ( prm.boundary_parameters.plate_parameters.apply_plate_velocities )
         {
-            logroot << "Simulated time: " << simulated_time_Ma << " Ma\n";
-            logroot << "  Stopping at " << prm.time_stepping_parameters.t_end_Ma << " Ma, ";
+            logroot << "Model plate age: " << plate_age_Ma << " Ma" << std::endl;
+            logroot << " Stopping at " << prm.boundary_parameters.plate_parameters.final_plate_age << " Ma, "
+                    << std::round(
+                           ( prm.boundary_parameters.plate_parameters.initial_plate_age - plate_age_Ma ) /
+                           ( prm.boundary_parameters.plate_parameters.initial_plate_age -
+                             prm.boundary_parameters.plate_parameters.final_plate_age ) *
+                           1000.0 ) /
+                           10.0
+                    << "% done." << std::endl;
         }
         else
         {
-            logroot << "Simulated time: " << simulated_time << "\n";
-            logroot << "Stopping at nondimensional time " << prm.time_stepping_parameters.t_end << ", ";
+            if ( prm.devel_parameters.output_dimensional )
+            {
+                logroot << "Simulated time: " << simulated_time_Ma << " Ma" << std::endl;
+                logroot << "  Stopping at " << prm.time_stepping_parameters.t_end_Ma << " Ma, ";
+            }
+            else
+            {
+                logroot << "Simulated time: " << simulated_time << std::endl;
+                logroot << "Stopping at nondimensional time " << prm.time_stepping_parameters.t_end << ", ";
+            }
+            logroot << std::round( simulated_time / prm.time_stepping_parameters.t_end * 1000.0 ) / 10.0 << "% done."
+                    << std::endl;
         }
-        logroot << std::round( simulated_time / prm.time_stepping_parameters.t_end * 100.0 * 10.0 ) / 10.0
-                << "% done.\n";
 
         // Memory footprint
         if ( prm.devel_parameters.extended_diagnostics )
@@ -854,7 +958,18 @@ Result<> run( const Parameters& prm )
             write_timer_tree( prm.io_parameters, timestep );
         }
 
-        if ( simulated_time >= prm.time_stepping_parameters.t_end )
+        if ( prm.boundary_parameters.plate_parameters.apply_plate_velocities )
+        {
+            if ( plate_age_Ma <= prm.boundary_parameters.plate_parameters.final_plate_age )
+            {
+                logroot << "Final plate age " << prm.boundary_parameters.plate_parameters.final_plate_age
+                        << " Ma reached. Exiting simulation." << std::endl;
+                logroot << "###################################################" << std::endl;
+
+                break;
+            }
+        }
+        else if ( simulated_time >= prm.time_stepping_parameters.t_end )
         {
             break;
         }

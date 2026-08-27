@@ -52,9 +52,13 @@ struct MeshParameters
 
 struct PlateParameters
 {
-    bool apply_plate_velocities = false; // This does nothing yet
-    int  initial_plate_age      = 400;
-    int  final_plate_age        = 0;
+    bool apply_plate_velocities     = false;
+    bool interpolate_plates_in_time = true;
+    int  initial_plate_age          = 400;
+    int  final_plate_age            = 0;
+
+    std::string plates_topologies_path = "../../../TERRA-NG/data/plates/Chen2025-tomopac/topologies_0-410Ma.geojson";
+    std::string plates_reconstructions_path = "../../../TERRA-NG/data/plates/Chen2025-tomopac/TomoPAC2.rot";
 
     double plate_velocity_scaling = 1.0;
 };
@@ -657,6 +661,43 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
     add_option_with_default( app, "--temperature-surface", parameters.boundary_parameters.temperature_surface_K )
         ->group( "Boundary Conditions" );
 
+    // Plate parameters
+    add_flag_with_default(
+        app, "--apply-plate-velocities", parameters.boundary_parameters.plate_parameters.apply_plate_velocities )
+        ->group( "Plate Parameters" )
+        ->description(
+            "Assimilate plate velocities as surface boundary conditions. Enforces a no-slip condition at the surface." );
+
+    add_option_with_default(
+        app, "--initial-plate-age-Ma", parameters.boundary_parameters.plate_parameters.initial_plate_age )
+        ->group( "Plate Parameters" );
+
+    add_option_with_default(
+        app, "--final-plate-age-Ma", parameters.boundary_parameters.plate_parameters.final_plate_age )
+        ->group( "Plate Parameters" );
+
+    add_flag_with_default(
+        app,
+        "--interpolate-plates-in-time",
+        parameters.boundary_parameters.plate_parameters.interpolate_plates_in_time )
+        ->group( "Plate Parameters" )
+        ->description( "Interpolate between plate stages defined in the plate data (usually every 1 Ma)." );
+
+    add_option_with_default(
+        app, "--plates-topologies-path", parameters.boundary_parameters.plate_parameters.plates_topologies_path )
+        ->group( "Plate Parameters" )
+        ->description( "Paths to plate data." );
+
+    add_option_with_default(
+        app,
+        "--plates-reconstructions-path",
+        parameters.boundary_parameters.plate_parameters.plates_reconstructions_path )
+        ->group( "Plate Parameters" );
+
+    add_option_with_default(
+        app, "--plate-velocity-scaling", parameters.boundary_parameters.plate_parameters.plate_velocity_scaling )
+        ->group( "Plate Parameters" );
+
     //////////////////////////////
     /// Geophysical parameters ///
     //////////////////////////////
@@ -1093,6 +1134,15 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
         util::logroot << "--> T_surface, T_cmb, viscosity, Ra, internal_heating_rate, t_end, dt_max, dt_min.\n";
         util::logroot << "Output set to nondimensional.\n";
         util::logroot << "#############################################" << std::endl;
+    }
+
+    // Plate velocities require no-slip boundary at the surface
+    if ( parameters.boundary_parameters.plate_parameters.apply_plate_velocities &&
+         parameters.boundary_parameters.velocity_bc_surface != BoundaryConditionsParameters::VelocityBC::NO_SLIP )
+    {
+        util::logroot << "\n## Plate velocities require NO-SLIP boundary at the surface. Setting accordingly..."
+                      << std::endl;
+        parameters.boundary_parameters.velocity_bc_surface = BoundaryConditionsParameters::VelocityBC::NO_SLIP;
     }
 
     // Setting parameters for low-memory mode
