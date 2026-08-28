@@ -782,16 +782,27 @@ class StokesContext
 
         linalg::apply( *M_, triangular_prec_tmp_.block_1(), stok_vecs_["f"].block_1() );
 
-        fe::strong_algebraic_homogeneous_velocity_dirichlet_enforcement_stokes_like(
-            stok_vecs_["f"],
-            boundary_mask_[velocity_level_],
-            grid::shell::get_shell_boundary_flag( bcs_, grid::shell::BoundaryConditionFlag::DIRICHLET ) );
+        // Strong enforcement of the velocity BCs on the RHS, applied per boundary.
+        // NOTE: get_shell_boundary_flag( bcs_, FLAG ) only returns the FIRST boundary
+        // carrying FLAG, so when both boundaries share a BC type (e.g. no-slip/no-slip
+        // => both DIRICHLET, or free-slip/free-slip => both FREESLIP) the second boundary
+        // would be left completely unenforced. Loop over both boundaries and dispatch on
+        // each one's own flag instead.
+        for ( const auto sbf : { grid::shell::ShellBoundaryFlag::CMB, grid::shell::ShellBoundaryFlag::SURFACE } )
+        {
+            const auto bcf = grid::shell::get_boundary_condition_flag( bcs_, sbf );
 
-        fe::strong_algebraic_freeslip_enforcement_in_place(
-            stok_vecs_["f"],
-            coords_shell_[velocity_level_],
-            boundary_mask_[velocity_level_],
-            grid::shell::get_shell_boundary_flag( bcs_, grid::shell::BoundaryConditionFlag::FREESLIP ) );
+            if ( bcf == grid::shell::BoundaryConditionFlag::DIRICHLET )
+            {
+                fe::strong_algebraic_homogeneous_velocity_dirichlet_enforcement_stokes_like(
+                    stok_vecs_["f"], boundary_mask_[velocity_level_], sbf );
+            }
+            else if ( bcf == grid::shell::BoundaryConditionFlag::FREESLIP )
+            {
+                fe::strong_algebraic_freeslip_enforcement_in_place(
+                    stok_vecs_["f"], coords_shell_[velocity_level_], boundary_mask_[velocity_level_], sbf );
+            }
+        }
 
         // Apply TALA RHS to mass equation if needed...
         if ( compressible )
