@@ -21,6 +21,8 @@ embedded interpreter in `terra::ml::NeuralSolver`.
 
 ## The spectral operator
 
+![architecture](doc/architecture.png)
+
 The model is a stack of pointwise layers coupled by a **spectral branch**, and every
 component is either pointwise or acts on a fixed set of modes:
 
