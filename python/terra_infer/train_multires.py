@@ -88,6 +88,13 @@ def main(argv=None):
     ap.add_argument("--physics-weight", type=float, default=2.0)
     ap.add_argument("--mean-p-weight", type=float, default=1.0)
     ap.add_argument("--symmetry-aug", action="store_true")
+    ap.add_argument("--spherical", type=int, default=0, metavar="LMAX")
+    ap.add_argument("--radial-modes", type=int, default=0, metavar="KMAX")
+    ap.add_argument("--sph-per-degree", action="store_true")
+    ap.add_argument("--sph-couple", action="store_true")
+    ap.add_argument("--sph-couple-band", type=int, default=0)
+    ap.add_argument("--sph-couple-shared", action="store_true")
+    ap.add_argument("--no-wavelet", action="store_true")
     ap.add_argument("--max-train", type=int, nargs="*", default=None,
                     help="per-root cap on training samples")
     ap.add_argument("--max-test", type=int, default=64)
@@ -119,17 +126,29 @@ def main(argv=None):
     net = Model(train[0]["x"].shape[-1], 4, train[0]["shape"][1:], n_hidden=args.hidden,
                 n_layers=args.layers, n_heads=args.heads, coords=train[0]["coords"],
                 head_mlp=True, attention=args.attention,
+                spherical=args.spherical, radial_modes=args.radial_modes,
+                per_degree=args.sph_per_degree, sph_couple=args.sph_couple,
+                sph_couple_band=args.sph_couple_band,
+                sph_couple_shared=args.sph_couple_shared,
+                wavelet=not args.no_wavelet).to(dev)
     print(f"  model {sum(p.numel() for p in net.parameters())/1e6:.2f}M params on {dev}")
+    # Every mesh-dependent buffer is captured per mesh and swapped between batches:
+    # the padded extents, the geometry channels, and for the spherical branch BOTH
+    # transforms -- lateral (Y, A) and radial (Yr, Ar); the Chebyshev matrices move
+    # with the shell count just as the harmonics move with the lateral nodes.
     for b in train + test:
         net.set_mesh(b["shape"][1:], b["coords"])
         b["mesh_state"] = (net.shape_in, net.pad, net.shape, net.geom,
-                           getattr(net, "sht_Y", None), getattr(net, "sht_A", None))
-              f"{10 * (gr // 2)**3:,} tokens, {int(np.prod(b['shape'])):,} nodes")
+                           getattr(net, "sht_Y", None), getattr(net, "sht_A", None),
+                           getattr(net, "sht_Yr", None), getattr(net, "sht_Ar", None))
+        print(f"  mesh {b['name']:>12}: {int(np.prod(b['shape'])):,} nodes")
 
     def use(b):
-        net.shape_in, net.pad, net.shape, net.geom, Y, A = b["mesh_state"]
+        (net.shape_in, net.pad, net.shape, net.geom, Y, A, Yr, Ar) = b["mesh_state"]
         if net.spherical:
             net.sht_Y, net.sht_A = Y, A
+            if net.radial_modes:
+                net.sht_Yr, net.sht_Ar = Yr, Ar
 
     x_spec = [(3, True, True), (1, False, True), (1, False, False),
               (3, True, False), (1, False, True)]
@@ -143,8 +162,19 @@ def main(argv=None):
         return torch.cat(out, dim=-1)
 
     steps = sum((len(b["x"]) + args.batch_size - 1) // args.batch_size for b in train)
-    opt = torch.optim.AdamW(net.parameters(), lr=args.lr, weight_decay=1e-4)
-    sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=args.lr,
+    # Same LR split as train_wavelet3d: the coupling attention diverges at the peak
+    # LR the rest of the model wants, so it runs at a 10x lower peak.
+    c_params = [p for n, p in net.named_parameters() if ".c_" in n]
+    base_params = [p for n, p in net.named_parameters() if ".c_" not in n]
+    if c_params:
+        opt = torch.optim.AdamW([{"params": base_params},
+                                 {"params": c_params, "lr": args.lr * 0.1}],
+                                lr=args.lr, weight_decay=1e-4)
+        max_lr = [args.lr, args.lr * 0.1]
+    else:
+        opt = torch.optim.AdamW(net.parameters(), lr=args.lr, weight_decay=1e-4)
+        max_lr = args.lr
+    sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=max_lr,
                                                 total_steps=args.epochs * steps)
 
     def evaluate():
@@ -232,6 +262,16 @@ def main(argv=None):
             torch.save({"model": net.state_dict(), "log_eta_mean": le_mean,
                         "log_eta_std": le_std, "hidden": args.hidden,
                         "layers": args.layers, "heads": args.heads,
+                        "shape": train[0]["shape"],
+                        "attention": args.attention,
+                        "spherical": args.spherical,
+                        "radial_modes": args.radial_modes,
+                        "per_degree": args.sph_per_degree,
+                        "sph_couple": args.sph_couple,
+                        "sph_couple_band": args.sph_couple_band,
+                        "sph_couple_shared": args.sph_couple_shared,
+                        "wavelet": not args.no_wavelet,
+                        "n_slices": 0,
                         "test_rel_l2": best, "out_channels": 4}, args.out)
     print(f"\nbest worst-resolution u {best:.4f}, saved to {args.out}")
     return 0

@@ -40,10 +40,36 @@ Inside the branch, the field is transformed to a basis in which an elliptic oper
 nearly diagonal — spherical harmonics are the eigenfunctions of the Laplacian on a sphere:
 
     (B, 128, n_lat, n_rad)
-      -> spherical-harmonic analysis   (lateral)      (B, 128, 169, n_rad)
-      -> Chebyshev analysis            (radial)       (B, 128, 169, 9)
-      -> block-diagonal channel mixing, 8 groups of 16, shared across modes
+      -> spherical-harmonic analysis   (lateral)      (B, 128, 289, n_rad)
+      -> Chebyshev analysis            (radial)       (B, 128, 289, 9)
+      -> mode-coupling attention over the 289 (l,m) tokens, banded |l-l'| <= 8,
+         one module shared by all layers, zero-initialised residual
+      -> block-diagonal channel mixing, 8 groups of 16, with weights indexed by
+         the harmonic DEGREE l ("per-degree")
       -> synthesis back                               (B, 128, n_lat, n_rad)
+
+Two refinements over the plain mode-shared branch, both earned against ablations:
+
+*Per-degree weights.* For radially symmetric viscosity the operator is rotationally
+invariant, so its transfer function depends on l alone — degree-indexed weights are
+the correct symmetry class, and they let the branch express a per-degree response
+like the 1/(l(l+1)) of an inverse Laplacian, which mode-shared weights cannot.
+The mode count is fixed by the truncation, not the mesh, so the degree index costs
+no invariance. L = 16 is the sweet spot on level-3 data (an inverted U: 0.1296 /
+0.1233 / 0.1282 / 0.1336 for L = 12/16/20/22); the hard ceiling is L = 22, where
+(L+1)^2 approaches the 642 distinct lateral nodes and the analysis goes singular.
+The same Nyquist logic caps the radial truncation at K = 8 on 9 shells — K = 12
+matches natively and then transfers at 0.62, pure aliasing.
+
+*Banded mode-coupling attention.* Laterally varying viscosity couples modes — a
+viscosity component of degree l_eta couples velocity degrees within |l - l'| <= l_eta
+(the triple-product selection rule) — and any diagonal-in-mode weights are blind to
+it. Self-attention among the coefficient tokens supplies the data-dependent
+off-diagonal correction; the band mask removes the couplings the physics forbids,
+one module shared across layers keeps it at 0.59M parameters (the free-form
+per-layer version, 4.7M, fits the training set better and generalises worse), and
+its parameters run at a 10x lower peak learning rate, without which it diverges at
+warmup. Worth ~4% natively and 13-17% under mesh transfer.
 
 Analysis uses the pseudo-inverse of the basis rather than a quadrature rule, because
 nodes shared between diamonds are stored once per subdomain and a quadrature would
@@ -53,19 +79,31 @@ lateral transform serves every radial shell.
 
 ### Why it is discretisation invariant
 
-The mixing weights carry **no mode index**, and the mode count is fixed by the basis
-truncation rather than by the mesh. Refining the grid changes the transform matrices —
-lateral synthesis goes from (1000, 169) to (11560, 169) — while every weight and the
-(169 x 9) coefficient tensor stay the same. Nothing in the model is defined in index
-units, so the same weights run natively on any refinement:
+Every learned weight is indexed by channel, degree, or mode-token — never by node —
+and the token count is fixed by the basis truncation rather than by the mesh.
+Refining the grid changes only the transform matrices (lateral synthesis goes from
+(810, 289) to (10890, 289)) while every weight and the (289 x 9) coefficient tensor
+stay the same, so the same weights run natively on any refinement.
 
-| mesh | velocity nodes | relative L2 |
+The remaining transfer error is discretisation *extrapolation* — a level-3-only
+model has never seen its transforms at another resolution. Training the same
+weights on two meshes at once removes it (`train_multires`, swapping the
+mesh-dependent buffers per batch), and the largest single win of all is simply
+data: at 1k samples every variant is starved. The current best model
+(`train_multires`, per-degree L = 16 + banded shared coupling, 10k level-3 +
+1k level-4 samples, checkpoint selected on the WORST resolution):
+
+| mesh | velocity nodes | relative L2 (u) |
 |---|---|---|
-| level 3 (trained here) | 7,290 | 0.1498 |
-| level 4 | 49,130 | 0.2391 |
-| level 5 | 359,370 | 0.2634 |
+| level 3 (trained) | 7,290 | 0.072 |
+| level 4 (trained) | 49,130 | 0.066 |
+| level 5 (never seen) | 359,370 | 0.055 |
 
-The error rises 1.76x over 49x the node count and then flattens. 0.90M parameters.
+The error now *falls* toward the finer mesh; the level-3-only ancestors of this
+model went 0.15 -> 0.26 in the same comparison. Ablations at 10k samples,
+single-level training: per-degree alone 0.055 / 0.166 / 0.193; + coupling
+0.060 / 0.144 / 0.173; + multires gives the table above. Pressure is below 0.05
+everywhere. 2.05M parameters.
 
 ## Pipeline
 
@@ -91,11 +129,25 @@ To check the generator against TERRA itself:
 
 ### 2. Train
 
-    python -m terra_infer.train_wavelet3d --data $DIR --epochs 720 \
-        --no-wavelet --spherical 12 --radial-modes 8 \
+Single-level, the full recipe of the current best architecture:
+
+    python -m terra_infer.train_wavelet3d --data $DIR --epochs 240 \
+        --no-wavelet --spherical 16 --radial-modes 8 --sph-per-degree \
+        --sph-couple --sph-couple-band 8 --sph-couple-shared \
         --symmetry-aug --physics-weight 2 --fine-continuity \
         --grad-log-eta --div-fu --mean-free-target --head-mlp \
         --mean-p-weight 1.0 --momentum-margin 2 --hidden 128 --layers 8
+
+Mixed-resolution — the configuration behind the results table above; each batch
+comes from one of the listed datasets and `set_mesh` swaps the geometry, harmonic
+and Chebyshev buffers between them while the weights stay shared:
+
+    python -m terra_infer.train_multires \
+        --data $L3_10K_DIR $L4_DIR --eval-data $L3_10K_DIR $L4_DIR $L5_DIR \
+        --epochs 240 --no-wavelet --attention softmax \
+        --spherical 16 --radial-modes 8 --sph-per-degree \
+        --sph-couple --sph-couple-band 8 --sph-couple-shared \
+        --symmetry-aug --physics-weight 2 --mean-p-weight 1.0
 
 The loss is a relative L2 on velocity and mean-free pressure, plus the **Stokes residual**
 evaluated by finite differences on the real mesh with its inverse Jacobian:
@@ -125,10 +177,16 @@ Nothing needs retraining. Point the model at the other mesh and evaluate:
 
     from terra_infer.wavelet3d import Model, load_state
     net = Model(9, 4, (9, 9, 9), n_hidden=128, n_layers=8, coords=coarse_coords,
-                head_mlp=True, spherical=12, radial_modes=8, wavelet=False)
+                head_mlp=True, spherical=16, radial_modes=8, wavelet=False,
+                per_degree=True, sph_couple=True, sph_couple_band=8,
+                sph_couple_shared=True)
     load_state(net, torch.load("model.pt")["model"])
     net.set_mesh((33, 33, 33), fine_coords)      # rebuilds the transforms, keeps weights
     u_p = net(fields)                            # (S, 33, 33, 33, 4)
+
+The architecture switches are recorded in every checkpoint, so a loader can read
+them back instead of hardcoding (`ck["spherical"]`, `ck["per_degree"]`,
+`ck["sph_couple"]`, ...).
 
 ### 5. Call it from the solver
 
@@ -138,6 +196,11 @@ prediction is made consistent across subdomains before it is returned. Reachable
 test driver as `test_epsilon_divdiv_stokes --neural-solver <model>`.
 
 ## Predictions
+
+The figures below are from the earlier mode-shared spectral baseline (0.15 at
+level 3) and predate the per-degree/coupling/multires model documented above; the
+qualitative picture — viscosity contrast as the dominant difficulty — still holds,
+with the coupling attention aimed at exactly that failure mode.
 
 Equatorial cut on the easiest and hardest test samples. Analytic and predicted share a
 colour scale per component, so amplitude damping stays visible; the error panel uses the

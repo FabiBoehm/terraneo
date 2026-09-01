@@ -259,6 +259,31 @@ def main(argv=None):
                          "assigned to a slice, attention runs among the K slices, "
                          "and the result is scattered back -- invariant, because "
                          "the node count enters only through a normalised mean.")
+    ap.add_argument("--sph-couple", action="store_true",
+                    help="attention among the (l,m) mode tokens of the spherical "
+                         "branch. Laterally varying viscosity couples modes; the "
+                         "diagonal (mode-shared or per-degree) weights cannot "
+                         "express that. Zero-initialised, so training starts from "
+                         "the exact diagonal model. Needs --radial-modes > 0.")
+    ap.add_argument("--sph-couple-band", type=int, default=0, metavar="B",
+                    help="restrict the mode-coupling attention to degree pairs with "
+                         "|l - l'| <= B (the selection rule for viscosity of degree "
+                         "<= B). 0 = unrestricted.")
+    ap.add_argument("--sph-couple-shared", action="store_true",
+                    help="one coupling module shared by all layers instead of one "
+                         "per layer (n_layers-fold fewer coupling parameters).")
+    ap.add_argument("--gno-radius", type=float, default=0.0, metavar="R",
+                    help="add a local branch: attention over an importance sample of "
+                         "the nodes within physical radius R (shell units), "
+                         "quadrature-weighted so it discretises a fixed kernel "
+                         "integral. 0 = off.")
+    ap.add_argument("--gno-k", type=int, default=32, metavar="K",
+                    help="neighbors sampled per node for --gno-radius.")
+    ap.add_argument("--mass-slices", action="store_true",
+                    help="pool slice tokens with per-node quadrature weights "
+                         "(|det J|, trapezoid faces, seam multiplicity) so the "
+                         "token means are continuum integrals rather than means "
+                         "under the level-dependent storage measure.")
     ap.add_argument("--sph-per-degree", action="store_true",
                     help="give the spherical branch weights that depend on the "
                          "harmonic degree l. The mode count is fixed by the basis, "
@@ -382,7 +407,11 @@ def main(argv=None):
                 attention=args.attention,
                 spherical=args.spherical, radial_modes=args.radial_modes,
                 wavelet=not args.no_wavelet,
-                per_degree=args.sph_per_degree, n_slices=args.slices).to(dev)
+                per_degree=args.sph_per_degree, n_slices=args.slices,
+                mass_slices=args.mass_slices, sph_couple=args.sph_couple,
+                sph_couple_band=args.sph_couple_band,
+                sph_couple_shared=args.sph_couple_shared,
+                gno_radius=args.gno_radius, gno_k=args.gno_k).to(dev)
     print(f"  model {sum(p.numel() for p in net.parameters())/1e6:.2f}M params on {dev}")
 
     # u = 0 on the first and last radial shell. Masking the output enforces it exactly;
@@ -482,9 +511,21 @@ def main(argv=None):
         inv_J = mask = mask_c = None
         print("  Stokes residual: unavailable (no geometry)")
 
-    opt = torch.optim.AdamW(net.parameters(), lr=args.lr, weight_decay=1e-4)
+    # The mode-coupling attention diverges at the peak LR that suits the rest of the
+    # model (the usual transformer failure at 1e-3); its parameters get a 10x lower
+    # peak, everything else is unchanged.
+    c_params = [p for n, p in net.named_parameters() if ".c_" in n]
+    base_params = [p for n, p in net.named_parameters() if ".c_" not in n]
+    if c_params:
+        opt = torch.optim.AdamW([{"params": base_params},
+                                 {"params": c_params, "lr": args.lr * 0.1}],
+                                lr=args.lr, weight_decay=1e-4)
+        max_lr = [args.lr, args.lr * 0.1]
+    else:
+        opt = torch.optim.AdamW(net.parameters(), lr=args.lr, weight_decay=1e-4)
+        max_lr = args.lr
     sched = torch.optim.lr_scheduler.OneCycleLR(
-        opt, max_lr=args.lr, total_steps=args.epochs * ((len(x_tr) + args.batch_size - 1) // args.batch_size))
+        opt, max_lr=max_lr, total_steps=args.epochs * ((len(x_tr) + args.batch_size - 1) // args.batch_size))
 
     x_te_d, y_te_d = x_te.to(dev), y_te.to(dev)
 
@@ -633,6 +674,12 @@ def main(argv=None):
                         "wavelet": not args.no_wavelet,
                         "per_degree": args.sph_per_degree,
                         "n_slices": args.slices,
+                        "mass_slices": args.mass_slices,
+                        "sph_couple": args.sph_couple,
+                        "sph_couple_band": args.sph_couple_band,
+                        "sph_couple_shared": args.sph_couple_shared,
+                        "gno_radius": args.gno_radius,
+                        "gno_k": args.gno_k,
                         "test_rel_l2": test_loss, "out_channels": 4}, args.out)
 
     print(f"\nbest test relative L2 {best:.4f}, saved to {args.out}")

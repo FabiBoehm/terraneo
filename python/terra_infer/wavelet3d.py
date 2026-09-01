@@ -65,7 +65,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .spherical import SliceAttention, SphericalBranch
+from .spherical import RadiusAttention, SliceAttention, SphericalBranch, radius_neighbors
 
 # --------------------------------------------------------------------------- Haar 3-D
 
@@ -178,7 +178,9 @@ class WaveletAttention3D(nn.Module):
     def __init__(self, dim: int, n_heads: int = 8, use_filter: bool = True,
                  band_tokens: bool = False, n_levels: int = 1,
                  attention: str = "linear", spherical: int = 0,
-                 wavelet: bool = True, per_degree: bool = False, n_slices: int = 0):
+                 wavelet: bool = True, per_degree: bool = False, n_slices: int = 0,
+                 sph_couple: bool = False, radial_modes: int = 0,
+                 sph_couple_band: int = 0, gno: bool = False):
         super().__init__()
         if attention not in ("linear", "softmax"):
             raise ValueError(f"attention must be linear|softmax, got {attention!r}")
@@ -226,11 +228,17 @@ class WaveletAttention3D(nn.Module):
         # is the resolution-independent half of the block -- the wavelet half is tied to
         # the grid through the DWT.
         self.sph = (SphericalBranch(dim, n_blocks=n_heads, lmax=spherical,
-                            per_degree=per_degree) if spherical else None)
+                            per_degree=per_degree, couple=sph_couple,
+                            n_radial=radial_modes,
+                            couple_band=sph_couple_band) if spherical else None)
         self.merge = nn.Linear(dim * 2, dim) if spherical else None
         # An additive branch: attention over a fixed set of learned slices, which is
         # invariant where node-token attention cannot be.
         self.slice_attn = SliceAttention(dim, n_slices, n_heads) if n_slices else None
+        # Local branch: attention over a fixed physical neighborhood (see
+        # RadiusAttention) -- communicates the features the band-limited spectral
+        # branch cannot, without the index-space locality that broke the wavelets.
+        self.gno = RadiusAttention(dim) if gno else None
 
         self.qkv = (nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, dim * 3))
                     if wavelet else None)
@@ -247,11 +255,13 @@ class WaveletAttention3D(nn.Module):
         return out.reshape(b, s_dom, n, c)
 
     def forward(self, x: torch.Tensor, shape: tuple[int, int, int],
-                sht=None) -> torch.Tensor:
+                sht=None, node_q: "torch.Tensor | None" = None,
+                gno_idx: "torch.Tensor | None" = None) -> torch.Tensor:
         """``x``: (B, S, N, C) -- batch, subdomains, nodes, channels. ``shape``: (nx, ny, nr).
 
         The transform is per subdomain (S folds into the batch); the attention is over
-        every subdomain's tokens at once (S folds into the sequence).
+        every subdomain's tokens at once (S folds into the sequence). ``node_q`` are
+        optional per-node quadrature weights for the slice pooling.
         """
         b, s_dom, n, c = x.shape
         nx, ny, nr = shape
@@ -259,7 +269,11 @@ class WaveletAttention3D(nn.Module):
         slice_out = None
         if self.slice_attn is not None:
             flat = x.reshape(x.shape[0], -1, x.shape[-1])
-            slice_out = self.slice_attn(flat).reshape(x.shape)
+            slice_out = self.slice_attn(flat, node_q).reshape(x.shape)
+        if self.gno is not None:
+            flat = x.reshape(x.shape[0], -1, x.shape[-1])
+            gno_out = self.gno(flat, gno_idx).reshape(x.shape)
+            slice_out = gno_out if slice_out is None else slice_out + gno_out
 
         if not self.wavelet and self.sph is None:
             # no branches at all: the block degenerates to a pointwise MLP, which is
@@ -362,19 +376,22 @@ class Block(nn.Module):
     def __init__(self, dim: int, n_heads: int, mlp_ratio: int = 2, use_filter: bool = True,
                  band_tokens: bool = False, n_levels: int = 1, attention: str = "linear",
                  spherical: int = 0, wavelet: bool = True,
-                 per_degree: bool = False, n_slices: int = 0):
+                 per_degree: bool = False, n_slices: int = 0,
+                 sph_couple: bool = False, radial_modes: int = 0,
+                 sph_couple_band: int = 0, gno: bool = False):
         super().__init__()
         self.ln1 = nn.LayerNorm(dim)
         self.attn = WaveletAttention3D(dim, n_heads, use_filter, band_tokens, n_levels,
                                        attention, spherical, wavelet, per_degree,
-                                       n_slices)
+                                       n_slices, sph_couple, radial_modes,
+                                       sph_couple_band, gno)
         self.ln2 = nn.LayerNorm(dim)
         self.mlp = nn.Sequential(
             nn.Linear(dim, dim * mlp_ratio), nn.GELU(), nn.Linear(dim * mlp_ratio, dim)
         )
 
-    def forward(self, x, shape, sht=None):
-        x = x + self.attn(self.ln1(x), shape, sht)
+    def forward(self, x, shape, sht=None, node_q=None, gno_idx=None):
+        x = x + self.attn(self.ln1(x), shape, sht, node_q, gno_idx)
         return x + self.mlp(self.ln2(x))
 
 
@@ -406,6 +423,12 @@ class Model(nn.Module):
         wavelet: bool = True,
         per_degree: bool = False,
         n_slices: int = 0,
+        mass_slices: bool = False,
+        sph_couple: bool = False,
+        sph_couple_band: int = 0,
+        sph_couple_shared: bool = False,
+        gno_radius: float = 0.0,
+        gno_k: int = 32,
         head_mlp: bool = False,
         coords: "np.ndarray | None" = None,
         n_subdomains: int = 10,
@@ -432,7 +455,8 @@ class Model(nn.Module):
         self.blocks = nn.ModuleList(
             [Block(n_hidden, n_heads, mlp_ratio, use_filter, band_tokens, n_levels,
                    attention, spherical, wavelet,
-                   per_degree, n_slices)
+                   per_degree, n_slices, sph_couple, radial_modes,
+                   sph_couple_band, gno_radius > 0)
              for _ in range(n_layers)]
         )
         self.ln_out = nn.LayerNorm(n_hidden)
@@ -462,6 +486,54 @@ class Model(nn.Module):
             self.sht_Y = self.sht_A = None
         if not radial_modes:
             self.sht_Yr = self.sht_Ar = None
+        # One coupling shared by every layer: the physical mode-coupling operator does
+        # not change with depth, and sharing cuts its parameters by n_layers, which is
+        # the overfitting margin the free-form version lost by.
+        if sph_couple and sph_couple_shared:
+            ref = self.blocks[0].attn.sph
+            for blk in self.blocks[1:]:
+                s = blk.attn.sph
+                s.c_ln, s.c_qkv, s.c_out = ref.c_ln, ref.c_qkv, ref.c_out
+        self.mass_slices = mass_slices
+        if n_slices and mass_slices:
+            if coords is None:
+                raise ValueError("mass-weighted slices need the mesh coordinates")
+            self.register_buffer("node_q", self._node_q(coords, self.pad),
+                                 persistent=False)
+        else:
+            self.node_q = None
+        self.gno_radius, self.gno_k = gno_radius, gno_k
+        if gno_radius > 0:
+            if coords is None:
+                raise ValueError("radius attention needs the mesh coordinates")
+            self.register_buffer("gno_idx",
+                                 self._gno_idx(coords, self.pad, gno_radius, gno_k),
+                                 persistent=False)
+        else:
+            self.gno_idx = None
+
+    @staticmethod
+    def _gno_idx(coords, pad, radius, k):
+        """Frozen physical-radius neighbor sample on the padded grid."""
+        c = np.asarray(coords, dtype=np.float64)
+        px, py, pr = pad
+        if px:
+            c = np.concatenate([c, c[:, -1:]], axis=1)
+        if py:
+            c = np.concatenate([c, c[:, :, -1:]], axis=2)
+        if pr:
+            c = np.concatenate([c, c[:, :, :, -1:]], axis=3)
+        return torch.as_tensor(radius_neighbors(c, radius, k), dtype=torch.long)
+
+    @staticmethod
+    def _node_q(coords, pad):
+        """Quadrature weights for the slice pooling; zero on the replicated pad slices."""
+        from .spherical import node_quadrature
+
+        q = node_quadrature(coords)
+        px, py, pr = pad
+        q = np.pad(q, ((0, 0), (0, px), (0, py), (0, pr)))
+        return torch.as_tensor(q.reshape(-1), dtype=torch.float32)
 
     def _build_sht(self, coords, pad):
         """Synthesis/analysis matrices for the padded lateral grid of this mesh."""
@@ -496,6 +568,14 @@ class Model(nn.Module):
             t = self._build_sht(coords, self.pad)
             for nm, v in zip(("sht_Y", "sht_A", "sht_Yr", "sht_Ar"), t):
                 self.register_buffer(nm, v.to(dev), persistent=False)
+        if self.node_q is not None:
+            self.register_buffer("node_q", self._node_q(coords, self.pad).to(dev),
+                                 persistent=False)
+        if self.gno_idx is not None:
+            self.register_buffer(
+                "gno_idx",
+                self._gno_idx(coords, self.pad, self.gno_radius, self.gno_k).to(dev),
+                persistent=False)
         return self
 
     @staticmethod
@@ -584,7 +664,7 @@ class Model(nn.Module):
         sht = ((self.sht_Y, self.sht_A, self.sht_Yr, self.sht_Ar)
                if self.spherical else None)
         for block in self.blocks:
-            fx = block(fx, self.shape, sht)
+            fx = block(fx, self.shape, sht, self.node_q, self.gno_idx)
 
         fx = self.ln_out(fx)
         fx = (self.head(fx) if self.head is not None
