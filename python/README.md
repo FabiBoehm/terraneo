@@ -21,9 +21,10 @@ embedded interpreter in `terra::ml::NeuralSolver`.
 
 ## The spectral operator
 
-![architecture](doc/architecture.png)
-
-The model is a stack of pointwise layers coupled by a **spectral branch**, and every
+The model lives in `terra_infer.operator` (`terra_infer.wavelet3d` and
+`terra_infer.train_wavelet3d` remain as import shims — the old name reflected the
+retired wavelet ancestry, not the architecture). It is a stack of pointwise layers
+coupled by a **spectral branch**, and every
 component is either pointwise or acts on a fixed set of modes:
 
     lift  Linear(13 -> 256) -> GELU -> Linear(256 -> 128)        pointwise
@@ -131,7 +132,7 @@ To check the generator against TERRA itself:
 
 Single-level, the full recipe of the current best architecture:
 
-    python -m terra_infer.train_wavelet3d --data $DIR --epochs 240 \
+    python -m terra_infer.train_operator --data $DIR --epochs 240 \
         --no-wavelet --spherical 16 --radial-modes 8 --sph-per-degree \
         --sph-couple --sph-couple-band 8 --sph-couple-shared \
         --symmetry-aug --physics-weight 2 --fine-continuity \
@@ -160,7 +161,7 @@ flip that linearity provides. Worth -32% at a matched epoch budget, and free.
 
 ### 3. Test
 
-    python -m terra_infer.train_wavelet3d --data $DIR --eval-only model.pt \
+    python -m terra_infer.train_operator --data $DIR --eval-only model.pt \
         --no-wavelet --spherical 12 --radial-modes 8 --hidden 128 --layers 8 \
         [--tta] [--dump-predictions preds.npz]
 
@@ -175,7 +176,7 @@ Note the momentum residual has a floor: the finite-difference operator applied t
 
 Nothing needs retraining. Point the model at the other mesh and evaluate:
 
-    from terra_infer.wavelet3d import Model, load_state
+    from terra_infer.operator import Model, load_state
     net = Model(9, 4, (9, 9, 9), n_hidden=128, n_layers=8, coords=coarse_coords,
                 head_mlp=True, spherical=16, radial_modes=8, wavelet=False,
                 per_degree=True, sph_couple=True, sph_couple_band=8,

@@ -28,8 +28,8 @@ import numpy as np
 import torch
 
 from . import stokes_residual, symmetry
-from .train_wavelet3d import load_split, mean_free, relative_l2
-from .wavelet3d import Model
+from .train_operator import load_split, mean_free, relative_l2
+from .operator import Model
 
 
 def mesh_of(root):
@@ -162,7 +162,7 @@ def main(argv=None):
         return torch.cat(out, dim=-1)
 
     steps = sum((len(b["x"]) + args.batch_size - 1) // args.batch_size for b in train)
-    # Same LR split as train_wavelet3d: the coupling attention diverges at the peak
+    # Same LR split as train_operator: the coupling attention diverges at the peak
     # LR the rest of the model wants, so it runs at a 10x lower peak.
     c_params = [p for n, p in net.named_parameters() if ".c_" in n]
     base_params = [p for n, p in net.named_parameters() if ".c_" not in n]

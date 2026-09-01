@@ -99,7 +99,7 @@ def wavelet3d_operator(fields):
     """3-D wavelet attention: SAOT's wavelet branch lifted to 3-D, Fourier
     branch and fusion gate removed. Couples all three axes, so unlike 'saot'
     it sees radial structure. See wavelet3d for the details."""
-    from . import wavelet3d as _w3d
+    from . import operator as _w3d
 
     return _w3d.apply(fields)
 
