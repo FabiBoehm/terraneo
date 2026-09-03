@@ -420,33 +420,31 @@ Result<> run( const Parameters& prm )
                                                    ( prm.boundary_parameters.plate_parameters.plate_velocity_scaling );
 
     std::shared_ptr< plates::PlateVelocityProvider > oracle;
-    std::optional< Grid3DDataVec< ScalarType, 3 > >  plate_velocities;
+    std::optional< VectorQ1IsoQ2Q1< ScalarType > >   plate_velocities;
 
     if ( prm.boundary_parameters.plate_parameters.apply_plate_velocities )
     {
         // Initialise plate velocity grid
         plate_velocities.emplace(
             "plate_velocities",
-            coords_shell[velocity_level].extent( 0 ),
-            coords_shell[velocity_level].extent( 1 ),
-            coords_shell[velocity_level].extent( 2 ) );
+            *domains[velocity_level],
+            *domains[pressure_level],
+            ownership_mask_data[velocity_level],
+            ownership_mask_data[pressure_level] );
 
         oracle = initialise_plates(
             prm.boundary_parameters.plate_parameters.plates_topologies_path,
             prm.boundary_parameters.plate_parameters.plates_reconstructions_path );
 
-        // Extract plate velocities at initial_plate_age and write to velocity field for initial stokes solve.
+        // Extract plate velocities at initial_plate_age and pass to stokes solve for dirichlet boundary enforcement.
         extract_plate_velocities(
             plate_age_Ma,
-            *plate_velocities,
+            plate_velocities->block_1().grid_data(),
             *oracle,
             coords_shell[velocity_level],
             coords_radii[velocity_level],
             prm.boundary_parameters.plate_parameters.interpolate_plates_in_time,
             plate_velocity_nondim_scale );
-
-        apply_plate_velocities(
-            *plate_velocities, u.block_1().grid_data(), coords_radii[velocity_level].extent( 1 ) - 1 );
     }
 
     // If we start from a checkpoint but it is not supposed to be a continuation of the simulation
@@ -463,7 +461,7 @@ Result<> run( const Parameters& prm )
             stokes.solve_pda(
                 pda->density(),
                 pda->drho_dt(), // No density history yet, this should be zeroes.
-                std::nullopt,
+                plate_velocities,
                 /*log_convergence=*/true );
 
         else
@@ -471,7 +469,7 @@ Result<> run( const Parameters& prm )
                 Tdev,
                 rho_profile,
                 alpha_profile,
-                std::nullopt,
+                plate_velocities,
                 prm.physics_parameters.compressible,
                 /*log_convergence=*/true );
 
@@ -736,7 +734,7 @@ Result<> run( const Parameters& prm )
             {
                 extract_plate_velocities(
                     plate_age_Ma,
-                    *plate_velocities,
+                    plate_velocities->block_1().grid_data(),
                     *oracle,
                     coords_shell[velocity_level],
                     coords_radii[velocity_level],
@@ -773,13 +771,6 @@ Result<> run( const Parameters& prm )
                 stokes.update_viscosity( T );
             }
 
-            // Re-apply plate velocities every picard iteration
-            if ( prm.boundary_parameters.plate_parameters.apply_plate_velocities )
-            {
-                apply_plate_velocities(
-                    *plate_velocities, u.block_1().grid_data(), coords_radii[velocity_level].extent( 1 ) - 1 );
-            }
-
             // --- Stokes solve ---
             // Pass 3-D density and its precomputed time-derivative for PDA, radial density profile else.
             if ( pda_form )
@@ -791,7 +782,7 @@ Result<> run( const Parameters& prm )
                 stokes.solve_pda(
                     pda->density(),
                     pda->drho_dt(),
-                    std::nullopt,
+                    plate_velocities,
                     /*log_convergence=*/( picard == num_picard - 1 ) );
             }
             else
@@ -800,7 +791,7 @@ Result<> run( const Parameters& prm )
                     Tdev,
                     rho_profile,
                     alpha_profile,
-                    std::nullopt,
+                    plate_velocities,
                     prm.physics_parameters.compressible,
                     /*log_convergence=*/( picard == num_picard - 1 ) );
             }

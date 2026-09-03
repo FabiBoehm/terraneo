@@ -16,30 +16,6 @@ using grid::Grid2DDataScalar;
 using grid::Grid3DDataVec;
 using grid::Grid4DDataVec;
 
-struct PlateVelocityWriter
-{
-    Grid3DDataVec< ScalarType, 3 > surface_velocity_;
-    Grid4DDataVec< ScalarType, 3 > velocity_field_;
-    int                            r_idx_surface_;
-
-    PlateVelocityWriter(
-        const Grid3DDataVec< ScalarType, 3 >& surface_velocity,
-        const Grid4DDataVec< ScalarType, 3 >& velocity_field,
-        const int                             r_idx_surface )
-    : surface_velocity_( surface_velocity )
-    , velocity_field_( velocity_field )
-    , r_idx_surface_( r_idx_surface )
-    {}
-
-    KOKKOS_INLINE_FUNCTION
-    void operator()( const int id, const int x, const int y ) const
-    {
-        // Write plate velocity to surface layer of velocity field
-        for ( int d = 0; d < 3; ++d )
-            velocity_field_( id, x, y, r_idx_surface_, d ) = surface_velocity_( id, x, y, d );
-    }
-};
-
 template < typename GridType, typename RadiiType, typename DataType, typename VelocityFn >
 struct ComputePlateVelocities
 {
@@ -67,13 +43,13 @@ struct ComputePlateVelocities
 
         const vec3D v = computeVelocity( coords );
         for ( int d = 0; d < 3; ++d )
-            plate_data_( id, x, y, d ) = v( d );
+            plate_data_( id, x, y, radii_.extent( 1 ) - 1, d ) = v( d );
     }
 };
 
 void extract_plate_velocities(
     ScalarType                            plate_age,
-    grid::Grid3DDataVec< ScalarType, 3 >& plate_velocities,
+    Grid4DDataVec< ScalarType, 3 >&       plate_velocities,
     plates::PlateVelocityProvider&        oracle,
     const Grid3DDataVec< ScalarType, 3 >& coords_shell,
     const Grid2DDataScalar< ScalarType >& coords_radii,
@@ -95,7 +71,12 @@ void extract_plate_velocities(
     Kokkos::deep_copy( coords_host, coords_shell );
     auto radii_host = Kokkos::create_mirror_view( coords_radii );
     Kokkos::deep_copy( radii_host, coords_radii );
-    auto plate_velocities_host = Kokkos::create_mirror_view( plate_velocities );
+
+    // Copy plate data object to host, using Grid4DDataVec's own overloads
+    // and make sure to zero-initialize on host-side.
+    auto plate_velocities_host = create_mirror( Kokkos::HostSpace{}, plate_velocities );
+    for ( int d = 0; d < 3; ++d )
+        Kokkos::deep_copy( plate_velocities_host.comp_[d], ScalarType( 0 ) );
 
     // Callback function for computing velocity components
     auto getPointVelocity =
@@ -128,25 +109,9 @@ void extract_plate_velocities(
     Kokkos::fence();
 
     // Copy to device
-    Kokkos::deep_copy( plate_velocities, plate_velocities_host );
+    deep_copy( plate_velocities, plate_velocities_host );
 
     util::logroot << "Plate data extracted." << std::endl;
-}
-
-void apply_plate_velocities(
-    const Grid3DDataVec< ScalarType, 3 >& plate_velocities,
-    Grid4DDataVec< ScalarType, 3 >&       velocity_field,
-    const int                             r_idx_surface )
-{
-    // Write given plate velocities to velocity field
-    Kokkos::parallel_for(
-        "PlateVelocityWriter",
-        Kokkos::MDRangePolicy< Kokkos::Rank< 3 > >(
-            { 0, 0, 0 }, { plate_velocities.extent( 0 ), plate_velocities.extent( 1 ), plate_velocities.extent( 2 ) } ),
-        PlateVelocityWriter( plate_velocities, velocity_field, r_idx_surface ) );
-    Kokkos::fence();
-
-    util::logroot << "Surface velocity updated." << std::endl;
 }
 
 inline std::shared_ptr< plates::PlateVelocityProvider >
