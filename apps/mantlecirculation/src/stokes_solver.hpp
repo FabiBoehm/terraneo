@@ -561,6 +561,24 @@ class StokesContext
                     R_.emplace_back( *domains_upper_[L] );
             }
 
+            // Zero the restricted residual on Dirichlet velocity boundary shells so
+            // the viscous v-cycle preserves the imposed boundary value exactly:
+            // restriction otherwise smears interior residual into the eliminated
+            // coarse boundary rows, the smoother updates them unopposed, and
+            // prolongation leaks a solver-tolerance-sized velocity back onto the
+            // fine boundary. Selection is by the CMB / SURFACE flag, correct under
+            // lateral and radial subdomain decomposition.
+            {
+                const bool zero_cmb =
+                    grid::shell::get_boundary_condition_flag( bcs_, grid::shell::ShellBoundaryFlag::CMB ) ==
+                    grid::shell::BoundaryConditionFlag::DIRICHLET;
+                const bool zero_surface =
+                    grid::shell::get_boundary_condition_flag( bcs_, grid::shell::ShellBoundaryFlag::SURFACE ) ==
+                    grid::shell::BoundaryConditionFlag::DIRICHLET;
+                for ( auto& restriction : R_ )
+                    restriction.set_dirichlet_boundary_zeroing( zero_cmb, zero_surface );
+            }
+
             prec_11_ = std::make_unique< PrecVisc >(
                 P_,
                 R_,
