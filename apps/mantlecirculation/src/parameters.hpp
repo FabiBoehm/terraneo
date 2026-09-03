@@ -592,9 +592,9 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
         app, "--refinement-level-subdomains", parameters.mesh_parameters.refinement_level_subdomains )
         ->group( "Domain" );
 
-    add_option_with_default( app, "--radius-cmb", parameters.mesh_parameters.radius_cmb_m )->group( "Domain" );
     add_option_with_default( app, "--radius-surface", parameters.mesh_parameters.radius_surface_m )->group( "Domain" );
-
+    add_option_with_default( app, "--radius-cmb", parameters.mesh_parameters.radius_cmb_m )->group( "Domain" );
+    
     if ( parameters.devel_parameters.extended_parameters )
     {
         add_option_with_default( app, "--radial-extra-levels", parameters.mesh_parameters.radial_extra_levels )
@@ -645,20 +645,20 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
         { "freeslip", BoundaryConditionsParameters::VelocityBC::FREE_SLIP },
     };
 
-    add_option_with_default( app, "--velocity-bc-cmb", parameters.boundary_parameters.velocity_bc_cmb )
-        ->transform( CLI::CheckedTransformer( velocity_bc_cmb_map, CLI::ignore_case ) )
-        ->default_val( "noslip" )
-        ->group( "Boundary Conditions" );
-
     add_option_with_default( app, "--velocity-bc-surface", parameters.boundary_parameters.velocity_bc_surface )
         ->transform( CLI::CheckedTransformer( velocity_bc_surface_map, CLI::ignore_case ) )
         ->default_val( "noslip" )
         ->group( "Boundary Conditions" );
 
-    add_option_with_default( app, "--temperature-cmb", parameters.boundary_parameters.temperature_cmb_K )
+    add_option_with_default( app, "--velocity-bc-cmb", parameters.boundary_parameters.velocity_bc_cmb )
+        ->transform( CLI::CheckedTransformer( velocity_bc_cmb_map, CLI::ignore_case ) )
+        ->default_val( "noslip" )
         ->group( "Boundary Conditions" );
 
     add_option_with_default( app, "--temperature-surface", parameters.boundary_parameters.temperature_surface_K )
+        ->group( "Boundary Conditions" );
+
+    add_option_with_default( app, "--temperature-cmb", parameters.boundary_parameters.temperature_cmb_K )
         ->group( "Boundary Conditions" );
 
     // Plate parameters
