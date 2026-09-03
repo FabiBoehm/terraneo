@@ -225,9 +225,8 @@ Result<> run( const Parameters& prm )
 
     // Setting up Stokes velocity boundary conditions.
     //
-    // Currently, we can choose either no-slip or free-slip.
-    //
-    // Plates will also be a Dirichlet BCs (to be implemented).
+    // We can choose either no-slip or free-slip.
+    // Plates are also a Dirichlet BC.
 
     BoundaryConditions bcs = {
         { CMB, DIRICHLET },
