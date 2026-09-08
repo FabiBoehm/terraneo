@@ -66,6 +66,13 @@ void extract_plate_velocities(
 
     util::logroot << "Updating plates..... Plate age: " << plate_age << " Ma." << std::endl;
 
+    // Hoist the reconstruction-tree walk out of the per-point loop below. Without this every
+    // sample point re-derives the stage pole of its plate, which dominates the extraction cost.
+    if ( interpolate_in_time )
+        oracle.prepareEulerVectorsInterpolatedInTime( plate_age );
+    else
+        oracle.prepareEulerVectors( plate_age );
+
     // Mirror the needed Kokkos::Views to the host
     auto coords_host = Kokkos::create_mirror_view( coords_shell );
     Kokkos::deep_copy( coords_host, coords_shell );

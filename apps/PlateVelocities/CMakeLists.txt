@@ -11,3 +11,11 @@ target_link_libraries(PlateVelocityDemo
     PRIVATE terra
 )
 
+add_executable( PlateVelocityKokkos
+                PlateVelocityKokkos.cpp )
+
+target_include_directories(PlateVelocityKokkos PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/apps/mantlecirculation/ )
+
+target_link_libraries(PlateVelocityKokkos
+    PRIVATE terra
+)

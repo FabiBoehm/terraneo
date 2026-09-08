@@ -22,6 +22,7 @@
 
 #include "terra/plates/PlateNotFoundHandlers.hpp"
 #include "terra/plates/PlateRotationProvider.hpp"
+#include "terra/plates/PlateStageData.hpp"
 #include "terra/plates/PlateStorage.hpp"
 #include "terra/plates/SmoothingStrategies.hpp"
 #include "terra/plates/conversions.hpp"
@@ -63,7 +64,7 @@ class PlateVelocityProvider
         const vec3D pointLonLat = conversions::cart2sph( point );
 
         std::tie( plateFound, plateID, distance ) =
-            findPlateAndDistance( age, plateTopologies_, pointLonLat, idWhenNoPlateFound );
+            findPlate( pointLonLat, age );
         return plateID;
     }
 
@@ -81,7 +82,7 @@ class PlateVelocityProvider
         const vec3D pointLonLat = conversions::cart2sph( point );
 
         std::tie( plateFound, plateID, distance ) =
-            findPlateAndDistance( age, plateTopologies_, pointLonLat, idWhenNoPlateFound );
+            findPlate( pointLonLat, age );
         distance /= plates::constants::earthRadiusInKm;
 
         if ( distance < eps )
@@ -130,7 +131,7 @@ class PlateVelocityProvider
         vec3D pointLonLat = conversions::cart2sph( point );
 
         std::tie( plateFound, plateID, distance ) =
-            findPlateAndDistance( age, plateTopologies_, pointLonLat, idWhenNoPlateFound );
+            findPlate( pointLonLat, age );
 
         if ( !plateFound )
         {
@@ -148,7 +149,7 @@ class PlateVelocityProvider
                 << "Plate ID: " << plateID << std::endl;
         // }
 
-        return computeCartesianVelocityVector( plateRotations_, plateID, age, pointLonLat, smoothingFactor );
+        return eulerVectorToVelocity( pointLonLat, eulerVectorFor( plateID, age ), smoothingFactor );
     }
 
     /// Find the age in the plateStages list and return the surrounding ages in the list
@@ -233,7 +234,7 @@ class PlateVelocityProvider
         const vec3D pointLonLat = conversions::cart2sph( point );
 
         std::tie( plateFound, plateID, distance ) =
-            findPlateAndDistance( age, plateTopologies_, pointLonLat, idWhenNoPlateFound );
+            findPlate( pointLonLat, age );
 
         if ( !plateFound )
         {
@@ -251,7 +252,7 @@ class PlateVelocityProvider
             // logroot << "No averaging.\n" << "Plate ID: " << plateID << std::endl;
             // }
 
-            return computeCartesianVelocityVector( plateRotations_, plateID, age, pointLonLat, 1.0 );
+            return eulerVectorToVelocity( pointLonLat, eulerVectorFor( plateID, age ), 1.0 );
         }
 
         const auto pointsAndWeights = pointWeightProvider.samplePointsAndWeightsLonLat( pointLonLat );
@@ -264,7 +265,7 @@ class PlateVelocityProvider
             double avgPointDistance{ static_cast< double >( -1 ) };
 
             std::tie( avgPointPlateFound, avgPointPlateID, avgPointDistance ) =
-                findPlateAndDistance( age, plateTopologies_, samplePointSphLonLat, idWhenNoPlateFound );
+                findPlate( samplePointSphLonLat, age );
 
             if ( avgPointPlateFound )
             {
@@ -272,12 +273,13 @@ class PlateVelocityProvider
                 // out the normal component. It would be better to average in the "lonlat-space" and then convert and return the
                 // cartesian vector. On the other hand, averaging the plate velocities is already a somewhat arbitrary and physically
                 // meaningless approximation in the first place, so this might just work.
-                avgVelCart( 0 ) += weight * computeCartesianVelocityVector(
-                                                plateRotations_, avgPointPlateID, age, samplePointSphLonLat, 1.0 )( 0 );
-                avgVelCart( 1 ) += weight * computeCartesianVelocityVector(
-                                                plateRotations_, avgPointPlateID, age, samplePointSphLonLat, 1.0 )( 1 );
-                avgVelCart( 2 ) += weight * computeCartesianVelocityVector(
-                                                plateRotations_, avgPointPlateID, age, samplePointSphLonLat, 1.0 )( 2 );
+                const vec3D sampleVel =
+                    eulerVectorToVelocity( samplePointSphLonLat, eulerVectorFor( avgPointPlateID, age ), 1.0 );
+
+                for ( int d = 0; d < 3; ++d )
+                {
+                    avgVelCart( d ) += weight * sampleVel( d );
+                }
                 weightSum += weight;
             }
         }
@@ -330,9 +332,119 @@ class PlateVelocityProvider
     double getMinAge() const { return plateTopologies_.getMinAge(); }
     double getMaxAge() const { return plateTopologies_.getMaxAge(); }
 
+    /// Precomputes the Euler vector of every plate of the stage containing \p age
+    ///
+    /// computeEulerVector() walks the whole reconstruction tree and depends only on the plate and
+    /// the age, but the velocity queries need it per sample point. With O(50) plates per stage
+    /// against O(10^5) surface points -- times seven sample points, times two bracketing stages --
+    /// hoisting it here turns the dominant cost of the velocity path into a handful of evaluations.
+    ///
+    /// Calling this is optional: eulerVectorFor() falls back to computing on the fly. It is not
+    /// optional for correctness under a threaded host backend, though -- the fallback is const and
+    /// race-free, but only a prepared table keeps the per-point path from being slow.
+    void prepareEulerVectors( const double age )
+    {
+        if ( stages_.find( age ) == stages_.end() )
+        {
+            stages_.emplace( age, PlateStageData( plateTopologies_, plateRotations_, age ) );
+        }
+        evictDistantStages( age );
+
+        for ( const auto& plate : plateTopologies_.getPlatesForStage( std::ceil( age ) ) )
+        {
+            const auto key = std::make_pair( plate.id, age );
+            if ( eulerVectors_.find( key ) == eulerVectors_.end() )
+            {
+                eulerVectors_.emplace(
+                    key, computeEulerVector( plateRotations_, static_cast< int >( plate.id ), age ) );
+            }
+        }
+    }
+
+    /// Same, for both stages bracketing \p age, as used by the *InterpolatedInTime queries
+    void prepareEulerVectorsInterpolatedInTime( const double age )
+    {
+        const auto [ageFloor, ageCeil, interpolationFactor] = getSurroundingAges( age );
+        prepareEulerVectors( ageFloor );
+        prepareEulerVectors( ageCeil );
+    }
+
+    /// Access to the raw topology store, e.g. to pack the plate polygons into flat device buffers.
+    PlateStorage&       plateTopologies() { return plateTopologies_; }
+    const PlateStorage& plateTopologies() const { return plateTopologies_; }
+
   private:
+    /// Locates the plate under a point, preferring the packed stage data
+    ///
+    /// Same contract as findPlateAndDistance(): first matching plate wins, distance in km, and
+    /// std::numeric_limits<double>::max() when nothing matched. The packed path additionally
+    /// rejects candidates by bounding cap and by longitude/latitude bin, which the polygon-list
+    /// path cannot do. Falls back to the unpacked search when the stage was not prepared.
+    std::tuple< bool, uint_t, double > findPlate( const vec3D& pointLonLat, const double age ) const
+    {
+        const auto stage = stages_.find( age );
+        if ( stage == stages_.end() )
+        {
+            return findPlateAndDistance( age, plateTopologies_, pointLonLat, idWhenNoPlateFound );
+        }
+
+        const auto p = geometry::lonLatDegToUnit( pointLonLat( 0 ), pointLonLat( 1 ) );
+        const auto r = findPlateInStage( stage->second.host(), p );
+
+        if ( !r.found )
+        {
+            return std::make_tuple( false, idWhenNoPlateFound, std::numeric_limits< double >::max() );
+        }
+
+        return std::make_tuple( true, r.plateId, r.distanceRad * plates::constants::earthRadiusInKm );
+    }
+
+    /// Drops packed stages far from \p age
+    ///
+    /// A stage costs a few hundred kB of host and device memory, and a run walking 400 Ma would
+    /// otherwise accumulate every one of them. At most two are live at a time -- the pair
+    /// bracketing the current age -- so a small window is plenty, and findPlate() falls back to
+    /// the unpacked search if a stage is ever missing, which makes eviction safe by construction.
+    void evictDistantStages( const double age )
+    {
+        constexpr std::size_t maxStages = 4;
+
+        while ( stages_.size() > maxStages )
+        {
+            auto furthest = stages_.begin();
+            for ( auto it = stages_.begin(); it != stages_.end(); ++it )
+            {
+                if ( std::abs( it->first - age ) > std::abs( furthest->first - age ) )
+                {
+                    furthest = it;
+                }
+            }
+            stages_.erase( furthest );
+        }
+    }
+
+    /// Euler vector for a plate at an age stage, from the prepared table where possible
+    ///
+    /// const, and therefore safe to call concurrently: a miss recomputes rather than memoising.
+    vec3D eulerVectorFor( const uint_t plateID, const double age ) const
+    {
+        const auto it = eulerVectors_.find( std::make_pair( plateID, age ) );
+        if ( it != eulerVectors_.end() )
+        {
+            return it->second;
+        }
+        return computeEulerVector( plateRotations_, static_cast< int >( plateID ), age );
+    }
+
     PlateStorage          plateTopologies_;
     PlateRotationProvider plateRotations_;
+
+    /// Euler vectors keyed by (plate ID, age). Bounded by #stages x #plates, so a few thousand
+    /// entries at most over a whole run.
+    std::map< std::pair< uint_t, double >, vec3D > eulerVectors_;
+
+    /// Packed, device-ready polygons per prepared age stage
+    std::map< double, PlateStageData > stages_;
 };
 
 } // namespace plates
