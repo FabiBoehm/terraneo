@@ -28,9 +28,9 @@
 
 #include "terra/dense/vec.hpp"
 #include "terra/kokkos/kokkos_wrapper.hpp"
-#include "terra/plates/PlateRotationProvider.hpp"
-#include "terra/plates/PlateStorage.hpp"
-#include "terra/plates/functionsForPlates.hpp"
+#include "terra/plates/plate_rotation_provider.hpp"
+#include "terra/plates/plate_storage.hpp"
+#include "terra/plates/functions_for_plates.hpp"
 #include "terra/plates/spherical_predicates.hpp"
 
 namespace terra {

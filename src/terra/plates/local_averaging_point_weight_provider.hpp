@@ -25,7 +25,7 @@
 #include "terra/plates/types.hpp"
 #include "terra/plates/conversions.hpp"
 // #include "terraneo/helpers/typeAliases.hpp"
-#include "terra/plates/functionsForGeometry.hpp"
+#include "terra/plates/functions_for_geometry.hpp"
 
 namespace terra {
 namespace plates {

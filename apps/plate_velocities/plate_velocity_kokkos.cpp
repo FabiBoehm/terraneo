@@ -29,7 +29,7 @@
 #include "src/parameters.hpp"
 #include "terra/io/xdmf.hpp"
 #include "terra/kokkos/kokkos_wrapper.hpp"
-#include "terra/plates/PlateVelocityProvider.hpp"
+#include "terra/plates/plate_velocity_provider.hpp"
 #include "terra/plates/types.hpp"
 #include "util/init.hpp"
 #include "util/logging.hpp"
@@ -416,7 +416,7 @@ int main( int argc, char** argv )
 
     logroot << "*** STEP 3: Generating an Oracle" << std::endl;
 
-    //std::string dataDir{ "/import/freenas-m-04-students/frezaei/TerraNeoX/TERRA-NG/apps/PlateVelocities/data/plates/" };
+    //std::string dataDir{ "/import/freenas-m-04-students/frezaei/TerraNeoX/TERRA-NG/apps/plate_velocities/data/plates/" };
     const std::string& dataDir = parameters.dataDir;
     std::string fnameTopologies      = dataDir + "topologies_0-410Ma.geojson";
     std::string fnameReconstructions = dataDir + "TomoPAC2.rot";

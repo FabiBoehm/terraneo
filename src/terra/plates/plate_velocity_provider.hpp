@@ -20,17 +20,17 @@
 
 #pragma once
 
-#include "terra/plates/PlateNotFoundHandlers.hpp"
-#include "terra/plates/PlateRotationProvider.hpp"
-#include "terra/plates/PlateStageData.hpp"
-#include "terra/plates/PlateStorage.hpp"
-#include "terra/plates/SmoothingStrategies.hpp"
+#include "terra/plates/plate_not_found_handlers.hpp"
+#include "terra/plates/plate_rotation_provider.hpp"
+#include "terra/plates/plate_stage_data.hpp"
+#include "terra/plates/plate_storage.hpp"
+#include "terra/plates/smoothing_strategies.hpp"
 #include "terra/plates/conversions.hpp"
 
 // preserve ordering of includes
-#include "terra/plates/FileIO.hpp"
-#include "terra/plates/LocalAveragingPointWeightProvider.hpp"
-#include "terra/plates/functionsForPlates.hpp"
+#include "terra/plates/file_io.hpp"
+#include "terra/plates/local_averaging_point_weight_provider.hpp"
+#include "terra/plates/functions_for_plates.hpp"
 
 namespace terra {
 namespace plates {

@@ -38,7 +38,7 @@
 #include <string>
 #include <vector>
 
-#include "terra/plates/PlateVelocityProvider.hpp"
+#include "terra/plates/plate_velocity_provider.hpp"
 #include "util/init.hpp"
 #include "util/logging.hpp"
 
