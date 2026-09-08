@@ -26,10 +26,10 @@
 
 #include "terra/dense/vec.hpp"
 #include "terra/plates/conversions.hpp"
-#include "terra/plates/functionsForGeometry.hpp"
-#include "terra/plates/functionsForRotations.hpp"
+#include "terra/plates/functions_for_geometry.hpp"
+#include "terra/plates/functions_for_rotations.hpp"
 #include "terra/plates/types.hpp"
-#include "terra/plates/PlateStorage.hpp"
+#include "terra/plates/plate_storage.hpp"
 #include "terra/plates/spherical_predicates.hpp"
 
 namespace terra {

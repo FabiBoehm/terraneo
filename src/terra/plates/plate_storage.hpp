@@ -26,10 +26,10 @@
                                  // should we include this file or is there an internal JSON handler included already ?
                                  // For now I will include it in the same folder till we know :)
 
-// #include "terraneo/dataimport/FileIO.hpp"
+// #include "terraneo/dataimport/file_io.hpp"
 #include "terra/plates/conversions.hpp"
 // #include "terraneo/helpers/typeAliases.hpp"
-#include "terra/plates/functionsForRotations.hpp"
+#include "terra/plates/functions_for_rotations.hpp"
 #include "terra/plates/types.hpp"
 #include "terra/plates/utilities.hpp"
 #include "util/logging.hpp"

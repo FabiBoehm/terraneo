@@ -6,7 +6,7 @@
 #include "grid/shell/spherical_shell.hpp"
 #include "linalg/vector_q1.hpp"
 #include "parameters.hpp"
-#include "terra/plates/PlateVelocityProvider.hpp"
+#include "terra/plates/plate_velocity_provider.hpp"
 #include "terra/plates/types.hpp"
 #include "util/logging.hpp"
 
@@ -17,14 +17,14 @@ using grid::Grid3DDataVec;
 using grid::Grid4DDataVec;
 
 template < typename GridType, typename RadiiType, typename DataType, typename VelocityFn >
-struct ComputePlateVelocities
+struct Computeplate_velocities
 {
     GridType   grid_;
     RadiiType  radii_;
     DataType   plate_data_;
     VelocityFn computeVelocity;
 
-    ComputePlateVelocities(
+    Computeplate_velocities(
         const GridType&  grid,
         const RadiiType& radii,
         const DataType&  plate_data,
@@ -109,10 +109,10 @@ void extract_plate_velocities(
     // Extract plate velocities from data
     // Explicitly on host since underlying plates functionality is not device-callable.
     Kokkos::parallel_for(
-        "ComputePlateVelocities",
+        "Computeplate_velocities",
         Kokkos::MDRangePolicy< HostExecSpace, Kokkos::Rank< 3 > >(
             { 0, 0, 0 }, { coords_host.extent( 0 ), coords_host.extent( 1 ), coords_host.extent( 2 ) } ),
-        ComputePlateVelocities( coords_host, radii_host, plate_velocities_host, getPointVelocity ) );
+        Computeplate_velocities( coords_host, radii_host, plate_velocities_host, getPointVelocity ) );
     Kokkos::fence();
 
     // Copy to device

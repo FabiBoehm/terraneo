@@ -1,17 +1,17 @@
 target_sources(terra
     PRIVATE
-    functionsForGeometry.hpp
-    functionsForPlates.hpp
-    functionsForRotations.hpp
-    PlateRotationProvider.hpp
-    PlateStorage.hpp
-    PlateVelocityProvider.hpp
-    LocalAveragingPointWeightProvider.hpp
-    SmoothingStrategies.hpp
+    functions_for_geometry.hpp
+    functions_for_plates.hpp
+    functions_for_rotations.hpp
+    plate_rotation_provider.hpp
+    plate_storage.hpp
+    plate_velocity_provider.hpp
+    local_averaging_point_weight_provider.hpp
+    smoothing_strategies.hpp
     types.hpp
     conversions.hpp
-    FileIO.hpp
+    file_io.hpp
     json.hpp
     spherical_predicates.hpp
-    PlateStageData.hpp
+    plate_stage_data.hpp
 )
