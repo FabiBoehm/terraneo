@@ -212,6 +212,7 @@ struct Parameters
     int         beginAge  = 10;
     int         endAge    = 0;
     std::string outdir    = "./output";
+    std::string dataDir   = "../../../TERRA-NG/data/plates/Chen2025-tomopac/";
 };
 
 // ========
@@ -241,6 +242,9 @@ int main( int argc, char** argv )
     terra::util::add_option_with_default( app, "--jobType", parameters.jobType );
     terra::util::add_option_with_default( app, "--beginAge", parameters.beginAge );
     terra::util::add_option_with_default( app, "--endAge", parameters.endAge );
+    terra::util::add_option_with_default( app, "--data-dir", parameters.dataDir );
+
+    CLI11_PARSE( app, argc, argv );
 
     terra::util::prepare_empty_directory_or_abort( parameters.outdir );
 
@@ -260,6 +264,7 @@ int main( int argc, char** argv )
     logroot << "--jobType " << parameters.jobType << std::endl;
     logroot << "--beginAge " << parameters.beginAge << std::endl;
     logroot << "--endAge " << parameters.endAge << std::endl;
+    logroot << "--data-dir " << parameters.dataDir << std::endl;
 
     // make sure beginAge > endAge -- we simulate forward in time
     if ( parameters.endAge > parameters.beginAge )
@@ -310,7 +315,7 @@ int main( int argc, char** argv )
     logroot << "*** STEP 3: Generating an Oracle" << std::endl;
 
     //std::string dataDir{ "/import/freenas-m-04-students/frezaei/TerraNeoX/TERRA-NG/apps/PlateVelocities/data/plates/" };
-    std::string dataDir{ "../../../TERRA-NG/data/plates/Chen2025-tomopac/" };
+    const std::string& dataDir = parameters.dataDir;
     std::string fnameTopologies      = dataDir + "topologies_0-410Ma.geojson";
     std::string fnameReconstructions = dataDir + "TomoPAC2.rot";
     terra::plates::PlateVelocityProvider oracle( fnameTopologies, fnameReconstructions );

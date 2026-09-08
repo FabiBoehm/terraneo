@@ -99,28 +99,31 @@ class PlateStorage
 
     double getMaxAge() const { return listOfPlateStages_.back(); }
 
+    /// Plates of the age stage \p age
+    ///
+    /// Looked up by numeric age rather than by the formatted stage name. The name-based lookup
+    /// this replaced built a std::stringstream and formatted "topology_%.4fMa_polygon" on every
+    /// call -- and it is called once per plate per sample point, so it was a measurable part of
+    /// the plate search rather than a setup cost.
+    ///
+    /// The comparison is exact, which is what the string lookup effectively was too. Stage ages
+    /// come from the datafile as integers ("0.0000", "1.0000", ...) and callers pass
+    /// std::ceil( age ), so both sides are exactly representable and the match is unambiguous.
     plateVec_t& getPlatesForStage( double age )
     {
-        auto iter = ageToPlatesMap_.find( ageToKeyStr( age ) );
-        if ( iter == ageToPlatesMap_.end() )
-        {
-            std::cerr << "No plates found for " << ageToKeyStr( age ) << std::endl;
-            std::abort();
-        }
-
-        return iter->second;
+        return const_cast< plateVec_t& >( const_cast< const PlateStorage* >( this )->getPlatesForStage( age ) );
     }
 
     const plateVec_t& getPlatesForStage( double age ) const
     {
-        auto iter = ageToPlatesMap_.find( ageToKeyStr( age ) );
-        if ( iter == ageToPlatesMap_.end() )
+        const auto iter = ageToPlates_.find( age );
+        if ( iter == ageToPlates_.end() )
         {
             std::cerr << "No plates found for " << ageToKeyStr( age ) << std::endl;
             std::abort();
         }
 
-        return iter->second;
+        return *iter->second;
     }
 
     const std::vector< double >& getListOfPlateStages() const { return listOfPlateStages_; }
@@ -169,6 +172,13 @@ class PlateStorage
         // sort the list of plate stages (should be sorted in data-file, but hey,
         // better safe than sorry
         std::sort( listOfPlateStages_.begin(), listOfPlateStages_.end() );
+
+        // Index the stages by numeric age. References into a std::map's mapped values are stable,
+        // and nothing is inserted into ageToPlatesMap_ after this point.
+        for ( auto& [ageName, plates] : ageToPlatesMap_ )
+        {
+            ageToPlates_[keyStrToAge( ageName )] = &plates;
+        }
     };
 
     /// name of datafile from which object obtained information
@@ -179,6 +189,9 @@ class PlateStorage
 
     /// a vector containing a sorted list of the ages of the plate stages found in data-file
     std::vector< double > listOfPlateStages_;
+
+    /// numeric age -> plates of that stage, pointing into ageToPlatesMap_
+    std::map< double, plateVec_t* > ageToPlates_;
 };
 
 } // namespace plates

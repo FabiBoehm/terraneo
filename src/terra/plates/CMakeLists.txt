@@ -12,4 +12,6 @@ target_sources(terra
     conversions.hpp
     FileIO.hpp
     json.hpp
+    spherical_predicates.hpp
+    PlateStageData.hpp
 )

@@ -21,7 +21,6 @@
 #pragma once
 
 #include <limits>
-#include <boost/geometry.hpp>
 #include <vector>
 #include <array>
 
@@ -31,6 +30,7 @@
 #include "terra/plates/functionsForRotations.hpp"
 #include "terra/plates/types.hpp"
 #include "terra/plates/PlateStorage.hpp"
+#include "terra/plates/spherical_predicates.hpp"
 
 namespace terra {
 namespace plates {
@@ -44,68 +44,45 @@ inline vec3D sph2cart( const std::vector< double >& lonlat, const double radius 
    return xyz;
 }
 
-typedef boost::geometry::model::point<double, 2, boost::geometry::cs::spherical_equatorial<boost::geometry::degree>> spherical_point;
-typedef boost::geometry::model::polygon<spherical_point> polygon_on_sphere;
-
 /// Determine to which plate a point belongs
 ///
 /// The function returns a bool to indicate whether any plate matched, the plate's ID and
-/// the distance from this plate's boundary
+/// the distance from this plate's boundary in km. The first matching plate wins.
+///
+/// \param point longitude, latitude and radius, with the angles in degrees
 inline std::tuple< bool, uint_t, double >
     findPlateAndDistance( const double age, const PlateStorage& plateStore, const vec3D& point, uint_t idWhenNoPlateFound )
 {
    // query all plates for given age stage
-   auto& plates = plateStore.getPlatesForStage( std::ceil( age ) );
+   const auto& plates = plateStore.getPlatesForStage( std::ceil( age ) );
 
-   // be pessimistic
-   bool   plateFound{ false };
-   uint_t plateID{ idWhenNoPlateFound };
-   double distance{ std::numeric_limits< double >::max() };
+   const geometry::UnitVec pointCart = geometry::lonLatDegToUnit( point( 0 ), point( 1 ) );
 
-   // Create the point in the surface of a sphere from the library boost::geometry 
-   spherical_point pntSph(point(0), point(1));
-
-   //loop over the plates available
-   for ( auto& currentPlate : plates )
+   for ( const auto& currentPlate : plates )
    {
-      // create the polygon on the surface of a sphere and populate with the plate boundary coordinates
       const Polygon& bdrPolygon = currentPlate.boundary;
-      polygon_on_sphere polygonOnSphere;
-      for ( int index = 0; index < bdrPolygon.size(); ++index )
-      {
-         boost::geometry::append(polygonOnSphere.outer(), spherical_point(bdrPolygon[index]( 0 ), bdrPolygon[index]( 1 )));
-      }
-      // Correct the geometry
-      boost::geometry::correct(polygonOnSphere);
 
-      // check if the point belongs to the polygon
-      if (boost::geometry::within(pntSph, polygonOnSphere))
-      {
-         // calculate the distace from the polygon to the point
-         boost::geometry::for_each_segment(polygonOnSphere, [&distance, &pntSph](const auto& segment){
-            distance = std::min<double>(distance, boost::geometry::distance(segment, pntSph));
-         });
-         // distance at the surface of the Earth
-         distance = distance * plates::constants::earthRadiusInKm; 
-         // plate is found 
-         plateFound = true;
-      }
-      else{
-         // ;
-      }
+      // The polygon is stored as (longitude, latitude, 0) per vertex; convert on the fly here.
+      // Phase 3 of the port replaces this with unit cartesian vertices held in a flat buffer, at
+      // which point the trigonometry leaves the inner loop entirely.
+      const auto result = geometry::pointInSphericalPolygon(
+          pointCart,
+          static_cast< int >( bdrPolygon.size() ),
+          [&bdrPolygon]( const int index ) {
+             return geometry::lonLatDegToUnit( bdrPolygon[index]( 0 ), bdrPolygon[index]( 1 ) );
+          } );
 
-      // plate found then leave loop
-      if ( plateFound )
+      if ( result.inside )
       {
-         plateID = currentPlate.id;
-         break;
+         return std::make_tuple( true, currentPlate.id, result.distanceRad * plates::constants::earthRadiusInKm );
       }
    }
-   return std::make_tuple( plateFound, plateID, distance );
+
+   return std::make_tuple( false, idWhenNoPlateFound, std::numeric_limits< double >::max() );
 }
 
 /// From the Euler vector compute the surface velocity in xyz
-inline vec3D eulerVectorToVelocity( const vec3D& point, vec3D& wXYZ, const double smoothing )
+inline vec3D eulerVectorToVelocity( const vec3D& point, const vec3D& wXYZ, const double smoothing )
 {
    double earthRadius = plates::constants::earthRadiusInKm * static_cast< double >( 1e3 );
    double toms        = static_cast< double >( 3600 * 24 * 365 ); // conversions factor cm/yr -> m/s
@@ -126,13 +103,14 @@ inline vec3D eulerVectorToVelocity( const vec3D& point, vec3D& wXYZ, const doubl
    return v;
 }
 
-/// Get the velocity in given the plate id, create the reconstruction path, get
-/// the rotations and calculate the velocity
-inline vec3D computeCartesianVelocityVector( const PlateRotationProvider& rotData,
-                                             const int                    plateID,
-                                             const double                 age,
-                                             const vec3D&                 point,
-                                             const double                 smoothing )
+/// Euler vector (cartesian, degrees per Ma) of a plate at a given age stage
+///
+/// This walks the reconstruction tree from the plate up to the reference frame and forms the
+/// stage pole over [age, age+1]. It depends only on the plate and the age -- the point does not
+/// enter until eulerVectorToVelocity(). Split out of computeCartesianVelocityVector() so the
+/// tree walk can be hoisted out of the per-point loop; see
+/// PlateVelocityProvider::prepareEulerVectors().
+inline vec3D computeEulerVector( const PlateRotationProvider& rotData, const int plateID, const double age )
 {
    // age of the euler pole is defined by ((age1 + age2)/2)
    // This is valid when the velocities are calculated every 1 Myrs. 
@@ -176,9 +154,22 @@ inline vec3D computeCartesianVelocityVector( const PlateRotationProvider& rotDat
    // compute Euler Vector
    vec3D lonlatang = plates::stagePoleF( finNahs[0].lonLatAng, finNahs[1].lonLatAng );
    lonlatang(2)    = lonlatang(2) / ( finNahs[1].time - finNahs[0].time );
-   vec3D wXYZ      = conversions::sph2cart( { lonlatang(0), lonlatang(1) }, lonlatang(2) );
 
-   return eulerVectorToVelocity( point, wXYZ, smoothing );
+   return conversions::sph2cart( { lonlatang(0), lonlatang(1) }, lonlatang(2) );
+}
+
+/// Get the velocity in given the plate id, create the reconstruction path, get
+/// the rotations and calculate the velocity
+///
+/// Recomputes the Euler vector on every call. Prefer computeEulerVector() once per
+/// (plate, age) plus eulerVectorToVelocity() per point.
+inline vec3D computeCartesianVelocityVector( const PlateRotationProvider& rotData,
+                                             const int                    plateID,
+                                             const double                 age,
+                                             const vec3D&                 point,
+                                             const double                 smoothing )
+{
+   return eulerVectorToVelocity( point, computeEulerVector( rotData, plateID, age ), smoothing );
 }
 
 } // namespace plates
