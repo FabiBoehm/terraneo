@@ -24,6 +24,7 @@
 /// swaps host() for device() at the call site and nothing else changes.
 
 #include <cmath>
+#include <stdexcept>
 #include <vector>
 
 #include "terra/dense/vec.hpp"
@@ -196,7 +197,19 @@ class PlateStageData
             host_.ringBegin( i ) = offset;
             host_.plateId( i )   = plates[i].id;
 
-            const vec3D w = computeEulerVector( rotations, static_cast< int >( plates[i].id ), age );
+            // A topology file may name plates the rotation file does not describe. Such a plate has no Euler
+            // vector; pack a zero and record the id, so that the caller can route points on it through its
+            // PlateNotFoundHandler instead of reading the zero as a genuine "this plate does not move".
+            vec3D w{ 0, 0, 0 };
+            try
+            {
+                w = computeEulerVector( rotations, static_cast< int >( plates[i].id ), age );
+            }
+            catch ( const std::runtime_error& )
+            {
+                platesWithoutRotations_.push_back( plates[i].id );
+            }
+
             for ( int d = 0; d < 3; ++d )
             {
                 host_.omega( i, d ) = w( d );
@@ -222,10 +235,17 @@ class PlateStageData
 
     double age() const { return age_; }
 
+    /// Plates in this stage whose reconstruction circuit could not be built from the rotation data. Their
+    /// packed Euler vector is zero and must not be used.
+    const std::vector< uint_t >& platesWithoutRotations() const { return platesWithoutRotations_; }
+
     const PlateStageViews< HostSpace >&   host() const { return host_; }
     const PlateStageViews< DeviceSpace >& device() const { return device_; }
 
   private:
+    std::vector< uint_t > platesWithoutRotations_;
+
+
     template < class Space >
     static void allocate( PlateStageViews< Space >& v, int nPlates, int nVerts, int nLonBins, int nLatBins )
     {
