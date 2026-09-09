@@ -23,6 +23,8 @@
 #include <limits>
 #include <vector>
 #include <array>
+#include <stdexcept>
+#include <string>
 
 #include "terra/dense/vec.hpp"
 #include "terra/plates/conversions.hpp"
@@ -126,27 +128,62 @@ inline vec3D computeEulerVector( const PlateRotationProvider& rotData, const int
 
    using rotIter_t = std::vector< RotationInfo >::const_iterator;
 
+   // Walk the reconstruction circuit from this plate down to the anchor (id 0), accumulating one series of
+   // finite rotations per hop.
+   //
+   // Two ways this can fail to terminate on its own, both of which are data problems rather than programming
+   // errors, and both of which used to hang here rather than report anything:
+   //
+   //   * no rotation entry carries the current id -- the search below matches nothing, `pID` is left unchanged
+   //     and the loop spins. This is what happens when a topology file names plates that the rotation file does
+   //     not describe, i.e. when the two files come from different reconstructions.
+   //   * the circuit contains a cycle, so the walk revisits an id it has already left.
+   //
+   // Both are caught: the first directly, the second by bounding the number of hops, since a well-formed
+   // circuit can visit each plate at most once.
+   const size_t max_hops = rotations.size() + 1;
+   size_t       hops     = 0;
+
    while ( pID != 0 )
    {
-      rotIter_t rangeBegin;
-      rotIter_t rangeEnd;
+      bool found = false;
 
       for ( rotIter_t it = rotations.begin(); it != rotations.end(); ++it )
       {
          if ( it->plateID == pID )
          {
-            rangeBegin = it;
-            rangeEnd   = rangeBegin + 1;
-            while ( rangeEnd->plateID == pID )
+            rotIter_t rangeBegin = it;
+            rotIter_t rangeEnd   = rangeBegin + 1;
+
+            // Bound the scan by end(): a matching block that runs to the last entry would otherwise read past
+            // the end of the vector.
+            while ( rangeEnd != rotations.end() && rangeEnd->plateID == pID )
             {
                ++rangeEnd;
             }
+
             // append to list of finite rotations
-            pID = plates::determineSeriesOfFiniteRotations( rangeBegin, rangeEnd, time, FinRot );
+            pID   = plates::determineSeriesOfFiniteRotations( rangeBegin, rangeEnd, time, FinRot );
+            found = true;
             break;
          }
       }
-      // WALBERLA_LOG_DETAIL_ON_ROOT( "Looping ... (pID = " << pID << ")" );
+
+      if ( !found )
+      {
+         throw std::runtime_error(
+             "computeEulerVector: no rotation data for plate id " + std::to_string( pID ) +
+             " while building the reconstruction circuit of plate " + std::to_string( plateID ) + " at age " +
+             std::to_string( age ) +
+             " Ma. The topology and rotation files most likely come from different reconstructions." );
+      }
+
+      if ( ++hops > max_hops )
+      {
+         throw std::runtime_error(
+             "computeEulerVector: the reconstruction circuit of plate " + std::to_string( plateID ) + " at age " +
+             std::to_string( age ) + " Ma does not terminate at the anchor plate; the rotation data contains a cycle." );
+      }
    }
 
    std::array< FiniteRotation, 2 > finNahs = plates::combineSeriesOfFiniteRotations( FinRot );

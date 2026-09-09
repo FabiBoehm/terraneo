@@ -20,6 +20,8 @@
 
 #pragma once
 
+#include <set>
+
 #include "terra/plates/plate_not_found_handlers.hpp"
 #include "terra/plates/plate_rotation_provider.hpp"
 #include "terra/plates/plate_stage_data.hpp"
@@ -347,6 +349,15 @@ class PlateVelocityProvider
         if ( stages_.find( age ) == stages_.end() )
         {
             stages_.emplace( age, PlateStageData( plateTopologies_, plateRotations_, age ) );
+
+            for ( const auto id : stages_.at( age ).platesWithoutRotations() )
+            {
+                if ( platesWithoutRotations_.insert( id ).second )
+                {
+                    util::logroot << "WARNING: no usable rotation data for plate " << id
+                                  << "; points on it will be reported as having no plate." << std::endl;
+                }
+            }
         }
         evictDistantStages( age );
 
@@ -355,8 +366,25 @@ class PlateVelocityProvider
             const auto key = std::make_pair( plate.id, age );
             if ( eulerVectors_.find( key ) == eulerVectors_.end() )
             {
-                eulerVectors_.emplace(
-                    key, computeEulerVector( plateRotations_, static_cast< int >( plate.id ), age ) );
+                // A topology file may name plates that the rotation file does not describe -- the two are
+                // often taken from different reconstructions. Such a plate has no Euler vector and therefore
+                // no velocity, so record it and let the queries treat points on it as "no plate found", which
+                // routes them through the caller's PlateNotFoundHandler like any other uncovered point.
+                // Without this the failure would surface once per sample point, deep inside a parallel loop.
+                try
+                {
+                    eulerVectors_.emplace(
+                        key, computeEulerVector( plateRotations_, static_cast< int >( plate.id ), age ) );
+                }
+                catch ( const std::runtime_error& e )
+                {
+                    if ( platesWithoutRotations_.insert( plate.id ).second )
+                    {
+                        util::logroot << "WARNING: no usable rotation data for plate " << plate.id
+                                      << "; points on it will be reported as having no plate. (" << e.what() << ")"
+                                      << std::endl;
+                    }
+                }
             }
         }
     }
@@ -368,6 +396,11 @@ class PlateVelocityProvider
         prepareEulerVectors( ageFloor );
         prepareEulerVectors( ageCeil );
     }
+
+    /// Plates that the topologies name but the rotation data does not describe, as found by the most recent
+    /// prepareEulerVectors(). Non-empty means the two input files disagree and some surface points will have
+    /// no velocity; callers that care should report it rather than silently accepting the gap.
+    const std::set< uint_t >& platesWithoutRotations() const { return platesWithoutRotations_; }
 
     /// Access to the raw topology store, e.g. to pack the plate polygons into flat device buffers.
     PlateStorage&       plateTopologies() { return plateTopologies_; }
@@ -385,7 +418,8 @@ class PlateVelocityProvider
         const auto stage = stages_.find( age );
         if ( stage == stages_.end() )
         {
-            return findPlateAndDistance( age, plateTopologies_, pointLonLat, idWhenNoPlateFound );
+            const auto unpacked = findPlateAndDistance( age, plateTopologies_, pointLonLat, idWhenNoPlateFound );
+            return usableResult( unpacked );
         }
 
         const auto p = geometry::lonLatDegToUnit( pointLonLat( 0 ), pointLonLat( 1 ) );
@@ -396,7 +430,8 @@ class PlateVelocityProvider
             return std::make_tuple( false, idWhenNoPlateFound, std::numeric_limits< double >::max() );
         }
 
-        return std::make_tuple( true, r.plateId, r.distanceRad * plates::constants::earthRadiusInKm );
+        return usableResult(
+            std::make_tuple( true, r.plateId, r.distanceRad * plates::constants::earthRadiusInKm ) );
     }
 
     /// Drops packed stages far from \p age
@@ -426,6 +461,17 @@ class PlateVelocityProvider
     /// Euler vector for a plate at an age stage, from the prepared table where possible
     ///
     /// const, and therefore safe to call concurrently: a miss recomputes rather than memoising.
+    /// Demotes a hit on a plate with no usable rotation data to a miss, so that every query path funnels such
+    /// points into the caller's PlateNotFoundHandler rather than failing to produce a velocity for them.
+    std::tuple< bool, uint_t, double > usableResult( std::tuple< bool, uint_t, double > result ) const
+    {
+        if ( std::get< 0 >( result ) && platesWithoutRotations_.count( std::get< 1 >( result ) ) > 0 )
+        {
+            return std::make_tuple( false, idWhenNoPlateFound, std::numeric_limits< double >::max() );
+        }
+        return result;
+    }
+
     vec3D eulerVectorFor( const uint_t plateID, const double age ) const
     {
         const auto it = eulerVectors_.find( std::make_pair( plateID, age ) );
@@ -438,6 +484,10 @@ class PlateVelocityProvider
 
     PlateStorage          plateTopologies_;
     PlateRotationProvider plateRotations_;
+
+    /// Plates named by the topologies whose reconstruction circuit cannot be built from the rotation data.
+    /// Populated by prepareEulerVectors(); see \ref platesWithoutRotations.
+    std::set< uint_t > platesWithoutRotations_;
 
     /// Euler vectors keyed by (plate ID, age). Bounded by #stages x #plates, so a few thousand
     /// entries at most over a whole run.
