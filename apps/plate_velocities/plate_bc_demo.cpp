@@ -46,6 +46,7 @@
 #include <iomanip>
 #include <sstream>
 #include <string>
+#include <optional>
 #include <vector>
 
 #include "device_plate_lookup.hpp"
@@ -59,6 +60,7 @@
 #include "linalg/vector_q1isoq2_q1.hpp"
 #include "mpi/mpi.hpp"
 #include "src/plates.hpp"
+#include "terra/plates/plate_velocity_device.hpp"
 #include "terra/io/xdmf.hpp"
 #include "terra/kokkos/kokkos_wrapper.hpp"
 #include "terra/plates/plate_velocity_provider.hpp"
@@ -128,6 +130,10 @@ int main( int argc, char** argv )
     // ==========================================================================================================
     // The Stokes operator is Q1isoQ2/Q1: velocities live on `level`, pressures one level coarser.
     logroot << "\n=== 1. Mesh ===" << std::endl;
+    std::optional< util::Timer > timer_total;
+    timer_total.emplace( "total" );
+    std::optional< util::Timer > timer_phase;
+    timer_phase.emplace( "mesh_setup" );
 
     const auto radii_fine   = grid::shell::uniform_shell_radii< double >( prm.r_min, prm.r_max, ( 1 << prm.level ) + 1 );
     const auto radii_coarse = grid::shell::uniform_shell_radii< double >(
@@ -157,7 +163,10 @@ int main( int argc, char** argv )
     logroot << "  topologies      : " << prm.topologies << std::endl;
     logroot << "  reconstructions : " << prm.reconstructions << std::endl;
 
+    timer_phase.reset();
+    timer_phase.emplace( "oracle_load" );
     auto oracle = mantlecirculation::initialise_plates( prm.topologies, prm.reconstructions );
+    timer_phase.reset();
 
     logroot << "  age range available: [" << oracle->getMinAge() << ", " << oracle->getMaxAge() << "] Ma"
             << std::endl;
@@ -214,11 +223,115 @@ int main( int argc, char** argv )
     }
 
     // ==========================================================================================================
+    //  4b. The same extraction on the device
+    // ==========================================================================================================
+    // Same quantity, evaluated from the packed stage views inside a Kokkos kernel instead of on the host. The
+    // point of the comparison below is that these are two independent evaluations of the same formula.
+    logroot << "\n=== 4b. Plate velocity extraction (device) ===" << std::endl;
+
+    linalg::VectorQ1IsoQ2Q1< ScalarType > plate_velocities_device(
+        "plate_velocities_device", domain_fine, domain_coarse, ownership_fine, ownership_coarse );
+    linalg::assign( plate_velocities_device, ScalarType( 0 ) );
+
+    long long needing_averaging = 0;
+
+    {
+        timer_phase.reset();
+        timer_phase.emplace( "device_plate_velocity_extraction" );
+
+        const auto& stage = oracle->stageFor( prm.age );
+
+        // Same stencil the host path uses, uploaded once.
+        const plates::UniformCirclesPointWeightProvider weights( { { 1.0 / 100.0, 6 } }, 1e-1 );
+        const auto stencil = plates::make_device_averaging_stencil( weights );
+
+        plates::extract_plate_velocities_device< ScalarType >(
+            domain_fine, coords_fine, radii_grid, stage.device(), stencil,
+            plate_velocities_device.block_1().grid_data(),
+            static_cast< ScalarType >( prm.velocity_scale ) );
+
+        timer_phase.reset();
+
+        needing_averaging = plates::surface_points_needing_averaging< ScalarType >(
+            domain_fine, coords_fine, radii_grid, stage.device(), stencil.maxDistanceKm );
+    }
+
+    // Compare the two extractions node by node.
+    {
+        const auto h    = plate_velocities.block_1().grid_data();
+        const auto dv   = plate_velocities_device.block_1().grid_data();
+        const auto mask = boundary_fine;
+        const auto own  = ownership_fine;
+
+        // Split the comparison by regime. The device kernel deliberately omits the host's local averaging, so
+        // a disagreement near a plate boundary is expected and says nothing about whether the port is right.
+        // What must agree to round-off is everywhere else, where the host takes the same unaveraged shortcut.
+        const auto   stage_views   = oracle->stageFor( prm.age ).device();
+        const plates::UniformCirclesPointWeightProvider weights_cmp( { { 1.0 / 100.0, 6 } }, 1e-1 );
+        const double stencil_reach = weights_cmp.maxDistance( dense::Vec< double, 3 >{ 0, 0, 1 } );
+
+        ScalarType max_diff_plain = 0, max_diff_avg = 0, max_host = 0;
+
+        Kokkos::parallel_reduce(
+            "host_vs_device_velocity",
+            grid::shell::local_domain_md_range_policy_nodes( domain_fine ),
+            KOKKOS_LAMBDA( const int sd, const int x, const int y, const int r, ScalarType& plain,
+                           ScalarType& avg, ScalarType& mag ) {
+                if ( mask( sd, x, y, r ) != grid::shell::ShellBoundaryFlag::SURFACE )
+                    return;
+                if ( !util::has_flag( own( sd, x, y, r ), grid::NodeOwnershipFlag::OWNED ) )
+                    return;
+
+                const auto c = grid::shell::coords( sd, x, y, r, coords_fine, radii_grid );
+                const dense::Vec< double, 3 > lonLat =
+                    plates::conversions::cart2sph( dense::Vec< double, 3 >{ c( 0 ), c( 1 ), c( 2 ) } );
+                const auto hit = plates::findPlateInStage(
+                    stage_views, plates::geometry::lonLatDegToUnit( lonLat( 0 ), lonLat( 1 ) ) );
+
+                const bool averaged =
+                    hit.found && stencil_reach >= hit.distanceRad * plates::constants::earthRadiusInKm;
+
+                for ( int d = 0; d < 3; ++d )
+                {
+                    const ScalarType e = Kokkos::abs( h( sd, x, y, r, d ) - dv( sd, x, y, r, d ) );
+                    if ( averaged )
+                        avg = Kokkos::max( avg, e );
+                    else
+                        plain = Kokkos::max( plain, e );
+                    mag = Kokkos::max( mag, Kokkos::abs( h( sd, x, y, r, d ) ) );
+                }
+            },
+            Kokkos::Max< ScalarType >( max_diff_plain ),
+            Kokkos::Max< ScalarType >( max_diff_avg ),
+            Kokkos::Max< ScalarType >( max_host ) );
+        Kokkos::fence();
+
+        MPI_Allreduce( MPI_IN_PLACE, &max_diff_plain, 1, MPI_DOUBLE, MPI_MAX, domain_fine.comm() );
+        MPI_Allreduce( MPI_IN_PLACE, &max_diff_avg, 1, MPI_DOUBLE, MPI_MAX, domain_fine.comm() );
+        MPI_Allreduce( MPI_IN_PLACE, &max_host, 1, MPI_DOUBLE, MPI_MAX, domain_fine.comm() );
+        MPI_Allreduce( MPI_IN_PLACE, &needing_averaging, 1, MPI_LONG_LONG, MPI_SUM, domain_fine.comm() );
+
+        const ScalarType rel_plain = max_host > 0 ? max_diff_plain / max_host : 0;
+        const ScalarType rel_avg   = max_host > 0 ? max_diff_avg / max_host : 0;
+
+        logroot << "  points in the averaged regime       : " << needing_averaging << std::endl;
+        logroot << "  max |host - device|, unaveraged     : " << std::scientific << std::setprecision( 4 )
+                << max_diff_plain << "   (rel " << rel_plain << ")" << std::endl;
+        logroot << "  max |host - device|, averaged       : " << max_diff_avg << "   (rel " << rel_avg << ")"
+                << std::defaultfloat << std::endl;
+
+        check( rel_plain < 1e-10, "device and host velocities disagree away from plate boundaries" );
+        check( rel_avg < 1e-10, "device and host velocities disagree near plate boundaries, where both average "
+                                "over the same stencil" );
+    }
+
+    // ==========================================================================================================
     //  5. Do the two paths agree?
     // ==========================================================================================================
     // A surface node should carry a plate id exactly when the oracle gave it a velocity. Disagreement means the
     // device winding-number test and the host polygon containers classify that point differently.
     logroot << "\n=== 5. Cross-check: device ids vs host velocities ===" << std::endl;
+    timer_phase.emplace( "cross_check" );
 
     long long num_surface = 0, num_with_id = 0, num_with_velocity = 0, num_disagree = 0;
     ScalarType max_speed = 0;
@@ -292,7 +405,9 @@ int main( int argc, char** argv )
     // ==========================================================================================================
     //  6. Enforce the velocities as a Dirichlet condition on a Stokes right-hand side
     // ==========================================================================================================
+    timer_phase.reset();
     logroot << "\n=== 6. Dirichlet enforcement on the Stokes rhs ===" << std::endl;
+    timer_phase.emplace( "bc_enforcement" );
 
     using Stokes = fe::wedge::operators::shell::EpsDivDivStokes< ScalarType >;
 
@@ -372,7 +487,9 @@ int main( int argc, char** argv )
     // ==========================================================================================================
     //  7. Output
     // ==========================================================================================================
+    timer_phase.reset();
     logroot << "\n=== 7. Output ===" << std::endl;
+    timer_phase.emplace( "xdmf_output" );
 
     io::XDMFOutput xdmf( prm.outdir, domain_fine, coords_fine, radii_grid );
     xdmf.add( plate_id );
@@ -381,6 +498,11 @@ int main( int argc, char** argv )
     xdmf.write( 0 );
 
     logroot << "  wrote " << prm.outdir << std::endl;
+
+    timer_phase.reset();
+    timer_total.reset();
+
+    logroot << "\n=== Timings (s) ===\n" << util::TimerTree::instance().json() << std::endl;
 
     int failures = g_failures;
     MPI_Allreduce( MPI_IN_PLACE, &failures, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD );

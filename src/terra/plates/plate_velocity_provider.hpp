@@ -402,6 +402,16 @@ class PlateVelocityProvider
     /// no velocity; callers that care should report it rather than silently accepting the gap.
     const std::set< uint_t >& platesWithoutRotations() const { return platesWithoutRotations_; }
 
+    /// Packed data for one prepared age stage, including the device views.
+    ///
+    /// Exposed so that callers can evaluate velocities inside a Kokkos kernel instead of going through the
+    /// host-only query path; see terra/plates/plate_velocity_device.hpp. The stage must have been prepared
+    /// first with prepareEulerVectors(), which is also what fills in its per-plate Euler vectors.
+    const PlateStageData& stageFor( const double age ) const { return stages_.at( age ); }
+
+    /// Whether a stage has been prepared for this age.
+    bool hasStageFor( const double age ) const { return stages_.find( age ) != stages_.end(); }
+
     /// Access to the raw topology store, e.g. to pack the plate polygons into flat device buffers.
     PlateStorage&       plateTopologies() { return plateTopologies_; }
     const PlateStorage& plateTopologies() const { return plateTopologies_; }

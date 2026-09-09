@@ -24,6 +24,7 @@
 
 // #include "terraneo/helpers/typeAliases.hpp"
 #include "terra/dense/vec.hpp"
+#include "terra/kokkos/kokkos_wrapper.hpp"
 
 using vec3D = terra::dense::Vec< double, 3 >; 
 namespace terra{
@@ -32,25 +33,25 @@ namespace plates::conversions {
 inline constexpr double pi = 3.14159265358979323846;
 
 /// Transforms angle from degrees to radians
-inline double degToRad( double degree )
+KOKKOS_INLINE_FUNCTION double degToRad( double degree )
 {
    return ( degree * ( pi / static_cast< double >( 180 ) ) );
 }
 
 /// Transforms vector of angles componentwise from degrees to radians
-inline vec3D degToRad( vec3D degree )
+KOKKOS_INLINE_FUNCTION vec3D degToRad( vec3D degree )
 {
    return ( degree * ( pi / static_cast< double >( 180 ) ) );
 }
 
 /// Transforms angle from radians to degrees
-inline double radToDeg( double radian )
+KOKKOS_INLINE_FUNCTION double radToDeg( double radian )
 {
    return ( radian * ( static_cast< double >( 180 ) / pi ) );
 }
 
 /// Transforms vector of angles componentwise from radians to degrees
-inline vec3D radToDeg( vec3D radian )
+KOKKOS_INLINE_FUNCTION vec3D radToDeg( vec3D radian )
 {
    return ( radian * ( static_cast< double >( 180 ) / pi ) );
 }
@@ -68,12 +69,26 @@ inline vec3D sph2cart( const std::vector< double >& lonlat, const double radius 
    return xyz;
 }
 
+/// Same, from lon/lat given as scalars.
+///
+/// Device-callable counterpart of the std::vector overload above: the plate velocity kernels need this inside
+/// a Kokkos parallel region, where std::vector is not available.
+KOKKOS_INLINE_FUNCTION vec3D
+    sph2cart( const double lon, const double lat, const double radius = static_cast< double >( 1 ) )
+{
+   vec3D xyz;
+   xyz( 0 ) = radius * Kokkos::cos( degToRad( lat ) ) * Kokkos::cos( degToRad( lon ) );
+   xyz( 1 ) = radius * Kokkos::cos( degToRad( lat ) ) * Kokkos::sin( degToRad( lon ) );
+   xyz( 2 ) = radius * Kokkos::sin( degToRad( lat ) );
+   return xyz;
+}
+
 /// Transform 3D vector from cartesian (x, y, z) to spherical coordinates (lon, lat, rad)
-vec3D cart2sph( const vec3D& xyz )
+KOKKOS_INLINE_FUNCTION vec3D cart2sph( const vec3D& xyz )
 {
    vec3D lonlatrad;
-   lonlatrad(0) = radToDeg( atan2( xyz(1), xyz(0) ) );
-   lonlatrad(1) = radToDeg( atan2( xyz(2), sqrt( xyz(0) * xyz(0) + xyz(1) * xyz(1) ) ) );
+   lonlatrad(0) = radToDeg( Kokkos::atan2( xyz(1), xyz(0) ) );
+   lonlatrad(1) = radToDeg( Kokkos::atan2( xyz(2), Kokkos::sqrt( xyz(0) * xyz(0) + xyz(1) * xyz(1) ) ) );
    lonlatrad(2) = xyz.norm();
 
    return lonlatrad;
