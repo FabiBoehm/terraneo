@@ -466,7 +466,9 @@ Result<> run( const Parameters& prm )
             coords_shell[velocity_level],
             coords_radii[velocity_level],
             prm.boundary_parameters.plate_parameters.interpolate_plates_in_time,
-            plate_velocity_nondim_scale );
+            plate_velocity_nondim_scale,
+            domains[velocity_level].get(),
+            prm.boundary_parameters.plate_parameters.plates_on_device );
     }
 
     // ----- Initial Stokes solve -----
@@ -751,7 +753,9 @@ Result<> run( const Parameters& prm )
                     coords_shell[velocity_level],
                     coords_radii[velocity_level],
                     prm.boundary_parameters.plate_parameters.interpolate_plates_in_time,
-                    plate_velocity_nondim_scale );
+                    plate_velocity_nondim_scale,
+                    domains[velocity_level].get(),
+                    prm.boundary_parameters.plate_parameters.plates_on_device );
             }
         }
 

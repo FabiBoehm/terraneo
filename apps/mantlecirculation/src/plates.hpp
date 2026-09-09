@@ -6,9 +6,11 @@
 #include "grid/shell/spherical_shell.hpp"
 #include "linalg/vector_q1.hpp"
 #include "parameters.hpp"
+#include "terra/plates/plate_velocity_device.hpp"
 #include "terra/plates/plate_velocity_provider.hpp"
 #include "terra/plates/types.hpp"
 #include "util/logging.hpp"
+#include "util/timer.hpp"
 
 namespace terra::mantlecirculation {
 
@@ -47,6 +49,9 @@ struct Computeplate_velocities
     }
 };
 
+/// @param on_device evaluate the velocities in a Kokkos kernel from the packed stage views rather than by
+///                  querying the oracle per point on the host. Ignored when interpolating in time, which
+///                  blends two stages and has no device path yet.
 void extract_plate_velocities(
     ScalarType                            plate_age,
     Grid4DDataVec< ScalarType, 3 >&       plate_velocities,
@@ -54,8 +59,12 @@ void extract_plate_velocities(
     const Grid3DDataVec< ScalarType, 3 >& coords_shell,
     const Grid2DDataScalar< ScalarType >& coords_radii,
     const bool                            interpolate_in_time,
-    const ScalarType                      scale_factor )
+    const ScalarType                      scale_factor,
+    const grid::shell::DistributedDomain*  domain_for_device = nullptr,
+    const bool                             on_device         = false )
 {
+    util::Timer timer_plates( "plate_velocities" );
+
     using HostExecSpace = Kokkos::DefaultHostExecutionSpace;
 
     plates::StatisticsPlateNotFoundHandler    errorHandler;
@@ -72,6 +81,24 @@ void extract_plate_velocities(
         oracle.prepareEulerVectorsInterpolatedInTime( plate_age );
     else
         oracle.prepareEulerVectors( plate_age );
+
+    if ( on_device && !interpolate_in_time && domain_for_device != nullptr )
+    {
+        const plates::UniformCirclesPointWeightProvider weights( { { 1.0 / 100.0, 6 } }, 1e-1 );
+        const auto stencil = plates::make_device_averaging_stencil( weights );
+
+        plates::extract_plate_velocities_device< ScalarType >(
+            *domain_for_device,
+            coords_shell,
+            coords_radii,
+            oracle.stageFor( plate_age ).device(),
+            stencil,
+            plate_velocities,
+            scale_factor );
+
+        util::logroot << "Plate data extracted (device)." << std::endl;
+        return;
+    }
 
     // Mirror the needed Kokkos::Views to the host
     auto coords_host = Kokkos::create_mirror_view( coords_shell );
