@@ -148,6 +148,13 @@ class UniformCirclesPointWeightProvider final : public LocalAveragingPointWeight
 
    double maxDistance( const vec3D& ) const override { return maxDistance_; }
 
+   /// \brief The precomputed 2D offsets and their weights.
+   ///
+   /// Exposed so the stencil can be flattened into device views; see terra/plates/plate_velocity_device.hpp.
+   /// The offsets are independent of the point being averaged around -- only the local tangent frame is -- so
+   /// they can be uploaded once and reused for every point.
+   const std::vector< std::pair< vec3D, double > >& sampleOffsets2DCart() const { return sampleOffsets2DCart_; }
+
  private:
    std::vector< std::pair< vec3D, double > > sampleOffsets2DCart_;
    double                                    maxDistance_;

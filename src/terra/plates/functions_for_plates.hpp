@@ -84,7 +84,7 @@ inline std::tuple< bool, uint_t, double >
 }
 
 /// From the Euler vector compute the surface velocity in xyz
-inline vec3D eulerVectorToVelocity( const vec3D& point, const vec3D& wXYZ, const double smoothing )
+KOKKOS_INLINE_FUNCTION vec3D eulerVectorToVelocity( const vec3D& point, const vec3D& wXYZ, const double smoothing )
 {
    double earthRadius = plates::constants::earthRadiusInKm * static_cast< double >( 1e3 );
    double toms        = static_cast< double >( 3600 * 24 * 365 ); // conversions factor cm/yr -> m/s
@@ -95,7 +95,7 @@ inline vec3D eulerVectorToVelocity( const vec3D& point, const vec3D& wXYZ, const
    eVector = conversions::degToRad( wXYZ ) * static_cast< double >( 1e-6 );
 
    // Transform to the point to the xyz in a sphere of earthRadius;
-   pxyz    = conversions::sph2cart( { point(0), point(1) }, earthRadius );
+   pxyz    = conversions::sph2cart( point( 0 ), point( 1 ), earthRadius );
    vec3D v = eVector.cross( pxyz );
 
    v(0) *= smoothing / toms;
