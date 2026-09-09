@@ -96,6 +96,64 @@ inline DeviceAveragingStencil< typename Kokkos::DefaultExecutionSpace::memory_sp
     return { device, provider.maxDistance( vec3D{ 0, 0, 1 } ) };
 }
 
+/// @brief Writes the id of the plate under every node of the outermost shell.
+///
+/// Uses the same packed-stage lookup as the velocity kernel, i.e. the arc-crossing test in
+/// \ref pointInSphericalPolygon. That matters: the obvious turning-angle (winding) sum reports every point in
+/// the complement of a pole-enclosing polygon as inside, so with "first matching plate wins" the early plates
+/// swallow points belonging to later ones. Measured against boost::geometry::within on a level-5 shell at
+/// 5 Ma, a winding-sum version of this kernel used only 18 distinct plates where the correct predicate uses 40,
+/// gave several plates exactly twice their true area, and never assigned two of them at all.
+template < typename ScalarType >
+struct PlateIDInterpolator
+{
+    using DeviceSpace = Kokkos::DefaultExecutionSpace::memory_space;
+
+    grid::Grid3DDataVec< ScalarType, 3 > coords_shell;
+    grid::Grid2DDataScalar< ScalarType > coords_radii;
+    grid::Grid4DDataScalar< ScalarType > plate_id;
+    PlateStageViews< DeviceSpace >       stage;
+    int                                  surface_r;
+
+    KOKKOS_INLINE_FUNCTION
+    void operator()( const int sd, const int x, const int y, const int r ) const
+    {
+        if ( r != surface_r )
+        {
+            plate_id( sd, x, y, r ) = ScalarType( 0 );
+            return;
+        }
+
+        const auto coords = grid::shell::coords( sd, x, y, r, coords_shell, coords_radii );
+        const vec3D lonLatRad =
+            conversions::cart2sph( vec3D{ coords( 0 ), coords( 1 ), coords( 2 ) } );
+
+        const auto hit =
+            findPlateInStage( stage, geometry::lonLatDegToUnit( lonLatRad( 0 ), lonLatRad( 1 ) ) );
+
+        plate_id( sd, x, y, r ) =
+            hit.found ? static_cast< ScalarType >( stage.plateId( hit.plateIndex ) ) : ScalarType( 0 );
+    }
+};
+
+/// @brief Fills `plate_id` with the plate under each outermost-shell node, on the device.
+template < typename ScalarType >
+void extract_plate_ids_device(
+    const grid::shell::DistributedDomain&                                          domain,
+    const grid::Grid3DDataVec< ScalarType, 3 >&                                    coords_shell,
+    const grid::Grid2DDataScalar< ScalarType >&                                    coords_radii,
+    const PlateStageViews< typename Kokkos::DefaultExecutionSpace::memory_space >& stage,
+    grid::Grid4DDataScalar< ScalarType >&                                          plate_id )
+{
+    const int surface_r = domain.domain_info().subdomain_num_nodes_radially() - 1;
+
+    Kokkos::parallel_for(
+        "extract_plate_ids_device",
+        grid::shell::local_domain_md_range_policy_nodes( domain ),
+        PlateIDInterpolator< ScalarType >{ coords_shell, coords_radii, plate_id, stage, surface_r } );
+    Kokkos::fence();
+}
+
 /// @brief Evaluates the rigid-plate surface velocity at every node of the outermost shell.
 template < typename ScalarType >
 struct DevicePlateVelocityInterpolator

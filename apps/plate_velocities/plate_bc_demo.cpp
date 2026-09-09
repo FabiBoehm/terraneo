@@ -43,13 +43,12 @@
 /// point is to exercise the new boundary condition, not to re-test the existing solver.
 
 #include <cmath>
+#include <cstdio>
 #include <iomanip>
 #include <sstream>
 #include <string>
 #include <optional>
 #include <vector>
-
-#include "device_plate_lookup.hpp"
 
 #include "fe/strong_algebraic_dirichlet_enforcement.hpp"
 #include "fe/wedge/operators/shell/epsilon_divdiv_stokes.hpp"
@@ -187,18 +186,16 @@ int main( int argc, char** argv )
     {
         util::Timer timer( "device_plate_id_lookup" );
 
-        const auto& plates_for_stage = oracle->plateTopologies().getPlatesForStage( static_cast< int >( prm.age ) );
-        const auto [coords_device, data_device, n_plates] =
-            plates::build_device_plate_containers( plates_for_stage );
+        // The stage must be prepared before its packed views (and Euler vectors) exist.
+        oracle->prepareEulerVectors( prm.age );
 
-        logroot << "  " << n_plates << " plates at stage " << static_cast< int >( prm.age ) << " Ma" << std::endl;
+        const auto& stage = oracle->stageFor( prm.age );
 
-        Kokkos::parallel_for(
-            "plate_id_lookup",
-            grid::shell::local_domain_md_range_policy_nodes( domain_fine ),
-            plates::PlateIDInterpolator(
-                prm.r_max, coords_fine, radii_grid, plate_id, n_plates, coords_device, data_device ) );
-        Kokkos::fence();
+        logroot << "  " << stage.device().nPlates << " plates at stage " << static_cast< int >( prm.age )
+                << " Ma" << std::endl;
+
+        plates::extract_plate_ids_device< ScalarType >(
+            domain_fine, coords_fine, radii_grid, stage.device(), plate_id );
     }
 
     // ==========================================================================================================
@@ -498,6 +495,25 @@ int main( int argc, char** argv )
     xdmf.write( 0 );
 
     logroot << "  wrote " << prm.outdir << std::endl;
+
+    // Surface velocities from the device path, on the mesh nodes, so the field can be differenced against
+    // another implementation evaluated at exactly the same points.
+    {
+        auto v_h = create_mirror( Kokkos::HostSpace{}, plate_velocities_device.block_1().grid_data() );
+        deep_copy( v_h, plate_velocities_device.block_1().grid_data() );
+
+        const std::string csv = prm.outdir + "_surface.csv";
+        std::FILE*        out = std::fopen( csv.c_str(), "w" );
+        std::fprintf( out, "sd,x,y,vx,vy,vz\n" );
+        for ( int sd = 0; sd < num_sub; ++sd )
+            for ( int x = 0; x < n_lat; ++x )
+                for ( int y = 0; y < n_lat; ++y )
+                    std::fprintf( out, "%d,%d,%d,%.17e,%.17e,%.17e\n", sd, x, y,
+                                  v_h( sd, x, y, n_rad - 1, 0 ), v_h( sd, x, y, n_rad - 1, 1 ),
+                                  v_h( sd, x, y, n_rad - 1, 2 ) );
+        std::fclose( out );
+        logroot << "  wrote " << csv << std::endl;
+    }
 
     timer_phase.reset();
     timer_total.reset();
