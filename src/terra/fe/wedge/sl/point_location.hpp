@@ -807,6 +807,12 @@ KOKKOS_INLINE_FUNCTION dense::Vec< T, VecDim > evaluate_q1_vec(
 /// @brief Number of nodes in a full cubic interpolation stencil.
 inline constexpr int cubic_stencil_size = 4;
 
+/// @brief Number of nodes in a full quintic interpolation stencil.
+inline constexpr int quintic_stencil_size = 6;
+
+/// @brief Widest stencil any evaluator may ask for; sizes the per-thread scratch arrays.
+inline constexpr int max_stencil_size = quintic_stencil_size;
+
 /// @brief Inclusive node index range that an interpolation stencil may read from, in one direction.
 struct StencilRange
 {
@@ -863,6 +869,64 @@ KOKKOS_INLINE_FUNCTION int cubic_stencil_window( const int cell_index, const Ste
     return n;
 }
 
+/// @brief Places the widest *centred* stencil of at most `preferred` nodes around a cell.
+///
+/// \ref cubic_stencil_window slides its window inwards near a boundary, which keeps the evaluation inside the
+/// stencil's span at the price of a one-sided cubic. That trade stops paying at higher order: a one-sided
+/// quintic oscillates far more than a centred cubic costs, so above four nodes the window is never slid. The
+/// width simply steps down -- six nodes where a centred six fits, four where a centred four fits, and below
+/// that the sliding cubic/quadratic/linear ladder of \ref cubic_stencil_window, which is well behaved
+/// one-sided.
+///
+/// On the icosahedral grid the reduced-width band is structural, not a shortage of data. The lateral ranges
+/// are the owned block, because the index parametrisation kinks at the diamond seam and a stencil straddling
+/// it is inconsistent (see \ref StencilBounds); widening the ghost layer would supply values across the seam
+/// but not remove the kink. So the outer two rings of every diamond stay cubic: about 23% of the nodes at
+/// level 5, 12% at level 6, plus the outermost two radial layers.
+///
+/// @return the number of stencil nodes, `base .. base + n - 1`.
+KOKKOS_INLINE_FUNCTION int stencil_window( const int cell_index, const StencilRange& range, const int preferred,
+                                           int& base )
+{
+    for ( int n = preferred; n > cubic_stencil_size; n -= 2 )
+    {
+        const int b = cell_index - ( n / 2 - 1 );
+        if ( b >= range.lo && b + n - 1 <= range.hi )
+        {
+            base = b;
+            return n;
+        }
+    }
+    return cubic_stencil_window( cell_index, range, base );
+}
+
+/// @brief Lagrange interpolation through `n` nodes, evaluated by Neville's algorithm.
+///
+/// The unique polynomial of degree `n - 1` through the stencil, so it reproduces any polynomial of that degree
+/// in the interpolation variable exactly. Neville is used rather than barycentric weights because it needs no
+/// precomputation and handles the non-uniform radial abscissae and the uniform lateral ones with the same
+/// code; at these widths the O(n^2) recurrence is a handful of flops.
+///
+/// Unlike \ref pchip_interpolate_1d this is a single polynomial over the whole stencil rather than a Hermite
+/// piece on the bracketing interval, so as the foot point crosses a cell boundary and the window shifts the
+/// reconstruction changes: both windows pass through the shared node, so the result is continuous, but its
+/// derivative is not. That is the usual trade for semi-Lagrangian transport, where the reconstruction is
+/// consumed once per step, and boundedness comes from the caller's clip to the containing cell rather than
+/// from the interpolant.
+template < typename T >
+KOKKOS_INLINE_FUNCTION T lagrange_interpolate_1d( const T* xs, const T* fs, const int n, const T xq )
+{
+    T p[max_stencil_size];
+    for ( int i = 0; i < n; ++i )
+        p[i] = fs[i];
+
+    for ( int k = 1; k < n; ++k )
+        for ( int i = 0; i < n - k; ++i )
+            p[i] = ( ( xq - xs[i + k] ) * p[i] + ( xs[i] - xq ) * p[i + 1] ) / ( xs[i] - xs[i + k] );
+
+    return p[0];
+}
+
 /// @brief Piecewise cubic Hermite interpolation through up to four nodes, optionally PCHIP-limited.
 ///
 /// The nodal derivatives are the three-point parabolic estimates (the centred difference for equally spaced
@@ -886,15 +950,15 @@ KOKKOS_INLINE_FUNCTION T pchip_interpolate_1d( const T* xs, const T* fs, const i
     if ( n <= 1 )
         return fs[0];
 
-    T h[cubic_stencil_size - 1];
-    T d[cubic_stencil_size - 1];
+    T h[max_stencil_size - 1];
+    T d[max_stencil_size - 1];
     for ( int k = 0; k < n - 1; ++k )
     {
         h[k] = xs[k + 1] - xs[k];
         d[k] = ( fs[k + 1] - fs[k] ) / h[k];
     }
 
-    T m[cubic_stencil_size];
+    T m[max_stencil_size];
     if ( n == 2 )
     {
         m[0] = d[0];
@@ -1088,16 +1152,17 @@ KOKKOS_INLINE_FUNCTION T evaluate_cubic_scalar(
     const StencilBounds&       stencil,
     const LateralValidityType& lateral_valid,
     const bool                 clip_to_cell = true,
-    const bool                 limit_slopes = false )
+    const bool                 limit_slopes = false,
+    const int                  preferred_width = cubic_stencil_size )
 {
     if ( !cell_inside_stencil_range( cell.x, stencil.x ) || !cell_inside_stencil_range( cell.y, stencil.y ) ||
          !cell_inside_stencil_range( cell.r, stencil.r ) )
         return evaluate_q1_scalar( field, subdomain, cell, xi, eta, zeta );
 
     int       bx = 0, by = 0, br = 0;
-    const int nu = cubic_stencil_window( cell.x, stencil.x, bx );
-    const int nv = cubic_stencil_window( cell.y, stencil.y, by );
-    const int nr = cubic_stencil_window( cell.r, stencil.r, br );
+    const int nu = stencil_window( cell.x, stencil.x, preferred_width, bx );
+    const int nv = stencil_window( cell.y, stencil.y, preferred_width, by );
+    const int nr = stencil_window( cell.r, stencil.r, preferred_width, br );
 
     if ( !cubic_stencil_lateral_valid( subdomain, bx, by, nu, nv, lateral_valid ) )
         return evaluate_q1_scalar( field, subdomain, cell, xi, eta, zeta );
@@ -1106,7 +1171,7 @@ KOKKOS_INLINE_FUNCTION T evaluate_cubic_scalar(
     wedge_lateral_index_coords( cell, xi, eta, u, v );
     const T rho = wedge_radius_from_zeta( subdomain, cell, coords_radii, zeta );
     
-    T us[cubic_stencil_size], vs[cubic_stencil_size], rs[cubic_stencil_size];
+    T us[max_stencil_size], vs[max_stencil_size], rs[max_stencil_size];
     for ( int i = 0; i < nu; ++i )
         us[i] = static_cast< T >( bx + i );
     for ( int j = 0; j < nv; ++j )
@@ -1114,22 +1179,25 @@ KOKKOS_INLINE_FUNCTION T evaluate_cubic_scalar(
     for ( int k = 0; k < nr; ++k )
         rs[k] = coords_radii( subdomain, br + k );
 
-    T f_r[cubic_stencil_size];
+    T f_r[max_stencil_size];
     for ( int k = 0; k < nr; ++k )
     {
-        T f_v[cubic_stencil_size];
+        T f_v[max_stencil_size];
         for ( int j = 0; j < nv; ++j )
         {
-            T f_u[cubic_stencil_size];
+            T f_u[max_stencil_size];
             for ( int i = 0; i < nu; ++i )
                 f_u[i] = field( subdomain, bx + i, by + j, br + k );
 
-            f_v[j] = pchip_interpolate_1d( us, f_u, nu, u, limit_slopes );
+            f_v[j] = ( nu > cubic_stencil_size ) ? lagrange_interpolate_1d( us, f_u, nu, u )
+                                                : pchip_interpolate_1d( us, f_u, nu, u, limit_slopes );
         }
-        f_r[k] = pchip_interpolate_1d( vs, f_v, nv, v, limit_slopes );
+        f_r[k] = ( nv > cubic_stencil_size ) ? lagrange_interpolate_1d( vs, f_v, nv, v )
+                                             : pchip_interpolate_1d( vs, f_v, nv, v, limit_slopes );
     }
 
-    const T value = pchip_interpolate_1d( rs, f_r, nr, rho, limit_slopes );
+    const T value = ( nr > cubic_stencil_size ) ? lagrange_interpolate_1d( rs, f_r, nr, rho )
+                                                : pchip_interpolate_1d( rs, f_r, nr, rho, limit_slopes );
 
     if ( !clip_to_cell )
         return value;
@@ -1177,7 +1245,7 @@ KOKKOS_INLINE_FUNCTION dense::Vec< T, VecDim > evaluate_cubic_vec(
     wedge_lateral_index_coords( cell, xi, eta, u, v );
     const T rho = wedge_radius_from_zeta( subdomain, cell, coords_radii, zeta );
 
-    T us[cubic_stencil_size], vs[cubic_stencil_size], rs[cubic_stencil_size];
+    T us[max_stencil_size], vs[max_stencil_size], rs[max_stencil_size];
     for ( int i = 0; i < nu; ++i )
         us[i] = static_cast< T >( bx + i );
     for ( int j = 0; j < nv; ++j )
@@ -1188,13 +1256,13 @@ KOKKOS_INLINE_FUNCTION dense::Vec< T, VecDim > evaluate_cubic_vec(
     dense::Vec< T, VecDim > value;
     for ( int d = 0; d < VecDim; ++d )
     {
-        T f_r[cubic_stencil_size];
+        T f_r[max_stencil_size];
         for ( int k = 0; k < nr; ++k )
         {
-            T f_v[cubic_stencil_size];
+            T f_v[max_stencil_size];
             for ( int j = 0; j < nv; ++j )
             {
-                T f_u[cubic_stencil_size];
+                T f_u[max_stencil_size];
                 for ( int i = 0; i < nu; ++i )
                     f_u[i] = field( subdomain, bx + i, by + j, br + k, d );
 

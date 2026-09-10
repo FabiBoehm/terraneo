@@ -42,27 +42,28 @@
 /// converts a Courant number into the number of substeps that keeps every substep inside that budget.
 ///
 /// **Interpolation.** The field at the foot point is evaluated with
-/// \ref terra::fe::wedge::sl::evaluate_cubic_scalar — a tensor-product cubic reconstruction over the structured
-/// index stencil — rather than with the Q1 shape functions of the containing wedge, because multilinear
-/// evaluation is only second order and pays that error once per timestep, which is the dominant source of
-/// numerical diffusion here. The result is bounded by the Bermejo-Staniforth clip to the range of the located
-/// cell's own eight nodes (`clip_to_cell`); the per-sweep PCHIP slope limiter is deliberately *not* used, for
-/// the reason set out at \ref terra::fe::wedge::sl::evaluate_cubic_scalar — limiting one dimension at a time
-/// compounds across the three sweeps, and in a semi-Lagrangian scheme that ratchets into invented mass rather
-/// than a preserved peak. The velocity stays on \ref terra::fe::wedge::sl::evaluate_q1_vec; raising it made no
-/// measurable difference to the rotation test and costs an order of magnitude more.
+/// \ref terra::fe::wedge::sl::evaluate_cubic_scalar, which reconstructs it over the structured index stencil
+/// rather than with the Q1 shape functions of the containing wedge: multilinear evaluation is only second order
+/// and pays that error once per timestep, which is the dominant source of numerical diffusion here. The
+/// transport asks for a six-node stencil, so the reconstruction is a quintic where a centred window of that
+/// width fits and steps down to the centred cubic and then to the sliding cubic/quadratic/linear ladder where
+/// it does not -- see \ref terra::fe::wedge::sl::stencil_window, which also says why the reduced band around
+/// each diamond seam is structural. The result is bounded by the Bermejo-Staniforth clip to the located cell's
+/// own eight nodes; the per-sweep PCHIP slope limiter is deliberately not used, for the reason set out at
+/// \ref terra::fe::wedge::sl::evaluate_cubic_scalar. The velocity stays on
+/// \ref terra::fe::wedge::sl::evaluate_q1_vec, which reproduces a linear velocity field to round-off.
 ///
-/// Measured on `test_mmoc_rotation` at level 5, one full revolution of the cone, against the entropy-viscosity
-/// scheme on the same mesh: L2 relative error 0.845 for this scheme against 0.745 for EV, with a peak of 0.355
-/// of the exact 1.0 against 0.114 for EV -- so markedly less numerical diffusion, at 805 timesteps against
-/// EV's 8043 and about 10 s against EV's 5.5 min on one GH200. Two known deficiencies remain: the peak lags
-/// the exact position by a few degrees after a full revolution, and the field drifts inwards in radius (the
-/// mass-weighted centroid ends at r = 0.75 against 0.745 exact after the radial coordinate fix below, but the
-/// peak lags the exact azimuth by about 3 degrees and the cone spreads along its orbit -- 18 degrees full width
-/// at half maximum against 8.9 exact -- while its radial profile stays sharp. Both are the interpolation error:
-/// the foot-point displacement is purely tangential, so every step commits its error along the direction of
-/// travel and almost none across it. Both converge: at a fixed 1609 steps the centroid lag is 4.5 degrees at
-/// level 5 and 0.9 at level 6, so about second order in h.
+/// Measured on `test_mmoc_rotation`, one full revolution of the cone, against the entropy-viscosity scheme on
+/// the same mesh. Level 6: L2 relative error 0.090 for this scheme against 0.504 for EV, peak 0.691 of the
+/// exact 1.0 against 0.252, in 1609 timesteps against EV's 16086 and about a minute against 40 on one GH200.
+/// Level 5: 0.313 against 0.745. Dropping the stencil to four nodes gives 0.291 and 0.620 on the same two
+/// grids, so the sixth-order stencil is worth roughly a grid refinement.
+///
+/// What error remains is diffusion, not displacement. At level 6 the peak sits at 0.00 degrees of azimuth and
+/// the mass-weighted mean radius at 0.7449 against 0.7449 exact, while the cone is 31% short in amplitude and
+/// 57% too wide along its orbit (12.4 degrees full width at half maximum against 7.9). The broadening is
+/// anisotropic -- 0.5% in radius against 57% in azimuth -- because the foot-point displacement is tangential,
+/// so every step commits its interpolation error along the direction of travel and almost none across it.
 ///
 /// @warning **Do not reduce the timestep to make this scheme more accurate -- it does the opposite.** The
 ///          trajectory is already essentially exact (Q1 reproduces a linear velocity to round-off, and the RK4
@@ -174,11 +175,13 @@ class MMOCTransport
     MMOCTransport(
         const grid::shell::DistributedDomain&       domain,
         const grid::Grid4DDataScalar< grid::NodeOwnershipFlag >& ownership_mask,
-        const TimeSteppingScheme                    scheme = TimeSteppingScheme::RK4 )
+        const TimeSteppingScheme                    scheme = TimeSteppingScheme::RK4,
+        const int                                   interpolation_width = sl::quintic_stencil_size )
     : domain_( &domain )
     , ownership_mask_( ownership_mask )
     , exchange_( domain )
     , tableau_( butcher_tableau< ScalarType >( scheme ) )
+    , interp_width_( interpolation_width )
     {
         coords_g_       = sl::ghosted_unit_sphere_coords< ScalarType >( domain, exchange_ );
         radii_g_        = sl::ghosted_shell_radii< ScalarType >( domain, exchange_ );
@@ -343,6 +346,7 @@ class MMOCTransport
         const auto r_min   = r_min_;
         const auto r_max   = r_max_;
 
+        const int        interp_width = interp_width_;
         const ScalarType h        = dt / static_cast< ScalarType >( substeps );
         const ScalarType inv_M    = ScalarType( 1 ) / static_cast< ScalarType >( substeps );
         constexpr int    max_walk = 4 * sl::ghost_width + 4;
@@ -460,7 +464,7 @@ class MMOCTransport
 
                         const ScalarType value = sl::evaluate_cubic_scalar(
                             T_g, sd, ev_cell, res.xi, res.eta, ev_zeta, radii_g, stencil, lateral_valid,
-                            /*clip_to_cell=*/true );
+                            /*clip_to_cell=*/true, /*limit_slopes=*/false, interp_width );
                         T_new( sd, x, y, r ) = Kokkos::clamp( value, t_min, t_max );
                         return;
                     }
@@ -479,7 +483,8 @@ class MMOCTransport
                                                    ev_cell.r, zeta );
 
                     const ScalarType value = sl::evaluate_cubic_scalar(
-                        T_g, sd, ev_cell, xi, eta, zeta, radii_g, stencil, lateral_valid, /*clip_to_cell=*/true );
+                        T_g, sd, ev_cell, xi, eta, zeta, radii_g, stencil, lateral_valid,
+                        /*clip_to_cell=*/true, /*limit_slopes=*/false, interp_width );
                     T_new( sd, x, y, r )   = Kokkos::clamp( value, t_min, t_max );
                 }
                 esc += 1;
@@ -515,6 +520,10 @@ class MMOCTransport
     grid::Grid4DDataScalar< ScalarType > T_new_;
 
     long long last_escapes_ = 0;
+
+    /// Nodes per direction the foot-point reconstruction asks for; see sl::stencil_window for the ladder it
+    /// steps down when a centred window of this width does not fit.
+    int interp_width_ = sl::quintic_stencil_size;
 
     static constexpr int          max_escape_locations = 16;
     Kokkos::View< int* [4] >      escape_locations_{ "mmoc_escape_locations", max_escape_locations };
