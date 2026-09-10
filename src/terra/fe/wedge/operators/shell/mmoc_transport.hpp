@@ -183,6 +183,7 @@ class MMOCTransport
     , tableau_( butcher_tableau< ScalarType >( scheme ) )
     , interp_width_( interpolation_width )
     {
+        links_          = build_lateral_links( domain );
         coords_g_       = sl::ghosted_unit_sphere_coords< ScalarType >( domain, exchange_ );
         radii_g_        = sl::ghosted_shell_radii< ScalarType >( domain, exchange_ );
         lateral_valid_  = sl::ghosted_lateral_validity< ScalarType >( exchange_, coords_g_ );
@@ -292,6 +293,41 @@ class MMOCTransport
         last_escapes_ = escapes;
     }
 
+    /// @brief Builds the same-diamond, same-device lateral links; see sl::canonicalise_lateral_cell.
+    static sl::LateralSubdomainLinks build_lateral_links( const grid::shell::DistributedDomain& domain )
+    {
+        const auto& subdomains = domain.subdomains();
+
+        sl::LateralSubdomainLinks links;
+        links.owned_nodes = domain.domain_info().subdomain_num_nodes_per_side_laterally();
+        links.link        = Kokkos::View< int* [4] >( "sl_lateral_links", subdomains.size() );
+
+        auto host = Kokkos::create_mirror_view( links.link );
+        for ( size_t i = 0; i < subdomains.size(); ++i )
+            for ( int f = 0; f < 4; ++f )
+                host( i, f ) = -1;
+
+        // A neighbour qualifies only if it is in this map -- which is exactly the set resident on this rank --
+        // and in the same diamond, so that the index axes are aligned and the remap is a pure translation.
+        for ( const auto& [info, data] : subdomains )
+        {
+            const int me = static_cast< int >( std::get< 0 >( data ) );
+
+            const int dx[4] = { -1, 1, 0, 0 };
+            const int dy[4] = { 0, 0, -1, 1 };
+            for ( int f = 0; f < 4; ++f )
+            {
+                const grid::shell::SubdomainInfo probe( info.diamond_id(), info.subdomain_x() + dx[f],
+                                                        info.subdomain_y() + dy[f], info.subdomain_r() );
+                const auto it = subdomains.find( probe );
+                if ( it != subdomains.end() )
+                    host( me, f ) = static_cast< int >( std::get< 0 >( it->second ) );
+            }
+        }
+        Kokkos::deep_copy( links.link, host );
+        return links;
+    }
+
     /// @brief Indices of up to 16 nodes that escaped in the last \ref step, as (subdomain, x, y, r).
     ///
     /// Diagnostic only; the count in \ref last_escapes is authoritative.
@@ -355,6 +391,7 @@ class MMOCTransport
         const auto T_old         = T.grid_data();
         const auto lateral_valid = lateral_valid_;
         const auto escape_loc     = escape_locations_;
+        const auto links          = links_;
         const auto escape_loc_num = num_escape_locations_;
 
         Kokkos::parallel_reduce(
@@ -457,13 +494,19 @@ class MMOCTransport
                         // Sample the transported field at the departure point's *true* radius, not at the
                         // wedge's parametric one; see sl::radial_coords_from_radius for why the difference
                         // marches a radially stratified field inwards.
+                        // If the walk finished in the ghost ring, hand the cell to the subdomain that owns it,
+                        // so the reconstruction is centred rather than clamped against the seam.
+                        int           ev_sd   = sd;
                         sl::WedgeCell ev_cell = res.cell;
                         ScalarType    ev_zeta = res.zeta;
-                        sl::radial_coords_from_radius( sd, X.norm(), radii_g, n_rad_g - 1, r_min, r_max,
+                        // Twice, so that a ghost corner reaches the diagonal neighbour: x first, then y.
+                        sl::canonicalise_lateral_cell< ScalarType >( ev_sd, ev_cell, links, bounds );
+                        sl::canonicalise_lateral_cell< ScalarType >( ev_sd, ev_cell, links, bounds );
+                        sl::radial_coords_from_radius( ev_sd, X.norm(), radii_g, n_rad_g - 1, r_min, r_max,
                                                        ev_cell.r, ev_zeta );
 
                         const ScalarType value = sl::evaluate_cubic_scalar(
-                            T_g, sd, ev_cell, res.xi, res.eta, ev_zeta, radii_g, stencil, lateral_valid,
+                            T_g, ev_sd, ev_cell, res.xi, res.eta, ev_zeta, radii_g, stencil, lateral_valid,
                             /*clip_to_cell=*/true, /*limit_slopes=*/false, interp_width );
                         T_new( sd, x, y, r ) = Kokkos::clamp( value, t_min, t_max );
                         return;
@@ -524,6 +567,9 @@ class MMOCTransport
     /// Nodes per direction the foot-point reconstruction asks for; see sl::stencil_window for the ladder it
     /// steps down when a centred window of this width does not fit.
     int interp_width_ = sl::quintic_stencil_size;
+
+    /// Lateral links to same-diamond neighbours resident on this device; see sl::canonicalise_lateral_cell.
+    sl::LateralSubdomainLinks links_;
 
     static constexpr int          max_escape_locations = 16;
     Kokkos::View< int* [4] >      escape_locations_{ "mmoc_escape_locations", max_escape_locations };

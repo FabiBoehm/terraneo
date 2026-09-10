@@ -869,6 +869,86 @@ KOKKOS_INLINE_FUNCTION int cubic_stencil_window( const int cell_index, const Ste
     return n;
 }
 
+/// @brief Links from a subdomain's lateral ghost ring to the neighbour that *owns* that region.
+///
+/// Entry `(s, f)` is the local index of the subdomain across face `f` of subdomain `s`, in the order
+/// `-x, +x, -y, +y`, or -1 where there is no usable link. See \ref canonicalise_lateral_cell for which
+/// neighbours qualify.
+struct LateralSubdomainLinks
+{
+    Kokkos::View< int* [4] > link;              ///< (local subdomain, face) -> local subdomain or -1
+    int                      owned_nodes = 0;   ///< owned nodes per lateral side, i.e. num_nodes_ghosted - 2*ghost_width
+
+    KOKKOS_INLINE_FUNCTION bool valid() const { return link.extent( 0 ) > 0; }
+};
+
+/// @brief Re-expresses a located cell in the subdomain that owns it, when the walk ended in the ghost ring.
+///
+/// \ref locate_point never changes `subdomain`: it walks within one subdomain's ghosted index space, so a foot
+/// point that crossed a seam is found in the *ghost ring*, where the neighbour's values were copied before the
+/// kernel ran. That is enough to locate the point, but not to reconstruct well: the stencil is clamped to the
+/// owned block, so the evaluation there is one-sided and lower order, while for the neighbour -- for whom the
+/// same point is interior -- it would be centred. The two sides then disagree about a shared interface node,
+/// and \ref MMOCTransport::step has to pick one.
+///
+/// Where the neighbour is resident on this device *and* belongs to the same diamond, the fix is a translation:
+/// subdomains tile a diamond in a regular lateral grid with the seam nodes shared, so the index axes are
+/// aligned and only the cell index shifts, by the owned side length minus one. The reference coordinates
+/// \f$ \xi, \eta \f$ and the triangle index carry over untouched.
+///
+/// @note Three cases are deliberately **not** handled and leave the cell where it is, which reproduces the
+///       behaviour this function was added to improve rather than anything worse:
+///       - **Across a diamond seam.** The neighbour's index axes meet ours at an angle, so the remap is a
+///         rotation or reflection rather than a translation. The transform is already known to the ghost
+///         exchange -- `SubdomainNeighborhood::neighborhood_face()` yields it as `ordering` -- but it is
+///         ambiguous at the twelve pentagonal points, where five diamonds meet and there is no consistent
+///         four-neighbour continuation. Those corners are exactly the ones
+///         \ref ghosted_lateral_validity already marks invalid.
+///       - **A ghost corner at a diamond edge**, where the diagonal hop would leave the diamond on one of its
+///         two legs. A corner interior to a diamond is handled: call this twice and it hops x then y.
+///       - **A neighbour on another rank**, whose interior is not in this device's memory at all. No walk can
+///         reach it; only a wider ghost layer would.
+template < typename T >
+KOKKOS_INLINE_FUNCTION bool canonicalise_lateral_cell( int&                         subdomain,
+                                                       WedgeCell&                   cell,
+                                                       const LateralSubdomainLinks& links,
+                                                       const IndexBounds&           bounds )
+{
+    if ( !links.valid() )
+        return false;
+
+    const int shift  = links.owned_nodes - 1;
+    const int last_x = bounds.num_nodes_x - 2;
+    const int last_y = bounds.num_nodes_y - 2;
+
+    const bool low_x  = cell.x < ghost_width;
+    const bool high_x = cell.x > last_x - ghost_width;
+    const bool low_y  = cell.y < ghost_width;
+    const bool high_y = cell.y > last_y - ghost_width;
+
+    if ( !low_x && !high_x && !low_y && !high_y )
+        return false; // interior: nothing to canonicalise
+
+    // One axis per call. A ghost *corner* sits in the ring in both directions at once and needs the diagonal
+    // neighbour; calling this twice walks there in two hops, x first, provided both links exist.
+    const int face      = low_x ? 0 : ( high_x ? 1 : ( low_y ? 2 : 3 ) );
+    const int neighbour = links.link( subdomain, face );
+    if ( neighbour < 0 )
+        return false; // across a diamond seam, or not resident on this device
+
+    if ( low_x )
+        cell.x += shift;
+    else if ( high_x )
+        cell.x -= shift;
+    else if ( low_y )
+        cell.y += shift;
+    else
+        cell.y -= shift;
+
+    subdomain = neighbour;
+    return true;
+}
+
 /// @brief Places the widest *centred* stencil of at most `preferred` nodes around a cell.
 ///
 /// \ref cubic_stencil_window slides its window inwards near a boundary, which keeps the evaluation inside the

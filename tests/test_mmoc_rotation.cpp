@@ -31,6 +31,9 @@
 using namespace terra;
 using ScalarType = double;
 
+// Lateral subdomain refinement: 0 gives one subdomain per diamond, 1 gives 2x2 on the *same* mesh.
+int g_lateral_subdomain_level = 0;
+
 using grid::Grid2DDataScalar;
 using grid::Grid3DDataVec;
 using grid::Grid4DDataScalar;
@@ -243,7 +246,8 @@ void test_invariant_linear( const int level, const int num_steps, const ScalarTy
 // ---------------------------------------------------------------------------------------------------------
 void test_cone_revolution( const int level, const ScalarType cfl )
 {
-    const auto domain = DistributedDomain::create_uniform_single_subdomain_per_diamond( level, level, 0.5, 1.0 );
+    const auto domain =
+        DistributedDomain::create_uniform( level, level, 0.5, 1.0, g_lateral_subdomain_level, 0 );
 
     auto       mask   = grid::setup_node_ownership_mask_data( domain );
     const auto coords = grid::shell::subdomain_unit_sphere_single_shell_coords< ScalarType >( domain );
@@ -349,6 +353,8 @@ int main( int argc, char** argv )
     // only meaningful on the finer grids.
     if ( level >= 5 )
     {
+        if ( argc > 3 )
+            g_lateral_subdomain_level = std::atoi( argv[3] );
         test_cone_revolution( level, ( argc > 2 ) ? std::atof( argv[2] ) : 0.5 );
         // Same timestep as test_supg_rotation.cpp / test_finite_volume_rotation.cpp (dt = 0.5 * 0.1 * h), so
         // the errors can be compared directly.
