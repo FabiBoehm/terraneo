@@ -42,7 +42,7 @@ namespace terra::fe::wedge::sl
 {
 
 /// @brief Ghost layer width. Bounds the admissible per-substep Courant number of the transport.
-inline constexpr int ghost_width = 1;
+inline constexpr int ghost_width = 2;
 
 /// @brief Ghosted index of an owned node index.
 KOKKOS_INLINE_FUNCTION constexpr int to_ghosted_index( const int owned_index )
@@ -77,17 +77,19 @@ KOKKOS_INLINE_FUNCTION auto& view_element( const V& v, const int sd, const int x
         return v( sd, x, y, r );
 }
 
-/// Index of the ghost plane just outside a boundary at `position`.
-KOKKOS_INLINE_FUNCTION constexpr int ghost_plane_index( const grid::BoundaryPosition position, const int size_ghosted )
+/// Index of the ghost plane `depth` outside a boundary at `position`, for `depth` in `1 .. ghost_width`.
+KOKKOS_INLINE_FUNCTION constexpr int
+    ghost_plane_index( const grid::BoundaryPosition position, const int size_ghosted, const int depth )
 {
-    return position == grid::BoundaryPosition::P0 ? 0 : size_ghosted - 1;
+    return position == grid::BoundaryPosition::P0 ? ghost_width - depth : size_ghosted - 1 - ghost_width + depth;
 }
 
-/// Index of the owned plane at depth `ghost_width` inside a boundary at `position` -- the data a neighbour needs
-/// for its ghost plane, since the boundary plane itself is shared and already present on both sides.
-KOKKOS_INLINE_FUNCTION constexpr int depth_plane_index( const grid::BoundaryPosition position, const int size_ghosted )
+/// Index of the owned plane `depth` inside a boundary at `position` -- the data a neighbour needs for its ghost
+/// plane at the same depth, the boundary plane itself being shared and already present on both sides.
+KOKKOS_INLINE_FUNCTION constexpr int
+    depth_plane_index( const grid::BoundaryPosition position, const int size_ghosted, const int depth )
 {
-    return position == grid::BoundaryPosition::P0 ? 2 * ghost_width : size_ghosted - 1 - 2 * ghost_width;
+    return position == grid::BoundaryPosition::P0 ? ghost_width + depth : size_ghosted - 1 - ghost_width - depth;
 }
 
 KOKKOS_INLINE_FUNCTION constexpr int
@@ -114,7 +116,8 @@ void pack_face_plane(
     const int                n0,
     const int                n1,
     const int                num_lat_ghosted,
-    const int                num_rad_ghosted )
+    const int                num_rad_ghosted,
+    const int                depth )
 {
     constexpr int vec_dim = detail::view_vec_dim< FieldView >::value;
 
@@ -129,21 +132,21 @@ void pack_face_plane(
             int x = 0, y = 0, r = 0;
             if ( px != grid::BoundaryPosition::PV )
             {
-                x = detail::depth_plane_index( px, num_lat_ghosted );
+                x = detail::depth_plane_index( px, num_lat_ghosted, depth );
                 y = i;
                 r = j;
             }
             else if ( py != grid::BoundaryPosition::PV )
             {
                 x = i;
-                y = detail::depth_plane_index( py, num_lat_ghosted );
+                y = detail::depth_plane_index( py, num_lat_ghosted, depth );
                 r = j;
             }
             else
             {
                 x = i;
                 y = j;
-                r = detail::depth_plane_index( pr, num_rad_ghosted );
+                r = detail::depth_plane_index( pr, num_rad_ghosted, depth );
             }
 
             for ( int d = 0; d < vec_dim; ++d )
@@ -164,7 +167,8 @@ void unpack_ghost_plane(
     const int                     n0,
     const int                     n1,
     const int                     num_lat_ghosted,
-    const int                     num_rad_ghosted )
+    const int                     num_rad_ghosted,
+    const int                     depth )
 {
     constexpr int vec_dim = detail::view_vec_dim< FieldView >::value;
 
@@ -179,21 +183,21 @@ void unpack_ghost_plane(
             int x = 0, y = 0, r = 0;
             if ( px != grid::BoundaryPosition::PV )
             {
-                x = detail::ghost_plane_index( px, num_lat_ghosted );
+                x = detail::ghost_plane_index( px, num_lat_ghosted, depth );
                 y = detail::varying_index( i, num_lat_ghosted, d0 );
                 r = detail::varying_index( j, num_rad_ghosted, d1 );
             }
             else if ( py != grid::BoundaryPosition::PV )
             {
                 x = detail::varying_index( i, num_lat_ghosted, d0 );
-                y = detail::ghost_plane_index( py, num_lat_ghosted );
+                y = detail::ghost_plane_index( py, num_lat_ghosted, depth );
                 r = detail::varying_index( j, num_rad_ghosted, d1 );
             }
             else
             {
                 x = detail::varying_index( i, num_lat_ghosted, d0 );
                 y = detail::varying_index( j, num_lat_ghosted, d1 );
-                r = detail::ghost_plane_index( pr, num_rad_ghosted );
+                r = detail::ghost_plane_index( pr, num_rad_ghosted, depth );
             }
 
             for ( int d = 0; d < vec_dim; ++d )
@@ -307,9 +311,12 @@ class GhostExchange
     template < typename FieldView >
     void exchange( const FieldView& field ) const
     {
-        exchange_pass( field, /*radial=*/false );
-        exchange_pass( field, /*radial=*/false );
-        exchange_pass( field, /*radial=*/true );
+        for ( int d = 1; d <= ghost_width; ++d )
+            exchange_pass( field, /*radial=*/false, d );
+        for ( int d = 1; d <= ghost_width; ++d )
+            exchange_pass( field, /*radial=*/false, d );
+        for ( int d = 1; d <= ghost_width; ++d )
+            exchange_pass( field, /*radial=*/true, d );
     }
 
     /// @brief Runs only the lateral part of the exchange.
@@ -319,8 +326,10 @@ class GhostExchange
     template < typename FieldView >
     void exchange_lateral( const FieldView& field ) const
     {
-        exchange_pass( field, /*radial=*/false );
-        exchange_pass( field, /*radial=*/false );
+        for ( int d = 1; d <= ghost_width; ++d )
+            exchange_pass( field, /*radial=*/false, d );
+        for ( int d = 1; d <= ghost_width; ++d )
+            exchange_pass( field, /*radial=*/false, d );
     }
 
     /// @brief Convenience: interior copy followed by the ghost exchange.
@@ -427,7 +436,7 @@ class GhostExchange
 
     /// One exchange pass over either the lateral or the radial faces.
     template < typename FieldView >
-    void exchange_pass( const FieldView& field, const bool radial ) const
+    void exchange_pass( const FieldView& field, const bool radial, const int depth ) const
     {
         using ScalarType      = typename FieldView::value_type;
         constexpr int vec_dim = detail::view_vec_dim< FieldView >::value;
@@ -455,7 +464,7 @@ class GhostExchange
             recv_buffers[i] = Kokkos::View< ScalarType* >( Kokkos::view_alloc( "sl_ghost_recv", Kokkos::WithoutInitializing ), n );
 
             pack_face_plane( field, link.my_sd, link.my_face, send_buffers[i], link.buf_n0,
-                             link.buf_n1, num_lat_ghost_, num_rad_ghost_ );
+                             link.buf_n1, num_lat_ghost_, num_rad_ghost_, depth );
         }
         Kokkos::fence();
 
@@ -474,7 +483,7 @@ class GhostExchange
             {
                 // Same rank: pack the neighbour's depth plane directly into our receive buffer.
                 pack_face_plane( field, link.nb_local_sd, link.nb_face, recv_buffers[i], link.buf_n0,
-                                 link.buf_n1, num_lat_ghost_, num_rad_ghost_ );
+                                 link.buf_n1, num_lat_ghost_, num_rad_ghost_, depth );
                 continue;
             }
 
@@ -506,7 +515,7 @@ class GhostExchange
             if ( link.nb_local_sd < 0 )
                 Kokkos::deep_copy( recv_buffers[i], host_recv[i] );
             unpack_ghost_plane( field, link.my_sd, link.my_face, link.d0, link.d1, recv_buffers[i],
-                                link.buf_n0, link.buf_n1, num_lat_ghost_, num_rad_ghost_ );
+                                link.buf_n0, link.buf_n1, num_lat_ghost_, num_rad_ghost_, depth );
         }
         Kokkos::fence();
     }

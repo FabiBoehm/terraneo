@@ -877,7 +877,8 @@ KOKKOS_INLINE_FUNCTION int cubic_stencil_window( const int cell_index, const Ste
 struct LateralSubdomainLinks
 {
     Kokkos::View< int* [4] > link;              ///< (local subdomain, face) -> local subdomain or -1
-    int                      owned_nodes = 0;   ///< owned nodes per lateral side, i.e. num_nodes_ghosted - 2*ghost_width
+    int                      owned_nodes = 0;   ///< owned nodes per lateral side, i.e. num_nodes_ghosted - 2*ghost
+    int                      ghost       = 1;   ///< ghost layer width the exchange fills
 
     KOKKOS_INLINE_FUNCTION bool valid() const { return link.extent( 0 ) > 0; }
 };
@@ -921,10 +922,10 @@ KOKKOS_INLINE_FUNCTION bool canonicalise_lateral_cell( int&                     
     const int last_x = bounds.num_nodes_x - 2;
     const int last_y = bounds.num_nodes_y - 2;
 
-    const bool low_x  = cell.x < ghost_width;
-    const bool high_x = cell.x > last_x - ghost_width;
-    const bool low_y  = cell.y < ghost_width;
-    const bool high_y = cell.y > last_y - ghost_width;
+    const bool low_x  = cell.x < links.ghost;
+    const bool high_x = cell.x > last_x - links.ghost;
+    const bool low_y  = cell.y < links.ghost;
+    const bool high_y = cell.y > last_y - links.ghost;
 
     if ( !low_x && !high_x && !low_y && !high_y )
         return false; // interior: nothing to canonicalise
@@ -978,6 +979,32 @@ KOKKOS_INLINE_FUNCTION int stencil_window( const int cell_index, const StencilRa
         }
     }
     return cubic_stencil_window( cell_index, range, base );
+}
+
+/// @brief Widens lateral stencil bounds into the ghost ring wherever the neighbour is a same-diamond link.
+///
+/// The lateral bounds are the owned block because the index parametrisation kinks at a *diamond* seam. An
+/// internal seam between two subdomains of the same diamond has no such kink -- it is an artefact of the
+/// decomposition -- so a stencil may cross it, and with the ghost layer filled the nodes are there to read.
+/// Without this the reduced-order band scales with the number of subdomains rather than with the geometry,
+/// which is what made the result depend on how the mesh was partitioned.
+KOKKOS_INLINE_FUNCTION StencilBounds widen_across_internal_seams( StencilBounds                bounds,
+                                                                  const int                    subdomain,
+                                                                  const LateralSubdomainLinks& links )
+{
+    if ( !links.valid() )
+        return bounds;
+
+    if ( links.link( subdomain, 0 ) >= 0 )
+        bounds.x.lo -= links.ghost;
+    if ( links.link( subdomain, 1 ) >= 0 )
+        bounds.x.hi += links.ghost;
+    if ( links.link( subdomain, 2 ) >= 0 )
+        bounds.y.lo -= links.ghost;
+    if ( links.link( subdomain, 3 ) >= 0 )
+        bounds.y.hi += links.ghost;
+
+    return bounds;
 }
 
 /// @brief Lagrange interpolation through `n` nodes, evaluated by Neville's algorithm.

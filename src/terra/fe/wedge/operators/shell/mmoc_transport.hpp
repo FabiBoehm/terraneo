@@ -338,6 +338,7 @@ class MMOCTransport
 
         sl::LateralSubdomainLinks links;
         links.owned_nodes = domain.domain_info().subdomain_num_nodes_per_side_laterally();
+        links.ghost       = sl::ghost_width;
         links.link        = Kokkos::View< int* [4] >( "sl_lateral_links", subdomains.size() );
 
         auto host = Kokkos::create_mirror_view( links.link );
@@ -540,11 +541,12 @@ class MMOCTransport
                         // Twice, so that a ghost corner reaches the diagonal neighbour: x first, then y.
                         sl::canonicalise_lateral_cell< ScalarType >( ev_sd, ev_cell, links, bounds );
                         sl::canonicalise_lateral_cell< ScalarType >( ev_sd, ev_cell, links, bounds );
+                        const auto ev_stencil = sl::widen_across_internal_seams( stencil, ev_sd, links );
                         sl::radial_coords_from_radius( ev_sd, X.norm(), radii_g, n_rad_g - 1, r_min, r_max,
                                                        ev_cell.r, ev_zeta );
 
                         const ScalarType value = sl::evaluate_cubic_scalar(
-                            T_g, ev_sd, ev_cell, res.xi, res.eta, ev_zeta, radii_g, stencil, lateral_valid,
+                            T_g, ev_sd, ev_cell, res.xi, res.eta, ev_zeta, radii_g, ev_stencil, lateral_valid,
                             /*clip_to_cell=*/true, /*limit_slopes=*/false, interp_width );
                         T_new( sd, x, y, r ) = Kokkos::clamp( value, t_min, t_max );
                         return;
