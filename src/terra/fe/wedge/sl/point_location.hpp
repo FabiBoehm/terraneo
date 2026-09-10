@@ -1155,8 +1155,10 @@ KOKKOS_INLINE_FUNCTION T evaluate_cubic_scalar(
     const bool                 limit_slopes = false,
     const int                  preferred_width = cubic_stencil_size )
 {
-    if ( !cell_inside_stencil_range( cell.x, stencil.x ) || !cell_inside_stencil_range( cell.y, stencil.y ) ||
-         !cell_inside_stencil_range( cell.r, stencil.r ) )
+    // A width of two asks for the Q1 wedge evaluation itself, which is what the stencil ladder bottoms out at
+    // anyway. Having it selectable makes the interpolation order a runtime choice for the whole ladder.
+    if ( preferred_width <= 2 || !cell_inside_stencil_range( cell.x, stencil.x ) ||
+         !cell_inside_stencil_range( cell.y, stencil.y ) || !cell_inside_stencil_range( cell.r, stencil.r ) )
         return evaluate_q1_scalar( field, subdomain, cell, xi, eta, zeta );
 
     int       bx = 0, by = 0, br = 0;
