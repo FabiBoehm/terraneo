@@ -199,6 +199,53 @@ int main( int argc, char** argv )
     }
 
     // ==========================================================================================================
+    //  3b. The same plate ids on the host
+    // ==========================================================================================================
+    // One lookup per surface node, the same shape as the device pass above and as the Boost reference build,
+    // so that the three plate-id timings compare like for like.
+    logroot << "\n=== 3b. Plate id lookup (host) ===" << std::endl;
+
+    Grid4DDataScalar< ScalarType > plate_id_host( "plate_id_host", num_sub, n_lat, n_lat, n_rad );
+
+    {
+        auto coords_h = Kokkos::create_mirror_view( coords_fine );
+        Kokkos::deep_copy( coords_h, coords_fine );
+        auto radii_h = Kokkos::create_mirror_view( radii_grid );
+        Kokkos::deep_copy( radii_h, radii_grid );
+        auto pid_h = Kokkos::create_mirror_view( plate_id_host );
+        Kokkos::deep_copy( pid_h, ScalarType( 0 ) );
+
+        {
+            util::Timer timer( "host_plate_id_lookup" );
+
+            for ( int sd = 0; sd < num_sub; ++sd )
+                for ( int x = 0; x < n_lat; ++x )
+                    for ( int y = 0; y < n_lat; ++y )
+                    {
+                        const auto c = grid::shell::coords( sd, x, y, n_rad - 1, coords_h, radii_h );
+                        pid_h( sd, x, y, n_rad - 1 ) = static_cast< ScalarType >( oracle->findPlateID(
+                            dense::Vec< double, 3 >{ c( 0 ), c( 1 ), c( 2 ) }, prm.age ) );
+                    }
+        }
+
+        Kokkos::deep_copy( plate_id_host, pid_h );
+
+        auto pid_dev_h = Kokkos::create_mirror_view( plate_id );
+        Kokkos::deep_copy( pid_dev_h, plate_id );
+
+        long long id_mismatches = 0;
+        for ( int sd = 0; sd < num_sub; ++sd )
+            for ( int x = 0; x < n_lat; ++x )
+                for ( int y = 0; y < n_lat; ++y )
+                    if ( pid_h( sd, x, y, n_rad - 1 ) != pid_dev_h( sd, x, y, n_rad - 1 ) )
+                        ++id_mismatches;
+
+        logroot << "  host vs device plate ids: " << id_mismatches << " of "
+                << ( static_cast< long long >( num_sub ) * n_lat * n_lat ) << " surface nodes differ"
+                << std::endl;
+    }
+
+    // ==========================================================================================================
     //  4. Plate velocities on the host, through the production path
     // ==========================================================================================================
     logroot << "\n=== 4. Plate velocity extraction (host) ===" << std::endl;
