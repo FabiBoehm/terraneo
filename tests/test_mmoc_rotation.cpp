@@ -349,7 +349,7 @@ int main( int argc, char** argv )
     // only meaningful on the finer grids.
     if ( level >= 5 )
     {
-        test_cone_revolution( level, 0.5 );
+        test_cone_revolution( level, ( argc > 2 ) ? std::atof( argv[2] ) : 0.5 );
         // Same timestep as test_supg_rotation.cpp / test_finite_volume_rotation.cpp (dt = 0.5 * 0.1 * h), so
         // the errors can be compared directly.
         // test_cone_revolution( level, 0.05 );

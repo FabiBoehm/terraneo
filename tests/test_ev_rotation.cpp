@@ -355,5 +355,8 @@ int test( const int level )
 int main( int argc, char** argv )
 {
     util::terra_initialize( &argc, &argv );
-    return test( 7 );
+    int level = 7;
+    if ( argc > 1 )
+        level = std::atoi( argv[1] );
+    return test( level );
 }

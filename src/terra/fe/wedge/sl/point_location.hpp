@@ -14,7 +14,7 @@
 ///
 /// Two evaluators are offered once a point has been located: \ref evaluate_q1_scalar / \ref evaluate_q1_vec use
 /// the Q1 wedge shape functions of the containing cell and are second order, and \ref evaluate_cubic_scalar /
-/// \ref evaluate_cubic_vec reconstruct the field with a tensor product of monotone (PCHIP-limited) cubics over
+/// \ref evaluate_cubic_vec reconstruct the field with a tensor product of Hermite cubics over
 /// the structured index stencil around the cell, which is third order. A semi-Lagrangian scheme commits its
 /// interpolation error afresh at every timestep, where it shows up as numerical diffusion, so the cubic is what
 /// the transport uses.
@@ -457,6 +457,54 @@ KOKKOS_INLINE_FUNCTION LocateResult< T > locate_point(
     result.found = true;
 
     return result;
+}
+
+/// @brief Radial cell and reference coordinate of a point at *true* radius `radius`.
+///
+/// \ref locate_point reports its radial coordinate as \f$ \rho = \sum_k \mu_k \f$, the radius of the point in
+/// the wedge's own parametrisation. That is the exact inverse of the geometric map, but it is not the point's
+/// physical radius: the map sends \f$ (\xi, \eta) \f$ onto the *chord* triangle spanned by three unit nodes, so
+/// \f$ |x| = \rho \, c \f$ with \f$ c = |\sum_k \lambda_k p_k| \le 1 \f$, and \f$ \rho \ge |x| \f$ with equality
+/// only at a node.
+///
+/// The nodal values a semi-Lagrangian step interpolates between sit on true spheres, so evaluating the radial
+/// direction at \f$ \rho \f$ samples the field *outside* the point. The bias is one-signed, and a scheme that
+/// commits it once per timestep marches a radially stratified field inwards: on the level-5 rotation test,
+/// where a rigid rotation preserves every radius exactly, \f$ \langle 1/c - 1 \rangle = 1.6 \times 10^{-4} \f$
+/// over the cell interiors, and the cone's mass-weighted mean radius fell from 0.745 to 0.675 over one
+/// revolution -- with Q1 evaluation and with the cubic alike, since both take their radial coordinate from
+/// \ref locate_point. Re-deriving the radial cell and \f$ \zeta \f$ from \f$ |x| \f$ removes it.
+///
+/// The velocity is deliberately left on the parametric coordinate: the wedge map is linear in \f$ x \f$, so Q1
+/// reproduces a linear velocity field there to round-off, and the trajectory is what that accuracy buys.
+template < typename T, typename CoordsRadiiType >
+KOKKOS_INLINE_FUNCTION void radial_coords_from_radius(
+    const int              subdomain,
+    const T                radius,
+    const CoordsRadiiType& coords_radii,
+    const int              num_cells_r,
+    const T                r_min,
+    const T                r_max,
+    int&                   cell_r,
+    T&                     zeta )
+{
+    const T r = Kokkos::clamp( radius, r_min, r_max );
+
+    int lo = 0;
+    int hi = num_cells_r - 1;
+    while ( lo < hi )
+    {
+        const int mid = ( lo + hi + 1 ) / 2;
+        if ( coords_radii( subdomain, mid ) <= r )
+            lo = mid;
+        else
+            hi = mid - 1;
+    }
+    cell_r = lo;
+
+    const T r1 = coords_radii( subdomain, cell_r );
+    const T r2 = coords_radii( subdomain, cell_r + 1 );
+    zeta       = T( 2 ) * ( r - r1 ) / ( r2 - r1 ) - T( 1 );
 }
 
 /// @brief Lateral index rectangle whose four corner nodes span the spherical quad used by the O(1) predictor.
@@ -1006,25 +1054,28 @@ KOKKOS_INLINE_FUNCTION void cell_value_range(
 /// the evaluation falls back to \ref evaluate_q1_scalar on the located wedge, whose three lateral nodes the
 /// point location has already vetted. That affects at most the four hex cells at each corner of a subdomain.
 ///
-/// **The local bound.** With `monotone` set the result cannot leave the range of the eight nodes of the cell
-/// that contains the point — the property Q1 has for free (it is a convex combination of those nodal values),
-/// and the one a semi-Lagrangian step needs: a value outside that range is a new extremum the transport then
-/// has to carry, and an undershoot below the global minimum is clipped away by the caller's range clip, which
-/// *adds* mass and over hundreds of steps ratchets into a spurious halo around every sharp feature.
+/// **Bounding the result.** `clip_to_cell` clips the reconstruction into the range of the eight nodes of the
+/// cell that contains the point — the property Q1 has for free, since it is a convex combination of exactly
+/// those values, and the one a semi-Lagrangian step needs: a value outside that range is a new extremum the
+/// transport then has to carry. This is the Bermejo-Staniforth filter, and it is what the transport relies on.
+/// It matters most for a foot point that has drifted out of its cell: \ref locate_point reports
+/// \f$ \xi, \eta, \zeta \f$ straight from the closed-form inverse and does not clamp them onto the reference
+/// wedge, so a departure point can arrive here sitting in a neighbouring cell of the same stencil, where the
+/// tensor-product sweeps are bounded by *that* cell's nodes instead.
 ///
-/// For a foot point that lies **inside** its cell the sweeps already deliver this, and the clip below is a
-/// no-op: the query then lands in the cell's own bracketing interval in each direction — \f$ u \in [x, x+1] \f$,
-/// \f$ v \in [y, y+1] \f$, and \f$ \rho \f$ between the cell's two shell radii — and on that interval the
-/// Fritsch–Carlson limiter of \ref pchip_interpolate_1d holds the Hermite cubic between the interval's two
-/// endpoint values, a bound that composes across the three sweeps.
+/// `limit_slopes` additionally PCHIP-limits the nodal derivatives inside each one-dimensional sweep. **Leave it
+/// off.** It is off by default because applying it here does not give a monotone three-dimensional
+/// reconstruction: the second and third sweeps limit values produced by the first, not nodal data, so the
+/// flattening each sweep applies at an extremum compounds across the three. In a semi-Lagrangian scheme that
+/// error is committed afresh every step and ratchets. Measured on `test_mmoc_rotation` at level 5, one full
+/// revolution of the cone, with the limiter on: the peak is held at 0.644 of the exact 1.0, but the field
+/// spreads into a plateau — 185 nodes sit above 90% of the peak where the exact field has 1 — and the total
+/// mass grows monotonically to 3.0x its initial value, which is what drives an L2 error of 1.79. With the
+/// limiter off and only `clip_to_cell` in force the peak is lower at 0.355, but the plateau is gone (37 nodes
+/// above 90% of the peak), mass ends within 12% of exact, and the L2 error falls to 0.845 -- better than the
+/// 0.896 of the Q1 evaluation this replaces, and inside the test's tolerance where 1.79 was not. The high peak
+/// the limiter appears to buy is mass it invented, not a peak it preserved.
 ///
-/// What the clip is actually for is a foot point that has **drifted out** of its cell. \ref locate_point
-/// reports \f$ \xi, \eta, \zeta \f$ straight from the closed-form inverse and does not clamp them onto the
-/// reference wedge, so a departure point can arrive here sitting in a neighbouring cell of the same stencil.
-/// Each sweep is then bounded by *that* interval's nodes instead, and the value can leave the range of the
-/// data the located cell holds. The result is therefore clipped into the range of the cell's own eight nodes
-/// (\ref cell_value_range), the classical Bermejo–Staniforth filter, which restores the bound in that case
-/// too. Without `monotone` neither half applies and the reconstruction does overshoot.
 template < typename T, typename FieldViewType, typename CoordsRadiiType, typename LateralValidityType >
 KOKKOS_INLINE_FUNCTION T evaluate_cubic_scalar(
     const FieldViewType&       field,
@@ -1036,7 +1087,8 @@ KOKKOS_INLINE_FUNCTION T evaluate_cubic_scalar(
     const CoordsRadiiType&     coords_radii,
     const StencilBounds&       stencil,
     const LateralValidityType& lateral_valid,
-    const bool                 monotone = true )
+    const bool                 clip_to_cell = true,
+    const bool                 limit_slopes = false )
 {
     if ( !cell_inside_stencil_range( cell.x, stencil.x ) || !cell_inside_stencil_range( cell.y, stencil.y ) ||
          !cell_inside_stencil_range( cell.r, stencil.r ) )
@@ -1072,14 +1124,14 @@ KOKKOS_INLINE_FUNCTION T evaluate_cubic_scalar(
             for ( int i = 0; i < nu; ++i )
                 f_u[i] = field( subdomain, bx + i, by + j, br + k );
 
-            f_v[j] = pchip_interpolate_1d( us, f_u, nu, u, monotone );
+            f_v[j] = pchip_interpolate_1d( us, f_u, nu, u, limit_slopes );
         }
-        f_r[k] = pchip_interpolate_1d( vs, f_v, nv, v, monotone );
+        f_r[k] = pchip_interpolate_1d( vs, f_v, nv, v, limit_slopes );
     }
 
-    const T value = pchip_interpolate_1d( rs, f_r, nr, rho, monotone );
+    const T value = pchip_interpolate_1d( rs, f_r, nr, rho, limit_slopes );
 
-    if ( !monotone )
+    if ( !clip_to_cell )
         return value;
 
     T lo = T( 0 ), hi = T( 0 );

@@ -11,6 +11,7 @@
 #include "grid/shell/spherical_shell.hpp"
 #include "kokkos/kokkos_wrapper.hpp"
 #include "linalg/vector_q1.hpp"
+#include "mpi/mpi.hpp"
 #include "util/timer.hpp"
 
 /// @file
@@ -41,25 +42,36 @@
 /// converts a Courant number into the number of substeps that keeps every substep inside that budget.
 ///
 /// **Interpolation.** The field at the foot point is evaluated with
-/// \ref terra::fe::wedge::sl::evaluate_cubic_scalar — a monotone cubic reconstruction over the structured
+/// \ref terra::fe::wedge::sl::evaluate_cubic_scalar — a tensor-product cubic reconstruction over the structured
 /// index stencil — rather than with the Q1 shape functions of the containing wedge, because multilinear
 /// evaluation is only second order and pays that error once per timestep, which is the dominant source of
-/// numerical diffusion here. The velocity stays on \ref terra::fe::wedge::sl::evaluate_q1_vec; raising it made
-/// no measurable difference to the rotation test and costs an order of magnitude more.
+/// numerical diffusion here. The result is bounded by the Bermejo-Staniforth clip to the range of the located
+/// cell's own eight nodes (`clip_to_cell`); the per-sweep PCHIP slope limiter is deliberately *not* used, for
+/// the reason set out at \ref terra::fe::wedge::sl::evaluate_cubic_scalar — limiting one dimension at a time
+/// compounds across the three sweeps, and in a semi-Lagrangian scheme that ratchets into invented mass rather
+/// than a preserved peak. The velocity stays on \ref terra::fe::wedge::sl::evaluate_q1_vec; raising it made no
+/// measurable difference to the rotation test and costs an order of magnitude more.
 ///
-/// @warning This trade is **not yet settled**, and the choice of evaluator is deliberately left visible in
-///          \ref trace so it can be flipped back. Measured on `test_mmoc_rotation` at level 5, one full
-///          revolution of the cone: the cubic retains far more of the peak (0.64 versus 0.13 of the exact 1.0,
-///          i.e. much less numerical diffusion, which is what it was introduced for) but its L2 error against
-///          the exact solution is worse (1.79 versus 0.90). The reason shows up in the linear-field test: a
-///          field \f$ a + b z \f$ is reproduced by the Q1 wedge evaluation to round-off — the Q1 map *is* the
-///          geometric map, so it is exact for anything linear in \f$ x \f$ — whereas the cubic converges on it
-///          at only about order 1.4 (3.6e-2, 1.4e-2, 5.2e-3 at levels 3, 4, 5). A tensor-product stencil in
-///          index space presumes the field is a smooth function of the indices, and on this grid it is not
-///          smooth enough: the map kinks where a stencil crosses into a neighbouring diamond (confining the
-///          stencil to the owned block, as it now is, already recovered a factor of ten) and the recursive
-///          bisection places nodes off any smooth parametrisation at \f$ \mathcal{O}(h^2) \f$. Neither
-///          limiter is implicated — both the PCHIP sweep and the local range clip are inactive in these runs.
+/// Measured on `test_mmoc_rotation` at level 5, one full revolution of the cone, against the entropy-viscosity
+/// scheme on the same mesh: L2 relative error 0.845 for this scheme against 0.745 for EV, with a peak of 0.355
+/// of the exact 1.0 against 0.114 for EV -- so markedly less numerical diffusion, at 805 timesteps against
+/// EV's 8043 and about 10 s against EV's 5.5 min on one GH200. Two known deficiencies remain: the peak lags
+/// the exact position by a few degrees after a full revolution, and the field drifts inwards in radius (the
+/// mass-weighted centroid ends at r = 0.75 against 0.745 exact after the radial coordinate fix below, but the
+/// peak lags the exact azimuth by about 3 degrees and the cone spreads along its orbit -- 18 degrees full width
+/// at half maximum against 8.9 exact -- while its radial profile stays sharp. Both are the interpolation error:
+/// the foot-point displacement is purely tangential, so every step commits its error along the direction of
+/// travel and almost none across it. Both converge: at a fixed 1609 steps the centroid lag is 4.5 degrees at
+/// level 5 and 0.9 at level 6, so about second order in h.
+///
+/// @warning **Do not reduce the timestep to make this scheme more accurate -- it does the opposite.** The
+///          trajectory is already essentially exact (Q1 reproduces a linear velocity to round-off, and the RK4
+///          error is ~1e-13 per step and cannot accumulate, since X is reset to the node every step), so there
+///          is no temporal error left to reduce and each extra step only commits another interpolation error.
+///          Measured at level 5, one revolution: L2 0.620 at Courant 0.5, 0.741 at 0.25, 0.809 at 0.125, with
+///          the lag growing from 3 to 5.6 degrees. Run at the largest Courant number the ghost layer allows --
+///          see \ref max_courant -- and refine in space, not in time.
+///
 ///          Recovering the order properly needs a reconstruction that is exact for polynomials in the physical
 ///          coordinates, e.g. a least-squares fit over the stencil in a local tangent frame with the
 ///          coefficients precomputed per cell.
@@ -252,8 +264,9 @@ class MMOCTransport
                 Kokkos::Max< ScalarType >( t_max ) );
             Kokkos::fence();
 
-            MPI_Allreduce( MPI_IN_PLACE, &t_min, 1, MPI_DOUBLE, MPI_MIN, domain_->comm() );
-            MPI_Allreduce( MPI_IN_PLACE, &t_max, 1, MPI_DOUBLE, MPI_MAX, domain_->comm() );
+            const MPI_Datatype mpi_scalar = terra::mpi::mpi_datatype< ScalarType >();
+            MPI_Allreduce( MPI_IN_PLACE, &t_min, 1, mpi_scalar, MPI_MIN, domain_->comm() );
+            MPI_Allreduce( MPI_IN_PLACE, &t_max, 1, mpi_scalar, MPI_MAX, domain_->comm() );
         }
         else
         {
@@ -404,9 +417,10 @@ class MMOCTransport
                         }
                         cell = res.cell;
 
-                        // The velocity is smooth by construction, so it is interpolated with the unlimited
-                        // cubic: an error here displaces the foot point and enters T just as directly as an
-                        // error in T itself, and a limiter could only cost accuracy.
+                        // Q1 for the velocity. An error here displaces the foot point and enters T just as
+                        // directly as an error in T itself, but the cubic reconstruction buys nothing on this
+                        // grid: a Stokes velocity is smooth, and in the rotation test the two are
+                        // indistinguishable while Q1 is an order of magnitude cheaper.
                         const auto u_new_s =
                             sl::evaluate_q1_vec< ScalarType, 3 >( u_g, sd, res.cell, res.xi, res.eta, res.zeta );
                         const auto u_old_s = sl::evaluate_q1_vec< ScalarType, 3 >(
@@ -436,9 +450,17 @@ class MMOCTransport
 
                     if ( res.found )
                     {
+                        // Sample the transported field at the departure point's *true* radius, not at the
+                        // wedge's parametric one; see sl::radial_coords_from_radius for why the difference
+                        // marches a radially stratified field inwards.
+                        sl::WedgeCell ev_cell = res.cell;
+                        ScalarType    ev_zeta = res.zeta;
+                        sl::radial_coords_from_radius( sd, X.norm(), radii_g, n_rad_g - 1, r_min, r_max,
+                                                       ev_cell.r, ev_zeta );
+
                         const ScalarType value = sl::evaluate_cubic_scalar(
-                            T_g, sd, res.cell, res.xi, res.eta, res.zeta, radii_g, stencil, lateral_valid,
-                            /*monotone=*/true );
+                            T_g, sd, ev_cell, res.xi, res.eta, ev_zeta, radii_g, stencil, lateral_valid,
+                            /*clip_to_cell=*/true );
                         T_new( sd, x, y, r ) = Kokkos::clamp( value, t_min, t_max );
                         return;
                     }
@@ -451,8 +473,13 @@ class MMOCTransport
                 {
                     ScalarType xi = 0, eta = 0, zeta = 0;
                     sl::clamp_to_wedge( X, sd, cell, lateral, radii_g, xi, eta, zeta );
+
+                    sl::WedgeCell ev_cell = cell;
+                    sl::radial_coords_from_radius( sd, X.norm(), radii_g, n_rad_g - 1, r_min, r_max,
+                                                   ev_cell.r, zeta );
+
                     const ScalarType value = sl::evaluate_cubic_scalar(
-                        T_g, sd, cell, xi, eta, zeta, radii_g, stencil, lateral_valid, /*monotone=*/true );
+                        T_g, sd, ev_cell, xi, eta, zeta, radii_g, stencil, lateral_valid, /*clip_to_cell=*/true );
                     T_new( sd, x, y, r )   = Kokkos::clamp( value, t_min, t_max );
                 }
                 esc += 1;
