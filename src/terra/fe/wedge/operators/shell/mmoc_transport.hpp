@@ -339,12 +339,19 @@ class MMOCTransport
         sl::LateralSubdomainLinks links;
         links.owned_nodes = domain.domain_info().subdomain_num_nodes_per_side_laterally();
         links.ghost       = sl::ghost_width;
-        links.link        = Kokkos::View< int* [4] >( "sl_lateral_links", subdomains.size() );
+        links.link         = Kokkos::View< int* [4] >( "sl_lateral_links", subdomains.size() );
+        links.same_diamond = Kokkos::View< int* [4] >( "sl_same_diamond", subdomains.size() );
 
         auto host = Kokkos::create_mirror_view( links.link );
+        auto host_sd = Kokkos::create_mirror_view( links.same_diamond );
         for ( size_t i = 0; i < subdomains.size(); ++i )
             for ( int f = 0; f < 4; ++f )
-                host( i, f ) = -1;
+            {
+                host( i, f )    = -1;
+                host_sd( i, f ) = 0;
+            }
+
+        const int per_side = domain.domain_info().num_subdomains_per_diamond_side();
 
         // A neighbour qualifies only if it is in this map -- which is exactly the set resident on this rank --
         // and in the same diamond, so that the index axes are aligned and the remap is a pure translation.
@@ -358,12 +365,19 @@ class MMOCTransport
             {
                 const grid::shell::SubdomainInfo probe( info.diamond_id(), info.subdomain_x() + dx[f],
                                                         info.subdomain_y() + dy[f], info.subdomain_r() );
+                // Whether a same-diamond neighbour *exists* is a property of the decomposition, not of who
+                // owns it: the ghost exchange fills the ring across ranks just the same.
+                const bool in_diamond = probe.subdomain_x() >= 0 && probe.subdomain_x() < per_side &&
+                                        probe.subdomain_y() >= 0 && probe.subdomain_y() < per_side;
+                host_sd( me, f ) = in_diamond ? 1 : 0;
+
                 const auto it = subdomains.find( probe );
-                if ( it != subdomains.end() )
+                if ( in_diamond && it != subdomains.end() )
                     host( me, f ) = static_cast< int >( std::get< 0 >( it->second ) );
             }
         }
         Kokkos::deep_copy( links.link, host );
+        Kokkos::deep_copy( links.same_diamond, host_sd );
         return links;
     }
 

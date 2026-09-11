@@ -31,8 +31,10 @@
 using namespace terra;
 using ScalarType = double;
 
-// Lateral subdomain refinement: 0 gives one subdomain per diamond, 1 gives 2x2 on the *same* mesh.
+// Subdomain refinement on the *same* mesh: lateral 1 gives 2x2 subdomains per diamond, radial 1 splits each
+// into two shells. Both are decomposition, not resolution -- the answer must not depend on either.
 int g_lateral_subdomain_level = 0;
+int g_radial_subdomain_level  = 0;
 
 using grid::Grid2DDataScalar;
 using grid::Grid3DDataVec;
@@ -247,7 +249,8 @@ void test_invariant_linear( const int level, const int num_steps, const ScalarTy
 void test_cone_revolution( const int level, const ScalarType cfl )
 {
     const auto domain =
-        DistributedDomain::create_uniform( level, level, 0.5, 1.0, g_lateral_subdomain_level, 0 );
+        DistributedDomain::create_uniform( level, level, 0.5, 1.0, g_lateral_subdomain_level,
+                                          g_radial_subdomain_level );
 
     auto       mask   = grid::setup_node_ownership_mask_data( domain );
     const auto coords = grid::shell::subdomain_unit_sphere_single_shell_coords< ScalarType >( domain );
@@ -355,6 +358,8 @@ int main( int argc, char** argv )
     {
         if ( argc > 3 )
             g_lateral_subdomain_level = std::atoi( argv[3] );
+        if ( argc > 4 )
+            g_radial_subdomain_level = std::atoi( argv[4] );
         test_cone_revolution( level, ( argc > 2 ) ? std::atof( argv[2] ) : 0.5 );
         // Same timestep as test_supg_rotation.cpp / test_finite_volume_rotation.cpp (dt = 0.5 * 0.1 * h), so
         // the errors can be compared directly.

@@ -876,7 +876,8 @@ KOKKOS_INLINE_FUNCTION int cubic_stencil_window( const int cell_index, const Ste
 /// neighbours qualify.
 struct LateralSubdomainLinks
 {
-    Kokkos::View< int* [4] > link;              ///< (local subdomain, face) -> local subdomain or -1
+    Kokkos::View< int* [4] > link;              ///< (local subdomain, face) -> local subdomain, or -1 if not resident
+    Kokkos::View< int* [4] > same_diamond;      ///< (local subdomain, face) -> 1 if the neighbour shares the diamond
     int                      owned_nodes = 0;   ///< owned nodes per lateral side, i.e. num_nodes_ghosted - 2*ghost
     int                      ghost       = 1;   ///< ghost layer width the exchange fills
 
@@ -995,13 +996,17 @@ KOKKOS_INLINE_FUNCTION StencilBounds widen_across_internal_seams( StencilBounds 
     if ( !links.valid() )
         return bounds;
 
-    if ( links.link( subdomain, 0 ) >= 0 )
+    // Residency is irrelevant here: the ghost exchange fills the ring from whichever rank owns the neighbour,
+    // so the nodes are present either way. What matters is only that there is no parametrisation kink to cross,
+    // which is what `same_diamond` records. (canonicalise_lateral_cell *does* need residency, because it
+    // indexes the neighbour's own array.)
+    if ( links.same_diamond( subdomain, 0 ) )
         bounds.x.lo -= links.ghost;
-    if ( links.link( subdomain, 1 ) >= 0 )
+    if ( links.same_diamond( subdomain, 1 ) )
         bounds.x.hi += links.ghost;
-    if ( links.link( subdomain, 2 ) >= 0 )
+    if ( links.same_diamond( subdomain, 2 ) )
         bounds.y.lo -= links.ghost;
-    if ( links.link( subdomain, 3 ) >= 0 )
+    if ( links.same_diamond( subdomain, 3 ) )
         bounds.y.hi += links.ghost;
 
     return bounds;

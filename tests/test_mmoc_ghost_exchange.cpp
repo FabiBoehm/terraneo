@@ -267,7 +267,10 @@ void test( const int level, const int subdomain_level = 0, const ScalarType r_lo
     {
         const int last = n_lat_g - 1;
         const int corners[4][2] = { { 0, 0 }, { 0, last }, { last, 0 }, { last, last } };
-        const int inner[4][2]   = { { 1, 1 }, { 1, last - 1 }, { last - 1, 1 }, { last - 1, last - 1 } };
+        // Reference against the nearest *owned* diagonal node, which is ghost_width steps in; at width 1 that
+        // is the immediate neighbour, as before.
+        constexpr int gw        = fe::wedge::sl::ghost_width;
+        const int     inner[4][2] = { { gw, gw }, { gw, last - gw }, { last - gw, gw }, { last - gw, last - gw } };
 
         auto coords_h = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace{}, coords_g.comp_[0] );
         auto cy_h     = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace{}, coords_g.comp_[1] );
@@ -290,13 +293,17 @@ void test( const int level, const int subdomain_level = 0, const ScalarType r_lo
             {
                 const auto d =
                     ( dir( sd, corners[k][0], corners[k][1] ) - dir( sd, inner[k][0], inner[k][1] ) ).norm() / h;
-                worst = std::max( worst, std::abs( d - std::sqrt( 2.0 ) ) );
-                if ( std::abs( d - std::sqrt( 2.0 ) ) > 0.5 )
+                // The inner reference is one node diagonally inside the *owned* block, so the separation grows
+                // with the layer width.
+                const double expected = std::sqrt( 2.0 ) * fe::wedge::sl::ghost_width;
+                worst                 = std::max( worst, std::abs( d - expected ) );
+                if ( std::abs( d - expected ) > 0.5 * fe::wedge::sl::ghost_width )
                 {
                     ++num_bad;
                     if ( num_bad <= 6 )
                         std::cout << "    corner ghost off: sd=" << sd << " corner(" << corners[k][0] << ","
-                                  << corners[k][1] << ")  d/h=" << d << " (expected ~1.414)" << std::endl;
+                                  << corners[k][1] << ")  d/h=" << d << " (expected ~" << expected << ")"
+                                  << std::endl;
                 }
             }
         }
@@ -338,7 +345,7 @@ void test( const int level, const int subdomain_level = 0, const ScalarType r_lo
         }
 
         std::cout << "  corner ghosts inconsistent: " << num_bad << " / " << ( 4 * num_sub )
-                  << "   worst |d/h - sqrt(2)| = " << worst << std::endl;
+                  << "   worst deviation = " << worst << std::endl;
 
         // The degenerate corners sit at the pentagonal points of the icosahedron, where no node diagonally
         // extends the block. The d/h figure above is only a rough indicator -- the mask itself uses the wedge
@@ -355,7 +362,12 @@ void test( const int level, const int subdomain_level = 0, const ScalarType r_lo
                 if ( validity( sd, x, y ) != 0 )
                     return;
                 acc += 1;
-                const bool is_corner = ( x == 0 || x == n_lat_g - 1 ) && ( y == 0 || y == n_lat_g - 1 );
+                // The degenerate region is the ghost_width x ghost_width block at each corner: with a layer
+                // wider than one node every node of that block lies diagonally outside the subdomain.
+                constexpr int gw        = fe::wedge::sl::ghost_width;
+                const bool    corner_x  = ( x < gw ) || ( x >= n_lat_g - gw );
+                const bool    corner_y  = ( y < gw ) || ( y >= n_lat_g - gw );
+                const bool    is_corner = corner_x && corner_y;
                 if ( !is_corner )
                     non_corner += 1;
             },
@@ -368,7 +380,8 @@ void test( const int level, const int subdomain_level = 0, const ScalarType r_lo
 
         check( num_non_corner_invalid == 0, "validity mask rejected a node that is not a diagonal corner" );
         check( num_invalid > 0, "validity mask rejected nothing -- degenerate-corner detection is not firing" );
-        check( num_invalid <= 4 * num_sub, "validity mask rejected more than the four corners per subdomain" );
+        check( num_invalid <= 4 * fe::wedge::sl::ghost_width * fe::wedge::sl::ghost_width * num_sub,
+               "validity mask rejected more than the four corner blocks per subdomain" );
     }
 
     // ---- 4: every owned node must be locatable from the transport's seed rule -----------------------------

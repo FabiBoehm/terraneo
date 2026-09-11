@@ -136,10 +136,13 @@ Kokkos::View< uint8_t*** > ghosted_lateral_validity(
 
     Kokkos::parallel_for(
         "sl_lateral_validity",
-        Kokkos::MDRangePolicy< Kokkos::Rank< 2 > >( { 0, 0 }, { num_sub, 4 } ),
-        KOKKOS_LAMBDA( const int sd, const int k ) {
-            const int corner_x = ( k & 1 ) ? last : 0;
-            const int corner_y = ( k & 2 ) ? last : 0;
+        // Every node of the ghost_width x ghost_width block at each of the four corners, not just the
+        // outermost one: with a layer wider than one node the whole block sits diagonally outside the
+        // subdomain, where the two-pass face exchange has nothing consistent to propagate.
+        Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >( { 0, 0, 0, 0 }, { num_sub, 4, ghost_width, ghost_width } ),
+        KOKKOS_LAMBDA( const int sd, const int k, const int i, const int j ) {
+            const int corner_x = ( k & 1 ) ? last - i : i;
+            const int corner_y = ( k & 2 ) ? last - j : j;
 
             auto dir = [&]( const int x, const int y ) {
                 dense::Vec< T, 3 > v;
@@ -159,9 +162,10 @@ Kokkos::View< uint8_t*** > ghosted_lateral_validity(
             const T   ref_0 = det3( dir( m, m ), dir( m + 1, m ), dir( m, m + 1 ) );
             const T   ref_1 = det3( dir( m + 1, m + 1 ), dir( m, m + 1 ), dir( m + 1, m ) );
 
-            // The hex cell that has this ghost node as its outer corner.
-            const int hx = ( corner_x == 0 ) ? 0 : corner_x - 1;
-            const int hy = ( corner_y == 0 ) ? 0 : corner_y - 1;
+            // The hex cell that has this ghost node as its outer corner: on the low side the cell starts at
+            // the node, on the high side it ends there.
+            const int hx = ( corner_x < ghost_width ) ? corner_x : corner_x - 1;
+            const int hy = ( corner_y < ghost_width ) ? corner_y : corner_y - 1;
 
             const T q_0 = det3( dir( hx, hy ), dir( hx + 1, hy ), dir( hx, hy + 1 ) ) / ref_0;
             const T q_1 = det3( dir( hx + 1, hy + 1 ), dir( hx, hy + 1 ), dir( hx + 1, hy ) ) / ref_1;

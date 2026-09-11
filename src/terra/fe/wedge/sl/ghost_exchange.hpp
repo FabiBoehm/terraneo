@@ -42,7 +42,7 @@ namespace terra::fe::wedge::sl
 {
 
 /// @brief Ghost layer width. Bounds the admissible per-substep Courant number of the transport.
-inline constexpr int ghost_width = 2;
+inline constexpr int ghost_width = 3;
 
 /// @brief Ghosted index of an owned node index.
 KOKKOS_INLINE_FUNCTION constexpr int to_ghosted_index( const int owned_index )
@@ -117,7 +117,8 @@ void pack_face_plane(
     const int                n1,
     const int                num_lat_ghosted,
     const int                num_rad_ghosted,
-    const int                depth )
+    const int                depth,
+    const size_t             buffer_offset )
 {
     constexpr int vec_dim = detail::view_vec_dim< FieldView >::value;
 
@@ -150,7 +151,7 @@ void pack_face_plane(
             }
 
             for ( int d = 0; d < vec_dim; ++d )
-                buffer( ( static_cast< size_t >( i ) * n1 + j ) * vec_dim + d ) =
+                buffer( buffer_offset + ( static_cast< size_t >( i ) * n1 + j ) * vec_dim + d ) =
                     detail::view_element( field, subdomain, x, y, r, d );
         } );
 }
@@ -168,7 +169,8 @@ void unpack_ghost_plane(
     const int                     n1,
     const int                     num_lat_ghosted,
     const int                     num_rad_ghosted,
-    const int                     depth )
+    const int                     depth,
+    const size_t                  buffer_offset )
 {
     constexpr int vec_dim = detail::view_vec_dim< FieldView >::value;
 
@@ -202,7 +204,7 @@ void unpack_ghost_plane(
 
             for ( int d = 0; d < vec_dim; ++d )
                 detail::view_element( field, subdomain, x, y, r, d ) =
-                    buffer( ( static_cast< size_t >( i ) * n1 + j ) * vec_dim + d );
+                    buffer( buffer_offset + ( static_cast< size_t >( i ) * n1 + j ) * vec_dim + d );
         } );
 }
 
@@ -311,12 +313,9 @@ class GhostExchange
     template < typename FieldView >
     void exchange( const FieldView& field ) const
     {
-        for ( int d = 1; d <= ghost_width; ++d )
-            exchange_pass( field, /*radial=*/false, d );
-        for ( int d = 1; d <= ghost_width; ++d )
-            exchange_pass( field, /*radial=*/false, d );
-        for ( int d = 1; d <= ghost_width; ++d )
-            exchange_pass( field, /*radial=*/true, d );
+        exchange_pass( field, /*radial=*/false );
+        exchange_pass( field, /*radial=*/false );
+        exchange_pass( field, /*radial=*/true );
     }
 
     /// @brief Runs only the lateral part of the exchange.
@@ -326,10 +325,8 @@ class GhostExchange
     template < typename FieldView >
     void exchange_lateral( const FieldView& field ) const
     {
-        for ( int d = 1; d <= ghost_width; ++d )
-            exchange_pass( field, /*radial=*/false, d );
-        for ( int d = 1; d <= ghost_width; ++d )
-            exchange_pass( field, /*radial=*/false, d );
+        exchange_pass( field, /*radial=*/false );
+        exchange_pass( field, /*radial=*/false );
     }
 
     /// @brief Convenience: interior copy followed by the ghost exchange.
@@ -436,7 +433,7 @@ class GhostExchange
 
     /// One exchange pass over either the lateral or the radial faces.
     template < typename FieldView >
-    void exchange_pass( const FieldView& field, const bool radial, const int depth ) const
+    void exchange_pass( const FieldView& field, const bool radial ) const
     {
         using ScalarType      = typename FieldView::value_type;
         constexpr int vec_dim = detail::view_vec_dim< FieldView >::value;
@@ -458,13 +455,17 @@ class GhostExchange
         for ( size_t i = 0; i < active.size(); ++i )
         {
             const Link& link = *active[i];
-            const size_t n   = static_cast< size_t >( link.buf_n0 ) * link.buf_n1 * vec_dim;
+            // One buffer per link carrying every depth, so a wider ghost layer costs a fatter message rather
+            // than more of them: the exchange is latency-bound at these sizes.
+            const size_t plane = static_cast< size_t >( link.buf_n0 ) * link.buf_n1 * vec_dim;
+            const size_t n     = plane * ghost_width;
 
             send_buffers[i] = Kokkos::View< ScalarType* >( Kokkos::view_alloc( "sl_ghost_send", Kokkos::WithoutInitializing ), n );
             recv_buffers[i] = Kokkos::View< ScalarType* >( Kokkos::view_alloc( "sl_ghost_recv", Kokkos::WithoutInitializing ), n );
 
-            pack_face_plane( field, link.my_sd, link.my_face, send_buffers[i], link.buf_n0,
-                             link.buf_n1, num_lat_ghost_, num_rad_ghost_, depth );
+            for ( int d = 1; d <= ghost_width; ++d )
+                pack_face_plane( field, link.my_sd, link.my_face, send_buffers[i], link.buf_n0,
+                                 link.buf_n1, num_lat_ghost_, num_rad_ghost_, d, ( d - 1 ) * plane );
         }
         Kokkos::fence();
 
@@ -481,9 +482,11 @@ class GhostExchange
 
             if ( link.nb_local_sd >= 0 )
             {
-                // Same rank: pack the neighbour's depth plane directly into our receive buffer.
-                pack_face_plane( field, link.nb_local_sd, link.nb_face, recv_buffers[i], link.buf_n0,
-                                 link.buf_n1, num_lat_ghost_, num_rad_ghost_, depth );
+                // Same rank: pack the neighbour's depth planes directly into our receive buffer.
+                const size_t plane = static_cast< size_t >( link.buf_n0 ) * link.buf_n1 * vec_dim;
+                for ( int d = 1; d <= ghost_width; ++d )
+                    pack_face_plane( field, link.nb_local_sd, link.nb_face, recv_buffers[i], link.buf_n0,
+                                     link.buf_n1, num_lat_ghost_, num_rad_ghost_, d, ( d - 1 ) * plane );
                 continue;
             }
 
@@ -514,8 +517,11 @@ class GhostExchange
             const Link& link = *active[i];
             if ( link.nb_local_sd < 0 )
                 Kokkos::deep_copy( recv_buffers[i], host_recv[i] );
-            unpack_ghost_plane( field, link.my_sd, link.my_face, link.d0, link.d1, recv_buffers[i],
-                                link.buf_n0, link.buf_n1, num_lat_ghost_, num_rad_ghost_, depth );
+            const size_t plane = static_cast< size_t >( link.buf_n0 ) * link.buf_n1 * vec_dim;
+            for ( int d = 1; d <= ghost_width; ++d )
+                unpack_ghost_plane( field, link.my_sd, link.my_face, link.d0, link.d1, recv_buffers[i],
+                                    link.buf_n0, link.buf_n1, num_lat_ghost_, num_rad_ghost_, d,
+                                    ( d - 1 ) * plane );
         }
         Kokkos::fence();
     }
