@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+
 #include <algorithm>
 #include <functional>
 #include <map>
@@ -399,6 +401,18 @@ class StokesContext
             eta_[velocity_level_].grid_data(),
             bcs_neumann,
             false );
+
+        // Diagonal-only twin of K_neumann_, needed to lift an inhomogeneous Dirichlet
+        // velocity (plate velocities) onto the right-hand side.
+        K_neumann_diag_ = std::make_unique< Stokes >(
+            *domains_[velocity_level_],
+            *domains_[pressure_level_],
+            coords_shell_[velocity_level_],
+            coords_radii_[velocity_level_],
+            boundary_mask_[velocity_level_],
+            eta_[velocity_level_].grid_data(),
+            bcs_neumann,
+            true );
 
         M_ = std::make_unique< ViscousMass >(
             *domains_[velocity_level_], coords_shell_[velocity_level_], coords_radii_[velocity_level_], false );
@@ -864,7 +878,10 @@ class StokesContext
     /// preconditioner.  When `log_convergence` is true, the per-step Stokes
     /// and coarse-grid PCG tables are printed; in either case the table is
     /// cleared at the end of the call.
-    void solve( const linalg::VectorQ1Scalar< ScalarType >& T_for_buoyancy, bool compressible, bool log_convergence )
+    void solve( const linalg::VectorQ1Scalar< ScalarType >&                   T_for_buoyancy,
+                const std::optional< linalg::VectorQ1IsoQ2Q1< ScalarType > >& u_dirichlet,
+                bool                                                          compressible,
+                bool                                                          log_convergence )
     {
         util::Timer timer_stokes( "stokes" );
 
@@ -884,16 +901,42 @@ class StokesContext
 
         linalg::apply( *M_, triangular_prec_tmp_.block_1(), stok_vecs_["f"].block_1() );
 
-        fe::strong_algebraic_homogeneous_velocity_dirichlet_enforcement_stokes_like(
-            stok_vecs_["f"],
-            boundary_mask_[velocity_level_],
-            grid::shell::get_shell_boundary_flag( bcs_, grid::shell::BoundaryConditionFlag::DIRICHLET ) );
+        // Strong enforcement of the velocity BCs on the RHS, applied per boundary.
+        // NOTE: get_shell_boundary_flag( bcs_, FLAG ) only returns the FIRST boundary
+        // carrying FLAG, so when both boundaries share a BC type (e.g. no-slip/no-slip
+        // => both DIRICHLET, or free-slip/free-slip => both FREESLIP) the second boundary
+        // would be left completely unenforced. Loop over both boundaries and dispatch on
+        // each one's own flag instead.
+        for ( const auto sbf : { grid::shell::ShellBoundaryFlag::CMB, grid::shell::ShellBoundaryFlag::SURFACE } )
+        {
+            const auto bcf = grid::shell::get_boundary_condition_flag( bcs_, sbf );
 
-        fe::strong_algebraic_freeslip_enforcement_in_place(
-            stok_vecs_["f"],
-            coords_shell_[velocity_level_],
-            boundary_mask_[velocity_level_],
-            grid::shell::get_shell_boundary_flag( bcs_, grid::shell::BoundaryConditionFlag::FREESLIP ) );
+            if ( bcf == grid::shell::BoundaryConditionFlag::DIRICHLET )
+            {
+                // Plate velocities enter here: an inhomogeneous Dirichlet value at the surface.
+                if ( sbf == grid::shell::ShellBoundaryFlag::SURFACE && u_dirichlet.has_value() )
+                {
+                    fe::strong_algebraic_velocity_dirichlet_enforcement_stokes_like(
+                        *K_neumann_,
+                        *K_neumann_diag_,
+                        *u_dirichlet,
+                        triangular_prec_tmp_ /*tmp_vec*/,
+                        stok_vecs_["f"],
+                        boundary_mask_[velocity_level_],
+                        sbf );
+                }
+                else
+                {
+                    fe::strong_algebraic_homogeneous_velocity_dirichlet_enforcement_stokes_like(
+                        stok_vecs_["f"], boundary_mask_[velocity_level_], sbf );
+                }
+            }
+            else if ( bcf == grid::shell::BoundaryConditionFlag::FREESLIP )
+            {
+                fe::strong_algebraic_freeslip_enforcement_in_place(
+                    stok_vecs_["f"], coords_shell_[velocity_level_], boundary_mask_[velocity_level_], sbf );
+            }
+        }
 
         // Apply TALA RHS if needed...
         if ( compressible )
@@ -979,6 +1022,7 @@ class StokesContext
     // body order (rather than fighting member-init order).
     std::unique_ptr< Stokes >            K_;
     std::unique_ptr< Stokes >            K_neumann_;
+    std::unique_ptr< Stokes >            K_neumann_diag_;
     std::unique_ptr< ViscousMass >       M_;
     std::vector< Viscous >               A_c_;
     std::vector< Prolongation >          P_;
