@@ -42,6 +42,7 @@
 #include "src/interpolators.hpp"
 #include "src/io.hpp"
 #include "src/parameters.hpp"
+#include "src/plates.hpp"
 #include "src/stokes_solver.hpp"
 #include "src/temperature_init.hpp"
 #include "util/bit_masking.hpp"
@@ -194,7 +195,7 @@ Result<> run( const Parameters& prm )
     //
     // Currently, we can choose either no-slip or free-slip.
     //
-    // Plates will also be a Dirichlet BCs (to be implemented).
+    // Plate velocities are also a Dirichlet BC, imposed at the surface.
 
     BoundaryConditions bcs = {
         { CMB, DIRICHLET },
@@ -329,10 +330,43 @@ Result<> run( const Parameters& prm )
         xdmf_output_pressure->set_is_dimensional( prm.devel_parameters.output_dimensional );
     }
 
+    // ----- Plate velocity boundary condition -----
+    // Model age for plate data; only meaningful in dimensional mode.
+    ScalarType plate_age_Ma = static_cast< ScalarType >( prm.boundary_parameters.plate_parameters.initial_plate_age );
+    int        last_plate_update_time = prm.boundary_parameters.plate_parameters.initial_plate_age;
+
+    const ScalarType plate_velocity_nondim_scale = ScalarType( 1 ) / prm.physics_parameters.characteristic_velocity *
+                                                   ( prm.boundary_parameters.plate_parameters.plate_velocity_scaling );
+
+    std::shared_ptr< plates::PlateVelocityProvider > oracle;
+    std::optional< VectorQ1IsoQ2Q1< ScalarType > >   plate_velocities;
+
+    if ( prm.boundary_parameters.plate_parameters.apply_plate_velocities )
+    {
+        plate_velocities.emplace( "plate_velocities",
+                                  *domains[velocity_level],
+                                  *domains[pressure_level],
+                                  ownership_mask_data[velocity_level],
+                                  ownership_mask_data[pressure_level] );
+
+        oracle = initialise_plates( prm.boundary_parameters.plate_parameters.plates_topologies_path,
+                                    prm.boundary_parameters.plate_parameters.plates_reconstructions_path );
+
+        extract_plate_velocities( plate_age_Ma,
+                                  plate_velocities->block_1().grid_data(),
+                                  *oracle,
+                                  coords_shell[velocity_level],
+                                  coords_radii[velocity_level],
+                                  prm.boundary_parameters.plate_parameters.interpolate_plates_in_time,
+                                  plate_velocity_nondim_scale,
+                                  domains[velocity_level].get(),
+                                  prm.boundary_parameters.plate_parameters.plates_on_device );
+    }
+
     // ----- Initial Stokes solve -----
     logroot << "\n--------- Initial Stokes solve -----------------\n" << std::endl;
 
-    stokes.solve( Tdev, prm.physics_parameters.compressible, /*log_convergence=*/true );
+    stokes.solve( Tdev, plate_velocities, prm.physics_parameters.compressible, /*log_convergence=*/true );
 
     ScalarType simulated_time    = ScalarType( 0 );
     ScalarType simulated_time_Ma = ScalarType( 0 );
@@ -529,7 +563,60 @@ Result<> run( const Parameters& prm )
         energy->snapshot_for_picard();
 
         // Compute dt once from current velocity (before Picard loop).
-        const ScalarType dt = energy->compute_dt( timestep );
+        ScalarType dt = energy->compute_dt( timestep );
+
+        // Plate data is extracted once per timestep, before the Picard loop, and then
+        // written into the velocity field on every Picard iteration.
+        bool end_simulation_after_solve = false;
+        if ( prm.boundary_parameters.plate_parameters.apply_plate_velocities )
+        {
+            // plate_age must never run past the requested final age.
+            const ScalarType dt_to_final_age =
+                ( plate_age_Ma - prm.boundary_parameters.plate_parameters.final_plate_age ) /
+                prm.physics_parameters.calc_time_Ma;
+
+            // Explicit last step, to deal with floating-point rounding around zero.
+            if ( dt >= dt_to_final_age )
+            {
+                dt           = dt_to_final_age;
+                plate_age_Ma = prm.boundary_parameters.plate_parameters.final_plate_age;
+
+                logroot << "Last timestep changed to " << dt * prm.physics_parameters.calc_time_Ma
+                        << " Ma to hit final plate age." << std::endl;
+
+                end_simulation_after_solve = true;
+            }
+            else
+            {
+                plate_age_Ma -= dt * prm.physics_parameters.calc_time_Ma;
+            }
+
+            // Update every timestep when interpolating in time, otherwise every 1 Ma.
+            bool plate_update = true;
+            if ( !prm.boundary_parameters.plate_parameters.interpolate_plates_in_time )
+            {
+                if ( std::ceil( plate_age_Ma ) < last_plate_update_time )
+                {
+                    plate_update           = true;
+                    last_plate_update_time = static_cast< int >( std::ceil( plate_age_Ma ) );
+                }
+                else
+                    plate_update = false;
+            }
+
+            if ( plate_update )
+            {
+                extract_plate_velocities( plate_age_Ma,
+                                          plate_velocities->block_1().grid_data(),
+                                          *oracle,
+                                          coords_shell[velocity_level],
+                                          coords_radii[velocity_level],
+                                          prm.boundary_parameters.plate_parameters.interpolate_plates_in_time,
+                                          plate_velocity_nondim_scale,
+                                          domains[velocity_level].get(),
+                                          prm.boundary_parameters.plate_parameters.plates_on_device );
+            }
+        }
 
         for ( int picard = 0; picard < num_picard; picard++ )
         {
@@ -554,7 +641,10 @@ Result<> run( const Parameters& prm )
 
             // --- Stokes solve ---
             stokes.set_solve_time( simulated_time + prm.time_stepping_parameters.energy_substeps * dt );
-            stokes.solve( Tdev, prm.physics_parameters.compressible, /*log_convergence=*/( picard == num_picard - 1 ) );
+            stokes.solve( Tdev,
+                          plate_velocities,
+                          prm.physics_parameters.compressible,
+                          /*log_convergence=*/( picard == num_picard - 1 ) );
 
             if ( timestep == prm.time_stepping_parameters.timestep_initial + 1 && picard == 0 )
                 log_hbm( "after first Stokes solve (peak)" );
@@ -673,7 +763,19 @@ Result<> run( const Parameters& prm )
             write_timer_tree( prm.io_parameters, timestep );
         }
 
-        if ( simulated_time >= prm.time_stepping_parameters.t_end )
+        if ( prm.boundary_parameters.plate_parameters.apply_plate_velocities )
+        {
+            // With plate assimilation the run ends at the requested final plate age,
+            // not at t_end.
+            if ( end_simulation_after_solve )
+            {
+                logroot << "Final plate age " << prm.boundary_parameters.plate_parameters.final_plate_age
+                        << " Ma reached. Exiting simulation." << std::endl;
+                logroot << "###################################################" << std::endl;
+                break;
+            }
+        }
+        else if ( simulated_time >= prm.time_stepping_parameters.t_end )
         {
             break;
         }

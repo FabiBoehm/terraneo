@@ -1,0 +1,76 @@
+## ============================================================================
+## MT512 Ra~1.5e8 — dimensional (set-nondimensional-numbers=FALSE), eta0 lowered 10x.
+##   Ra/Di DERIVED from dimensional values; reference-viscosity 1e21 (vs HyTeG 1e22)
+##   -> Ra ~= 1.52e8 (10x), Di ~= 0.45 unchanged (Di=alpha*g*D/Cp has no eta).
+##   viscosity only sets Ra).  Mesh/subdomain/solver-iter passed via job script.
+## ============================================================================
+
+## --- Dimensional mode: derive Ra/Di from physical properties below ---
+set-nondimensional-numbers=false
+compressible=true
+diffusivity=1
+
+## --- HyTeG parameters_MC.prm dimensional reference values ---
+reference-viscosity=1e21
+reference-density=4686
+thermal-expansivity=2e-5
+thermal-conductivity=3.0
+specific-heat-capacity=1250
+
+## --- Geometry (dimensional; radius-min/max are DERIVED from these in =false mode) ---
+radius-cmb=3480000
+radius-surface=6371000
+
+## --- Temperature BCs (dimensional K; temperature_min/max derived from these) ---
+temperature-cmb=4200
+temperature-surface=300
+
+## --- Canonical TALA (match HyTeG): rho-bar buoyancy, adiabat reference + IC ---
+rho-weighted-tala=true
+adiabat-surface-temperature=0.41
+
+## --- Viscosity: FK T-dependence x Lin-2022 radial profile (~1e3-1e4 contrast) ---
+viscosity-law="frank-kamenetskii"
+viscosity-rmu=100
+viscosity-radial-profile=true
+viscosity-radial-profile-csv-filename="/home/hpc/iwia/iwia054h/terraneo/data/radialprofiles/ViscosityProfile_Lin_et_al_2022.csv"
+viscosity-radial-profile-radii-key="radius_normalized_1p22_2p22"
+viscosity-radial-profile-value-key="viscosity_scaled_by_min"
+
+## --- Boundary conditions ---
+velocity-bc-cmb="freeslip"
+velocity-bc-surface="noslip"
+
+## --- Initial temperature: adiabat + reduced broadband SH (degrees 2-8) ---
+initial-temperature-profile="conductive"
+initial-temperature-sph-epsilon=0.01
+initial-temperature-sph-degree-min=2
+initial-temperature-sph-degree-max=8
+initial-temperature-sph-seed=7
+
+## --- Time stepping ---
+dt-scaling=0.5
+t-end=1e6
+max-timesteps=1000000
+energy-solver="ev"
+energy-substeps=1
+picard-iterations=1
+
+## --- Stokes solver (restart 30 single cycle) ---
+stokes-krylov-restart=30
+stokes-krylov-max-iterations=30
+stokes-krylov-relative-tolerance=1e-06
+stokes-krylov-absolute-tolerance=1e-12
+stokes-viscous-pc-num-vcycles=1
+stokes-viscous-pc-cheby-order=2
+stokes-viscous-pc-num-smoothing-steps-prepost=3
+stokes-viscous-pc-num-power-iterations=10
+stokes-viscous-pc-agglom-factors=[]
+stokes-gca=0
+stokes-refresh-viscous-pc=true
+stokes-refresh-coarse-viscosity=true
+
+## --- Output / checkpoint ---
+outdir-overwrite=1
+output-frequency=100
+ev-dump-nu-h=false

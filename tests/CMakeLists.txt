@@ -124,6 +124,14 @@ add_terra_test(test_shear_heating)
 add_terra_test(test_adiabatic_heating_gpu)
 add_terra_test(test_shear_heating_kerngen)
 
+# Needs the plate reconstruction data, which is not in the repository. Point it at the directory
+# holding topologies_0-410Ma.geojson and TomoPAC2.rot via TERRA_PLATE_DATA_DIR (or argv[1]);
+# the tests report 77 (skip) when it is absent.
+add_terra_test(test_plate_velocities)
+add_terra_test(test_plate_velocities_device_vs_host)
+set_tests_properties(test_plate_velocities_np_1 PROPERTIES SKIP_RETURN_CODE 77)
+set_tests_properties(test_plate_velocities_device_vs_host_np_1 PROPERTIES SKIP_RETURN_CODE 77)
+
 # Adding target for all the tests.
 get_property(ALL_TERRA_TESTS GLOBAL PROPERTY TERRA_TEST_TARGETS)
 add_custom_target(tests DEPENDS ${ALL_TERRA_TESTS})
