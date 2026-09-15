@@ -1,5 +1,9 @@
 #pragma once
 
+#include <array>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <algorithm>
 #include <functional>
 #include <map>
@@ -53,6 +57,9 @@
 #include "hbm_probe.hpp"
 #include "interpolators.hpp"
 #include "low_prec_vcycle.hpp"
+#ifdef TERRA_ENABLE_PYTHON
+#include "ml/neural_solver.hpp"
+#endif
 #include "parameters.hpp"
 
 namespace terra::mantlecirculation {
@@ -185,6 +192,24 @@ class StokesContext
     //  bits, and FP16's range proved sufficient.)
     using BasisVectorType = linalg::VectorQ1IsoQ2Q1< Kokkos::Experimental::bhalf_t, 3 >;
     using FGMRESDouble    = linalg::solvers::FGMRES< Stokes, PrecStokes >;
+
+#ifdef TERRA_ENABLE_PYTHON
+    /// Copyable view onto a NeuralSolver so it fits FGMRES's by-value
+    /// preconditioner slot (NeuralSolver itself owns Python state and is
+    /// non-copyable).
+    struct NeuralPrecRef
+    {
+        using OperatorType = Stokes;
+        ml::NeuralSolver< Stokes >* impl = nullptr;
+        void solve_impl( OperatorType& A,
+                         typename OperatorType::SrcVectorType& x,
+                         const typename OperatorType::DstVectorType& b )
+        {
+            impl->solve_impl( A, x, b );
+        }
+    };
+    using FGMRESNeural = linalg::solvers::FGMRES< Stokes, NeuralPrecRef >;
+#endif
     using FGMRESFloat     = linalg::solvers::FGMRESLowMem< Stokes, BasisVectorType, PrecStokes >;
 
   public:
@@ -232,7 +257,9 @@ class StokesContext
         // (idle until the solve) instead, saving one velocity-sized vector.
         // "u_prev" is required by the compressible (TALA) RHS: the (1/rho)grad(rho).u
         // continuity term is lagged on the previous velocity iterate.
-        std::vector< std::string > stok_vec_names = { "u", "f", "u_prev" };
+        // "u_prev2..4": deeper solution history for the polynomial time-extrapolation
+        // initial guess (--stokes-guess-extrap).
+        std::vector< std::string > stok_vec_names = { "u", "f", "u_prev", "u_prev2", "u_prev3", "u_prev4", "u_guess" };
         for ( const auto& name : stok_vec_names )
         {
             stok_vecs_[name] = VectorQ1IsoQ2Q1< ScalarType >(
@@ -389,6 +416,8 @@ class StokesContext
             eta_[velocity_level_].grid_data(),
             bcs_,
             false );
+        K_->block_11().set_penalty_epsilon(
+            static_cast< ScalarType >( prm_.stokes_solver_parameters.penalty_epsilon ) );
 
         K_neumann_ = std::make_unique< Stokes >(
             *domains_[velocity_level_],
@@ -423,6 +452,8 @@ class StokesContext
                 eta_[level].grid_data(),
                 bcs_,
                 false );
+            A_c_.back().set_penalty_epsilon(
+                static_cast< ScalarType >( prm_.stokes_solver_parameters.penalty_epsilon ) );
             if ( gca == 2 )
             {
                 A_c_.back().set_stored_matrix_mode(
@@ -594,6 +625,19 @@ class StokesContext
                 R_.emplace_back( *domains_upper_[L] );
         }
 
+        // Zero the restricted residual on Dirichlet velocity boundary shells so the V-cycle keeps u = 0 there
+        // exactly (ported from mmoc-transport-v1 73734950). No-op for free-slip shells.
+        {
+            const bool zero_cmb =
+                grid::shell::get_boundary_condition_flag( bcs_, grid::shell::ShellBoundaryFlag::CMB ) ==
+                grid::shell::BoundaryConditionFlag::DIRICHLET;
+            const bool zero_surface =
+                grid::shell::get_boundary_condition_flag( bcs_, grid::shell::ShellBoundaryFlag::SURFACE ) ==
+                grid::shell::BoundaryConditionFlag::DIRICHLET;
+            for ( auto& restriction : R_ )
+                restriction.set_dirichlet_boundary_zeroing( zero_cmb, zero_surface );
+        }
+
         prec_11_ = std::make_unique< PrecVisc >(
             P_,
             R_,
@@ -736,7 +780,9 @@ class StokesContext
 
         const linalg::solvers::FGMRESOptions< ScalarType > stokes_fgmres_opts{
             .restart                     = prm_.stokes_solver_parameters.krylov_restart,
-            .relative_residual_tolerance = prm_.stokes_solver_parameters.krylov_relative_tolerance,
+            .relative_residual_tolerance = prm_.stokes_solver_parameters.tolerance_relative_to_rhs ?
+                                               static_cast< ScalarType >( 0 ) :
+                                               prm_.stokes_solver_parameters.krylov_relative_tolerance,
             .absolute_residual_tolerance = prm_.stokes_solver_parameters.krylov_absolute_tolerance,
             .max_iterations              = prm_.stokes_solver_parameters.krylov_max_iterations };
         if ( use_float_basis_ )
@@ -750,6 +796,43 @@ class StokesContext
             stokes_fgmres_double_ = std::make_unique< FGMRESDouble >(
                 stokes_tmp_fgmres_, stokes_fgmres_opts, table_, *prec_stokes_ );
             stokes_fgmres_double_->set_tag( "stokes_fgmres" );
+        }
+
+        if ( !prm_.stokes_solver_parameters.neural_precon.empty() )
+        {
+#ifdef TERRA_ENABLE_PYTHON
+            if ( use_float_basis_ )
+                throw std::runtime_error( "--stokes-neural-precon is not wired for the float-basis FGMRES" );
+            logroot << "Setting up neural Stokes preconditioner ('"
+                    << prm_.stokes_solver_parameters.neural_precon << "') ..." << std::endl;
+            ml::NeuralSolverOptions nopt;
+            nopt.model        = prm_.stokes_solver_parameters.neural_precon;
+            nopt.log_residual = false;
+            neural_prec_ = std::make_unique< ml::NeuralSolver< Stokes > >(
+                nopt, *domains_[velocity_level_], *domains_[pressure_level_], triangular_prec_tmp_ );
+            neural_prec_->set_eta( eta_[velocity_level_] ); // variable-viscosity models read it
+            stokes_fgmres_neural_ = std::make_unique< FGMRESNeural >(
+                stokes_tmp_fgmres_, stokes_fgmres_opts, table_, NeuralPrecRef{ neural_prec_.get() } );
+            stokes_fgmres_neural_->set_tag( "stokes_fgmres" );
+#else
+            throw std::runtime_error( "--stokes-neural-precon needs a build with -DTERRA_ENABLE_PYTHON=ON" );
+#endif
+        }
+
+        if ( !prm_.stokes_solver_parameters.neural_guess.empty() )
+        {
+#ifdef TERRA_ENABLE_PYTHON
+            logroot << "Setting up neural Stokes initial guess ('"
+                    << prm_.stokes_solver_parameters.neural_guess << "') ..." << std::endl;
+            ml::NeuralSolverOptions gopt;
+            gopt.model        = prm_.stokes_solver_parameters.neural_guess;
+            gopt.log_residual = true; // prints ||b - Ax|| before/after = the guess quality
+            neural_guess_ = std::make_unique< ml::NeuralSolver< Stokes > >(
+                gopt, *domains_[velocity_level_], *domains_[pressure_level_], triangular_prec_tmp_ );
+            neural_guess_->set_eta( eta_[velocity_level_] );
+#else
+            throw std::runtime_error( "--stokes-neural-guess needs a build with -DTERRA_ENABLE_PYTHON=ON" );
+#endif
         }
 
         log_hbm( "stokes: ctor end (delta = MG hierarchy + operators + coarse + preconditioner)" );
@@ -884,16 +967,23 @@ class StokesContext
 
         linalg::apply( *M_, triangular_prec_tmp_.block_1(), stok_vecs_["f"].block_1() );
 
-        fe::strong_algebraic_homogeneous_velocity_dirichlet_enforcement_stokes_like(
-            stok_vecs_["f"],
-            boundary_mask_[velocity_level_],
-            grid::shell::get_shell_boundary_flag( bcs_, grid::shell::BoundaryConditionFlag::DIRICHLET ) );
-
-        fe::strong_algebraic_freeslip_enforcement_in_place(
-            stok_vecs_["f"],
-            coords_shell_[velocity_level_],
-            boundary_mask_[velocity_level_],
-            grid::shell::get_shell_boundary_flag( bcs_, grid::shell::BoundaryConditionFlag::FREESLIP ) );
+        // Enforce the velocity BC on the RHS shell by shell. get_shell_boundary_flag() returns only the FIRST
+        // shell with a given BC type, so with fs/fs (or ns/ns) the second shell was silently skipped and kept
+        // a normal velocity component (ported from mmoc-transport-v1 f988bec9).
+        for ( const auto sbf : { grid::shell::ShellBoundaryFlag::CMB, grid::shell::ShellBoundaryFlag::SURFACE } )
+        {
+            const auto bcf = grid::shell::get_boundary_condition_flag( bcs_, sbf );
+            if ( bcf == grid::shell::BoundaryConditionFlag::DIRICHLET )
+            {
+                fe::strong_algebraic_homogeneous_velocity_dirichlet_enforcement_stokes_like(
+                    stok_vecs_["f"], boundary_mask_[velocity_level_], sbf );
+            }
+            else if ( bcf == grid::shell::BoundaryConditionFlag::FREESLIP )
+            {
+                fe::strong_algebraic_freeslip_enforcement_in_place(
+                    stok_vecs_["f"], coords_shell_[velocity_level_], boundary_mask_[velocity_level_], sbf );
+            }
+        }
 
         // Apply TALA RHS if needed...
         if ( compressible )
@@ -912,10 +1002,255 @@ class StokesContext
 
         util::logroot << "Solving Stokes ..." << std::endl;
 
+        // Initial-guess policy for the warm-start benchmark. Default (neither flag):
+        // persistence, i.e. u carries over from the previous timestep.
+        // --stokes-guess-zero: cold start (the baseline).
+        // --stokes-guess-extrap N: polynomial time-extrapolation from the stored
+        // history, N = 1 linear (2u1-u2), 2 quadratic, 3 cubic; falls back to
+        // persistence until enough history exists.
+        {
+            auto&     u  = stok_vecs_["u"];
+            const int ne = prm_.stokes_solver_parameters.guess_extrap;
+            if ( prm_.stokes_solver_parameters.guess_zero )
+            {
+                linalg::assign( u, static_cast< ScalarType >( 0 ) );
+                util::logroot << "Initial guess: zero" << std::endl;
+            }
+            else if ( const int kp = prm_.stokes_solver_parameters.guess_proj; kp > 0 && n_hist_ >= kp )
+            {
+                // PROJECTION warm start: the residual-optimal combination of the
+                // last kp solutions for the CURRENT operator and rhs,
+                //   u0 = argmin_{u in span(u_prev..)} ||f - K u||,
+                // i.e. c = G^-1 g with G_ij = <K u_i, K u_j>, g_i = <K u_i, f>.
+                // kp matvecs + a kp x kp solve. Optimal by construction and
+                // robust to non-uniform dt, unlike fixed Taylor coefficients.
+                static const char* names[4] = { "u_prev", "u_prev2", "u_prev3", "u_prev4" };
+                const int          k        = std::min( kp, 4 );
+                std::vector< std::vector< ScalarType > > G( k, std::vector< ScalarType >( k, 0 ) );
+                std::vector< ScalarType >                g( k, 0 );
+                // Two scratch vectors only (w, and u itself which is overwritten at
+                // the end). Per j: w = K u_j gives g_j and G_jj; the off-diagonals
+                // use the symmetry of K: <K u_i, K u_j> = <u_i, K (K u_j)>, one more
+                // matvec into u. Total k + k(k-1)/2 matvecs.
+                auto& w = triangular_prec_tmp_;
+                for ( int j = 0; j < k; ++j )
+                {
+                    linalg::apply( *K_, stok_vecs_[names[j]], w );
+                    g[j]    = linalg::dot( w, stok_vecs_["f"] );
+                    G[j][j] = linalg::dot( w, w );
+                    if ( j > 0 )
+                    {
+                        linalg::apply( *K_, w, u ); // u = K K u_j
+                        for ( int i = 0; i < j; ++i )
+                            G[i][j] = G[j][i] = linalg::dot( stok_vecs_[names[i]], u );
+                    }
+                }
+                // Solve G c = g (tiny dense system, Gaussian elimination with pivoting).
+                std::vector< ScalarType > c( k, 0 );
+                {
+                    auto A = G;
+                    auto b = g;
+                    for ( int p = 0; p < k; ++p )
+                    {
+                        int piv = p;
+                        for ( int r = p + 1; r < k; ++r )
+                            if ( std::abs( A[r][p] ) > std::abs( A[piv][p] ) )
+                                piv = r;
+                        std::swap( A[p], A[piv] );
+                        std::swap( b[p], b[piv] );
+                        if ( std::abs( A[p][p] ) < 1e-300 )
+                            continue;
+                        for ( int r = p + 1; r < k; ++r )
+                        {
+                            const ScalarType fct = A[r][p] / A[p][p];
+                            for ( int q = p; q < k; ++q )
+                                A[r][q] -= fct * A[p][q];
+                            b[r] -= fct * b[p];
+                        }
+                    }
+                    for ( int p = k - 1; p >= 0; --p )
+                    {
+                        ScalarType s = b[p];
+                        for ( int q = p + 1; q < k; ++q )
+                            s -= A[p][q] * c[q];
+                        c[p] = std::abs( A[p][p] ) < 1e-300 ? 0 : s / A[p][p];
+                    }
+                }
+                // u = sum_i c_i u_i, accumulated 2-3 vectors at a time (kernel limit 3).
+                linalg::lincomb( u, { c[0] }, { stok_vecs_[names[0]] } );
+                for ( int i = 1; i < k; ++i )
+                    linalg::lincomb( u, { 1.0, c[i] }, { u, stok_vecs_[names[i]] } );
+                util::logroot << "Initial guess: projection onto last " << k << " solutions, c =";
+                for ( int i = 0; i < k; ++i )
+                    util::logroot << " " << c[i];
+                util::logroot << std::endl;
+            }
+            else if ( ne > 0 && n_hist_ >= ne + 1 )
+            {
+                // Lagrange extrapolation weights to the current solve time. The
+                // uniform-spacing stencils (2,-1 / 3,-3,1 / 4,-6,4,-1) are only
+                // correct for constant dt; with the CFL ramp dt grows ~1.5x per
+                // step and the uniform cubic amplifies the history error.
+                const int                 n = std::min( ne, 3 ) + 1;
+                std::array< ScalarType, 4 > w{};
+                const bool                nonuniform = t_now_set_ && n_thist_ >= n;
+                if ( nonuniform )
+                {
+                    for ( int i = 0; i < n; i++ )
+                    {
+                        w[i] = 1;
+                        for ( int j = 0; j < n; j++ )
+                            if ( j != i )
+                                w[i] *= ( t_now_ - t_hist_[j] ) / ( t_hist_[i] - t_hist_[j] );
+                    }
+                }
+                else
+                {
+                    static const ScalarType uni[3][4] = { { 2, -1, 0, 0 }, { 3, -3, 1, 0 }, { 4, -6, 4, -1 } };
+                    for ( int i = 0; i < 4; i++ )
+                        w[i] = uni[n - 2][i];
+                }
+                if ( n == 2 )
+                    linalg::lincomb( u, { w[0], w[1] }, { stok_vecs_["u_prev"], stok_vecs_["u_prev2"] } );
+                else if ( n == 3 )
+                    linalg::lincomb(
+                        u, { w[0], w[1], w[2] }, { stok_vecs_["u_prev"], stok_vecs_["u_prev2"], stok_vecs_["u_prev3"] } );
+                else
+                {
+                    // lincomb kernels take at most 3 inputs: cubic in two stages
+                    linalg::lincomb(
+                        u, { w[0], w[1], w[2] }, { stok_vecs_["u_prev"], stok_vecs_["u_prev2"], stok_vecs_["u_prev3"] } );
+                    linalg::lincomb( u, { 1.0, w[3] }, { u, stok_vecs_["u_prev4"] } );
+                }
+                util::logroot << "Initial guess: time-extrapolation order " << n - 1
+                              << ( nonuniform ? " (non-uniform dt, weights" : " (uniform weights" );
+                for ( int i = 0; i < n; i++ )
+                    util::logroot << " " << w[i];
+                util::logroot << ")" << std::endl;
+            }
+        }
+
+        if ( prm_.stokes_solver_parameters.tolerance_relative_to_rhs )
+        {
+            const auto&      f     = stok_vecs_["f"];
+            const ScalarType tol_f = prm_.stokes_solver_parameters.krylov_relative_tolerance *
+                                     std::sqrt( linalg::dot( f, f ) );
+            const ScalarType tol = std::max( tol_f, prm_.stokes_solver_parameters.krylov_absolute_tolerance );
+            if ( stokes_fgmres_float_ )
+                stokes_fgmres_float_->set_absolute_tolerance( tol );
+            if ( stokes_fgmres_double_ )
+                stokes_fgmres_double_->set_absolute_tolerance( tol );
+#ifdef TERRA_ENABLE_PYTHON
+            if ( stokes_fgmres_neural_ )
+                stokes_fgmres_neural_->set_absolute_tolerance( tol );
+#endif
+            util::logroot << "Stokes tolerance relative to ||f||: abs target = " << tol << std::endl;
+        }
+
+        // Warm-start training pairs in double precision: r = f - K u_guess now,
+        // e = u - u_guess after the solve (xdmf is float, and K amplifies float
+        // rounding of u to the size of a cubic-extrapolation residual).
+        const bool dump_pairs = !prm_.stokes_solver_parameters.dump_pairs_dir.empty();
+        if ( dump_pairs )
+        {
+            const auto& dir = prm_.stokes_solver_parameters.dump_pairs_dir;
+            std::filesystem::create_directories( dir );
+            auto& w = triangular_prec_tmp_;
+            linalg::assign( stok_vecs_["u_guess"], stok_vecs_["u"] );
+            linalg::apply( *K_, stok_vecs_["u"], w );
+            linalg::lincomb( w, { -1.0, 1.0 }, { w, stok_vecs_["f"] } );
+            char tag[32];
+            std::snprintf( tag, sizeof( tag ), "%04d", dump_count_ );
+            dump_stokes_vec_f64_( dir + "/pair_" + tag + "_r.bin", w );
+            {
+                std::ofstream os( dir + "/pair_" + tag + "_eta.bin", std::ios::binary );
+                dump_view_f64_( os, eta_[velocity_level_].grid_data() );
+            }
+            util::logroot << "Dumped guess residual pair " << tag << ": ||f - K u_guess|| = "
+                          << std::sqrt( linalg::dot( w, w ) ) << ", ||f|| = "
+                          << std::sqrt( linalg::dot( stok_vecs_["f"], stok_vecs_["f"] ) ) << std::endl;
+        }
+
+#ifdef TERRA_ENABLE_PYTHON
+        // Overwrites the initial guess (including the previous-timestep warm start)
+        // with one application of the rhs-trained operator to the physical rhs --
+        // the deployment that operator is actually in-distribution for.
+        if ( neural_guess_ )
+        {
+            util::logroot << "Neural initial guess ..." << std::endl;
+            neural_guess_->solve_impl( *K_, stok_vecs_["u"], stok_vecs_["f"] );
+            // Residual-optimal rescaling of the guess, alpha = <f, K z> / <K z, K z>
+            // (one matvec): absorbs any global amplitude mismatch between the
+            // model's training units and the app's rhs, so what remains measures
+            // the guess DIRECTION. alpha ~ 1 means the scaling was right.
+            {
+                auto& z = stok_vecs_["u"];
+                auto& w = triangular_prec_tmp_; // idle scratch until the solve
+                linalg::apply( *K_, z, w );
+                const ScalarType num   = linalg::dot( stok_vecs_["f"], w );
+                const ScalarType den   = linalg::dot( w, w );
+                const ScalarType alpha = den > 0 ? num / den : ScalarType( 0 );
+                linalg::lincomb( z, { alpha }, { z } );
+                linalg::apply( *K_, z, w );
+                linalg::lincomb( w, { -1.0, 1.0 }, { w, stok_vecs_["f"] } );
+                util::logroot << "Neural guess linesearch: alpha = " << alpha
+                              << ", ||f - K(alpha z)|| = " << std::sqrt( linalg::dot( w, w ) ) << std::endl;
+            }
+        }
+
+        if ( prm_.stokes_solver_parameters.iterative_refinement )
+        {
+            if ( use_float_basis_ )
+                throw std::runtime_error( "--stokes-iterative-refinement is not wired for the float-basis solver" );
+            solve_ir_();
+        }
+        else if ( stokes_fgmres_neural_ )
+            ::terra::linalg::solvers::solve( *stokes_fgmres_neural_, *K_, stok_vecs_["u"], stok_vecs_["f"] );
+        else
+#else
+        if ( prm_.stokes_solver_parameters.iterative_refinement )
+        {
+            if ( use_float_basis_ )
+                throw std::runtime_error( "--stokes-iterative-refinement is not wired for the float-basis solver" );
+            solve_ir_();
+        }
+        else
+#endif
         if ( use_float_basis_ )
             ::terra::linalg::solvers::solve( *stokes_fgmres_float_, *K_, stok_vecs_["u"], stok_vecs_["f"] );
         else
             ::terra::linalg::solvers::solve( *stokes_fgmres_double_, *K_, stok_vecs_["u"], stok_vecs_["f"] );
+
+        if ( dump_pairs )
+        {
+            auto& e = stok_vecs_["u_guess"];
+            linalg::lincomb( e, { 1.0, -1.0 }, { stok_vecs_["u"], e } );
+            char tag[32];
+            std::snprintf( tag, sizeof( tag ), "%04d", dump_count_ );
+            dump_stokes_vec_f64_( prm_.stokes_solver_parameters.dump_pairs_dir + "/pair_" + tag + "_e.bin", e );
+            // achieved accuracy of the "true" solution: the converter drops pairs whose
+            // final residual is not small against the guess residual
+            auto& w = triangular_prec_tmp_;
+            linalg::apply( *K_, stok_vecs_["u"], w );
+            linalg::lincomb( w, { -1.0, 1.0 }, { w, stok_vecs_["f"] } );
+            util::logroot << "Dumped pair " << tag << " final ||f - K u|| = " << std::sqrt( linalg::dot( w, w ) )
+                          << std::endl;
+            ++dump_count_;
+        }
+
+        // Block-wise final residual r = f - K u: says whether the remaining
+        // residual lives in the momentum or the continuity block. (Rank-local
+        // dot; the neural preconditioner demos run single-rank.)
+        {
+            linalg::apply( *K_, stok_vecs_["u"], triangular_prec_tmp_ );
+            linalg::lincomb( triangular_prec_tmp_, { 1.0, -1.0 }, { stok_vecs_["f"], triangular_prec_tmp_ } );
+            const auto r_u = std::sqrt( triangular_prec_tmp_.block_1().dot_impl( triangular_prec_tmp_.block_1() ) );
+            const auto r_p = std::sqrt( triangular_prec_tmp_.block_2().dot_impl( triangular_prec_tmp_.block_2() ) );
+            const auto f_u = std::sqrt( stok_vecs_["f"].block_1().dot_impl( stok_vecs_["f"].block_1() ) );
+            const auto f_p = std::sqrt( stok_vecs_["f"].block_2().dot_impl( stok_vecs_["f"].block_2() ) );
+            util::logroot << "Stokes residual blocks: ||r_u|| = " << r_u << ", ||r_p|| = " << r_p
+                          << "  (||f_u|| = " << f_u << ", ||f_p|| = " << f_p << ")" << std::endl;
+        }
 
         if ( log_convergence )
         {
@@ -931,8 +1266,144 @@ class StokesContext
             static_cast< ScalarType >( num_dofs_pressure_ );
         linalg::lincomb( p, { 1.0 }, { p }, -avg_pressure_approximation );
 
-        // Store u_prev for the next timestep
+        // Shift the solution history and store u_prev for the next timestep
+        linalg::assign( stok_vecs_["u_prev4"], stok_vecs_["u_prev3"] );
+        linalg::assign( stok_vecs_["u_prev3"], stok_vecs_["u_prev2"] );
+        linalg::assign( stok_vecs_["u_prev2"], stok_vecs_["u_prev"] );
         linalg::assign( stok_vecs_["u_prev"], stok_vecs_["u"] );
+        ++n_hist_;
+        if ( t_now_set_ )
+        {
+            for ( int i = 3; i > 0; i-- )
+                t_hist_[i] = t_hist_[i - 1];
+            t_hist_[0] = t_now_;
+            n_thist_   = std::min( n_thist_ + 1, 4 );
+        }
+    }
+
+    template < typename ViewT >
+    static void dump_view_f64_( std::ofstream& os, const ViewT& dev )
+    {
+        auto host = Kokkos::create_mirror( Kokkos::HostSpace{}, dev );
+        Kokkos::deep_copy( host, dev );
+        for ( std::size_t s = 0; s < host.extent( 0 ); ++s )
+            for ( std::size_t i = 0; i < host.extent( 1 ); ++i )
+                for ( std::size_t j = 0; j < host.extent( 2 ); ++j )
+                    for ( std::size_t k = 0; k < host.extent( 3 ); ++k )
+                    {
+                        const double v = static_cast< double >( host( s, i, j, k ) );
+                        os.write( reinterpret_cast< const char* >( &v ), sizeof( double ) );
+                    }
+    }
+
+    /// Raw f64 layout: velocity component-planar [3][subdomain][i][j][k] on the
+    /// velocity grid, then pressure [subdomain][i][j][k] on the pressure grid.
+    void dump_stokes_vec_f64_( const std::string& path, const linalg::VectorQ1IsoQ2Q1< ScalarType >& v )
+    {
+        std::ofstream os( path, std::ios::binary );
+        for ( int d = 0; d < 3; ++d )
+            dump_view_f64_( os, v.block_1().grid_data().comp_[d] );
+        dump_view_f64_( os, v.block_2().grid_data() );
+    }
+
+    /// Simulated time the next solve() belongs to (end of the current timestep).
+    /// Enables non-uniform-dt extrapolation of the initial guess.
+    void set_solve_time( ScalarType t )
+    {
+        t_now_     = t;
+        t_now_set_ = true;
+    }
+
+    /// Damped iterative refinement  x <- x + omega * M (f - K x)  with the
+    /// configured preconditioner M (neural model if --stokes-neural-precon is
+    /// set, block MG/Schur otherwise). No Krylov acceleration: the printed
+    /// per-step contraction IS ||I - omega M K|| along the current error, and
+    /// the block norms say in which block M fails. Reuses the FGMRES scratch
+    /// vectors; iteration count / tolerance come from the krylov settings.
+    /// (Rank-local norms; the neural demos run single-rank.)
+    void solve_ir_()
+    {
+        auto&        x     = stok_vecs_["u"];
+        auto&        f     = stok_vecs_["f"];
+        auto&        r     = stokes_tmp_fgmres_[0];
+        auto&        z     = stokes_tmp_fgmres_[1];
+        auto&        xprev = stokes_tmp_fgmres_[3];
+        auto&        xcur  = stokes_tmp_fgmres_[4];
+        const double beta  = prm_.stokes_solver_parameters.ir_momentum;
+        linalg::assign( xprev, x );
+        const double omega = prm_.stokes_solver_parameters.ir_damping;
+        const int    n_it  = prm_.stokes_solver_parameters.krylov_max_iterations;
+        const double tol   = prm_.stokes_solver_parameters.krylov_relative_tolerance;
+
+        util::logroot << "Iterative refinement, damping " << omega << " ..." << std::endl;
+        const bool auto_mom = prm_.stokes_solver_parameters.ir_auto_momentum;
+        double     rho_ema  = 0.0;
+        double     beta_eff = beta;
+        double     rel_prev = 1.0, rel_pp = 1.0, rel_ppp = 1.0;
+        double     f0       = 1.0;
+        for ( int it = 0; it <= n_it; ++it )
+        {
+            linalg::apply( *K_, x, r );
+            linalg::lincomb( r, { 1.0, -1.0 }, { f, r } );
+            const double r_u = std::sqrt( r.block_1().dot_impl( r.block_1() ) );
+            const double r_p = std::sqrt( r.block_2().dot_impl( r.block_2() ) );
+            const double rn  = std::sqrt( r_u * r_u + r_p * r_p );
+            if ( it == 0 )
+                f0 = rn > 0.0 ? rn : 1.0;
+            const double rel = rn / f0;
+            if ( auto_mom )
+            {
+                if ( it >= 2 && rel_prev > 0.0 )
+                {
+                    const double ratio = std::min( rel / rel_prev, 0.999 );
+                    rho_ema = ( rho_ema == 0.0 ) ? ratio : 0.85 * rho_ema + 0.15 * ratio;
+                }
+                if ( it >= 6 && rho_ema > 0.0 )
+                {
+                    const double s = std::sqrt( std::max( 1.0 - rho_ema, 1e-4 ) );
+                    beta_eff      = std::min( 0.85, std::pow( ( 1.0 - s ) / ( 1.0 + s ), 2.0 ) );
+                }
+                if ( it >= 3 && rel > rel_ppp )
+                {
+                    // residual rose over 3 steps: kill the momentum memory
+                    linalg::assign( xprev, x );
+                    beta_eff *= 0.7;
+                }
+                util::logroot << "stokes_ir |   auto beta " << beta_eff << " (rho " << rho_ema << ")"
+                              << std::endl;
+            }
+            rel_ppp = rel_pp; rel_pp = rel_prev; rel_prev = rel;
+            util::logroot << "stokes_ir | it " << it << " | rel " << rel << " | ||r_u|| " << r_u
+                          << " | ||r_p|| " << r_p << std::endl;
+            if ( rel < tol || it == n_it )
+                break;
+            linalg::assign( z, 0 );
+#ifdef TERRA_ENABLE_PYTHON
+            // hybrid: even steps neural, odd steps block MG/Schur
+            if ( neural_prec_ && ( !prm_.stokes_solver_parameters.ir_hybrid || it % 2 == 0 ) )
+                neural_prec_->solve_impl( *K_, z, r );
+            else
+#endif
+                prec_stokes_->solve_impl( *K_, z, r );
+            if ( prm_.stokes_solver_parameters.ir_linesearch )
+            {
+                // residual minimiser along z: one matvec, no basis
+                auto& w = stokes_tmp_fgmres_[2];
+                linalg::apply( *K_, z, w );
+                const double den   = w.dot_impl( w );
+                const double alpha = den > 0.0 ? w.dot_impl( r ) / den : 0.0;
+                util::logroot << "stokes_ir |   alpha " << alpha << std::endl;
+                linalg::lincomb( x, { 1.0, omega * alpha }, { x, z } );
+            }
+            else if ( beta_eff > 0.0 )
+            {
+                linalg::assign( xcur, x );
+                linalg::lincomb( x, { 1.0 + beta_eff, omega, -beta_eff }, { x, z, xprev } );
+                linalg::assign( xprev, xcur );
+            }
+            else
+                linalg::lincomb( x, { 1.0, omega }, { x, z } );
+        }
     }
 
   private:
@@ -1012,6 +1483,17 @@ class StokesContext
     bool                                                   use_float_basis_ = false;
     std::unique_ptr< FGMRESDouble >                        stokes_fgmres_double_;
     std::unique_ptr< FGMRESFloat >                         stokes_fgmres_float_;
+#ifdef TERRA_ENABLE_PYTHON
+    std::unique_ptr< ml::NeuralSolver< Stokes > > neural_prec_;
+    std::unique_ptr< FGMRESNeural >               stokes_fgmres_neural_;
+    std::unique_ptr< ml::NeuralSolver< Stokes > > neural_guess_;
+#endif
+    int n_hist_ = 0; ///< solutions stored so far (gates the extrapolation order)
+    ScalarType                  t_now_     = 0;
+    bool                        t_now_set_ = false;
+    std::array< ScalarType, 4 > t_hist_{}; ///< solve times of u_prev..u_prev4
+    int                         n_thist_ = 0;
+    int                         dump_count_ = 0;
 };
 
 } // namespace terra::mantlecirculation

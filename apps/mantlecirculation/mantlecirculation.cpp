@@ -379,6 +379,21 @@ Result<> run( const Parameters& prm )
             stokes.eta_fine().grid_data(),
             stokes.density().grid_data() );
         break;
+    case EnergySolverType::MMOC:
+        energy = std::make_unique< MMOCSolver< ScalarType > >(
+            domains[velocity_level],
+            coords_shell[velocity_level],
+            coords_radii[velocity_level],
+            boundary_mask_data[velocity_level],
+            ownership_mask_data[velocity_level],
+            u.block_1(),
+            T,
+            h,
+            prm,
+            table,
+            stokes.eta_fine().grid_data(),
+            stokes.density().grid_data() );
+        break;
     }
 
     // EV-specific: register the Q1-projected per-wedge ν_h diagnostic field
@@ -538,6 +553,7 @@ Result<> run( const Parameters& prm )
             stokes.update_viscosity( T );
 
             // --- Stokes solve ---
+            stokes.set_solve_time( simulated_time + prm.time_stepping_parameters.energy_substeps * dt );
             stokes.solve( Tdev, prm.physics_parameters.compressible, /*log_convergence=*/( picard == num_picard - 1 ) );
 
             if ( timestep == prm.time_stepping_parameters.timestep_initial + 1 && picard == 0 )

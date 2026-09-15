@@ -8,7 +8,9 @@
 #include "fe/wedge/integrands.hpp"
 #include "fe/wedge/kernel_helpers.hpp"
 #include "fe/wedge/shell/grid_transfer_linear.hpp"
+#include "grid/shell/bit_masks.hpp"
 #include "grid/shell/spherical_shell.hpp"
+#include "kernels/common/grid_operations.hpp"
 #include "linalg/operator.hpp"
 #include "linalg/vector.hpp"
 #include "linalg/vector_q1.hpp"
@@ -151,6 +153,16 @@ class RestrictionVecConstant
 
     grid::Grid4DDataScalar< grid::NodeOwnershipFlag > mask_src_;
 
+    // Optional Dirichlet boundary handling: when a shell's velocity BC is
+    // Dirichlet, the restricted residual must be zeroed on that shell so the
+    // v-cycle preserves u = 0 there exactly. Selection is by the coarse-level
+    // boundary flag (CMB / SURFACE), NOT by geometric radial index, so it stays
+    // correct under radial subdomain decomposition (only subdomains with
+    // subdomain_r() == 0 / == num_radial-1 carry the CMB / SURFACE flag).
+    grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag > boundary_mask_;
+    bool                                                     zero_cmb_     = false;
+    bool                                                     zero_surface_ = false;
+
   public:
     RestrictionVecConstant(
         const grid::shell::DistributedDomain& domain_coarse,
@@ -161,6 +173,30 @@ class RestrictionVecConstant
     , send_buffers_( domain_coarse )
     , recv_buffers_( domain_coarse )
     {}
+
+    /// @brief Zero the restricted residual on Dirichlet velocity boundary shells.
+    ///
+    /// The v-cycle transfer operators are boundary-agnostic: restriction averages
+    /// interior fine residual into coarse Dirichlet rows, the smoother then updates
+    /// those rows (the eliminated operator has no coupling there to push back), and
+    /// prolongation carries the spurious correction back onto the fine boundary.
+    /// Zeroing the restricted residual here keeps the whole cycle an exact invariant
+    /// of the u = 0 boundary subspace.
+    ///
+    /// The boundary flag grid is built from this operator's own coarse domain, so
+    /// it matches the layout of the restricted output exactly under both lateral
+    /// and radial subdomain decomposition and under agglomeration (where the
+    /// coarse domain lives on the upper communicator).
+    ///
+    /// @param cmb     Zero the CMB shell (velocity BC at the core-mantle boundary is Dirichlet).
+    /// @param surface Zero the SURFACE shell (velocity BC at the surface is Dirichlet).
+    void set_dirichlet_boundary_zeroing( bool cmb, bool surface )
+    {
+        zero_cmb_     = cmb;
+        zero_surface_ = surface;
+        if ( cmb || surface )
+            boundary_mask_ = grid::shell::setup_boundary_mask_data( domain_coarse_ );
+    }
 
     void apply_impl( const SrcVectorType& src, DstVectorType& dst )
     {
@@ -206,6 +242,17 @@ class RestrictionVecConstant
         communication::shell::pack_send_and_recv_local_subdomain_boundaries(
             domain_coarse_, dst_, send_buffers_, recv_buffers_ );
         communication::shell::unpack_and_reduce_local_subdomain_boundaries( domain_coarse_, dst_, recv_buffers_ );
+
+        // Zero the restricted residual on Dirichlet boundary shells, selected by
+        // the CMB / SURFACE flag (correct under radial subdomain decomposition,
+        // where an interior subdomain's r == 0 / r == extent-1 are shared
+        // interface shells, not physical boundaries, and carry no boundary flag).
+        if ( zero_cmb_ )
+            kernels::common::assign_masked_else_keep_old< ScalarType, VecDim, grid::shell::ShellBoundaryFlag >(
+                dst_, ScalarType( 0 ), boundary_mask_, grid::shell::ShellBoundaryFlag::CMB );
+        if ( zero_surface_ )
+            kernels::common::assign_masked_else_keep_old< ScalarType, VecDim, grid::shell::ShellBoundaryFlag >(
+                dst_, ScalarType( 0 ), boundary_mask_, grid::shell::ShellBoundaryFlag::SURFACE );
     }
 
     KOKKOS_INLINE_FUNCTION void

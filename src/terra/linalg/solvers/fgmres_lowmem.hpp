@@ -61,6 +61,7 @@ class FGMRESLowMem
 
     void set_tag( const std::string& tag ) { tag_ = tag; }
     void set_restart( int m ) { options_.restart = std::max( 1, m ); }
+    void set_absolute_tolerance( ScalarType t ) { options_.absolute_residual_tolerance = t; }
 
     template < typename OpT >
     void solve_impl( OpT& A, SolutionVectorType& x, const RHSVectorType& b )

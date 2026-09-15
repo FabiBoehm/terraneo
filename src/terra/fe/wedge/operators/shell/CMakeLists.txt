@@ -24,6 +24,7 @@ target_sources(terra
         zero.hpp
         kmass.hpp
         shear_heating_simple.hpp
+        mmoc_transport.hpp
         )
 
 add_subdirectory(optimized_laplace)

@@ -261,6 +261,66 @@ enum class MGPrecision
 
 struct StokesSolverParameters
 {
+    /// When non-empty, replace the block-triangular MG/Schur preconditioner of the
+    /// outer Stokes FGMRES with terra::ml::NeuralSolver running the named registered
+    /// model (e.g. "cband"; the checkpoint comes from $TERRA_NEURAL_CHECKPOINT).
+    /// Needs a build with -DTERRA_ENABLE_PYTHON=ON.
+    std::string neural_precon = "";
+
+    /// When non-empty, run terra::ml::NeuralSolver with the named registered model
+    /// ONCE on the Stokes rhs before the (unchanged) FGMRES solve, overwriting the
+    /// initial guess. The rhs-trained operators are in-distribution for exactly
+    /// this deployment -- predicting the solution from the physical rhs -- unlike
+    /// the preconditioner slot, which feeds them Krylov residuals.
+    std::string neural_guess = "";
+
+    /// Initial-guess policy for warm-start benchmarks. guess_extrap = N uses a
+    /// polynomial time-extrapolation of the stored solution history (1 linear,
+    /// 2 quadratic, 3 cubic); 0 keeps the default persistence warm start.
+    /// guess_zero cold-starts every solve (the baseline).
+    int  guess_extrap = 0;
+    bool guess_zero   = false;
+    /// guess_proj = k: residual-optimal projection of the initial guess onto the
+    /// span of the last k solutions for the current operator (k matvecs + k x k
+    /// solve). Takes precedence over guess_extrap.
+    int guess_proj = 0;
+    /// Stop FGMRES at ||f - K u|| <= krylov_relative_tolerance * ||f|| instead of
+    /// relative to the initial residual. The default criterion measures the
+    /// reduction from the warm-started residual, so a good initial guess buys
+    /// nothing; this one fixes the absolute accuracy of every solve.
+    bool tolerance_relative_to_rhs = false;
+    /// Write (r = f - K u_guess, e = u - u_guess, eta) of every solve as raw
+    /// float64 into this directory (single-rank; warm-start training pairs).
+    std::string dump_pairs_dir;
+
+    /// Replace the outer FGMRES by damped iterative refinement
+    /// x <- x + ir_damping * M (f - K x), with M the configured preconditioner
+    /// (block MG/Schur, or the neural model when --stokes-neural-precon is set).
+    /// The per-step contraction directly measures M's quality as an approximate
+    /// inverse -- no Krylov line search or orthogonalisation in the way.
+    bool   iterative_refinement = false;
+    double ir_damping           = 1.0;
+    /// Auto-damped refinement: after z = M r, one matvec w = K z and the step
+    /// x += alpha * z with alpha = <r,w>/<w,w> -- the residual minimiser along
+    /// z. Overshooting directions are scaled down instead of amplified; costs
+    /// one extra operator application per step, still no Krylov basis.
+    bool ir_linesearch = false;
+    /// Hybrid refinement: alternate the neural preconditioner and the block
+    /// MG/Schur preconditioner step by step. Measures whether the learned
+    /// operator adds per-iteration value on top of MG's own contraction.
+    bool ir_hybrid = false;
+    /// Heavy-ball acceleration of the refinement:
+    /// x <- x + ir_damping * M r + ir_momentum * (x - x_prev).
+    /// For a stationary contraction with rate rho, the optimal momentum
+    /// accelerates the asymptotic rate to ~(1-sqrt(1-rho))/(1+sqrt(1-rho)).
+    double ir_momentum = 0.0;
+    /// Self-tuning acceleration: estimate the contraction rate rho online from
+    /// the residual ratios (EMA after a short plain warmup), set the momentum
+    /// to the heavy-ball optimum ((1-sqrt(1-rho))/(1+sqrt(1-rho)))^2 for that
+    /// rho, and reset the momentum memory whenever the residual rises.
+    /// Level- and model-independent, unlike a fixed --stokes-ir-momentum.
+    bool ir_auto_momentum = false;
+
     int    krylov_restart            = 10;
     int    krylov_max_iterations     = 10;
     double krylov_relative_tolerance = 1e-6;
@@ -271,6 +331,11 @@ struct StokesSolverParameters
     /// HyTeG's Uzawa `relaxParamSchur`. Default 1.0 = unscaled (legacy). The optimal
     /// value drifts with viscosity contrast → a robustness knob at high contrast.
     double schur_relaxation = 1.0;
+
+    /// Strength of the rigid-rotation null-space penalty of the viscous block for free-slip/free-slip runs
+    /// (EpsilonDivDivKerngen::set_penalty_epsilon). 1.0 reproduces the Aug/Sep 2026 production binaries; the
+    /// mmoc-transport-v1 branch ran with 1e-7. Large values pollute the Chebyshev eigenvalue estimate.
+    double penalty_epsilon = 1.0;
 
     /// Refresh the fine-level A-block MG smoother (D^-1 + Chebyshev eigenvalue
     /// bounds) on every viscosity update. Without this the smoother stays tuned to
@@ -354,6 +419,7 @@ enum class EnergySolverType
 {
     SUPG,
     ENTROPY_VISCOSITY,
+    MMOC,
 };
 
 struct TimeSteppingParameters
@@ -853,6 +919,7 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
         { "supg", EnergySolverType::SUPG },
         { "entropy_viscosity", EnergySolverType::ENTROPY_VISCOSITY },
         { "ev", EnergySolverType::ENTROPY_VISCOSITY },
+        { "mmoc", EnergySolverType::MMOC },
     };
 
     add_option_with_default( app, "--energy-solver", parameters.time_stepping_parameters.energy_solver )
@@ -860,7 +927,8 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
         ->default_val( "ev" )
         ->group( "Time Discretization" )
         ->description( "'ev': Entropy-viscosity Galerkin advection-diffusion (default). "
-                       "'supg': Implicit SUPG advection-diffusion with FGMRES solver." );
+                       "'supg': Implicit SUPG advection-diffusion with FGMRES solver. "
+                       "'mmoc': semi-Lagrangian (modified method of characteristics) transport + implicit diffusion." );
 
     /////////////////////
     /// Stokes solver ///
@@ -878,6 +946,36 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
 
     add_option_with_default( app, "--stokes-krylov-restart", parameters.stokes_solver_parameters.krylov_restart )
         ->group( "Stokes Solver" );
+    add_option_with_default( app, "--stokes-neural-precon", parameters.stokes_solver_parameters.neural_precon )
+        ->group( "Stokes Solver" );
+    add_option_with_default( app, "--stokes-neural-guess", parameters.stokes_solver_parameters.neural_guess )
+        ->group( "Stokes Solver" );
+    add_option_with_default( app, "--stokes-guess-extrap", parameters.stokes_solver_parameters.guess_extrap )
+        ->group( "Stokes Solver" );
+    add_flag_with_default( app, "--stokes-guess-zero", parameters.stokes_solver_parameters.guess_zero )
+        ->group( "Stokes Solver" );
+    add_option_with_default( app, "--stokes-guess-proj", parameters.stokes_solver_parameters.guess_proj )
+        ->group( "Stokes Solver" );
+    add_option_with_default( app, "--stokes-dump-pairs", parameters.stokes_solver_parameters.dump_pairs_dir )
+        ->group( "Stokes Solver" );
+    add_flag_with_default( app,
+                           "--stokes-krylov-tolerance-relative-to-rhs",
+                           parameters.stokes_solver_parameters.tolerance_relative_to_rhs )
+        ->group( "Stokes Solver" );
+    add_flag_with_default(
+        app, "--stokes-iterative-refinement", parameters.stokes_solver_parameters.iterative_refinement )
+        ->group( "Stokes Solver" );
+    add_option_with_default( app, "--stokes-ir-damping", parameters.stokes_solver_parameters.ir_damping )
+        ->group( "Stokes Solver" );
+    add_flag_with_default( app, "--stokes-ir-linesearch", parameters.stokes_solver_parameters.ir_linesearch )
+        ->group( "Stokes Solver" );
+    add_flag_with_default( app, "--stokes-ir-hybrid", parameters.stokes_solver_parameters.ir_hybrid )
+        ->group( "Stokes Solver" );
+    add_option_with_default( app, "--stokes-ir-momentum", parameters.stokes_solver_parameters.ir_momentum )
+        ->group( "Stokes Solver" );
+    add_flag_with_default(
+        app, "--stokes-ir-auto-momentum", parameters.stokes_solver_parameters.ir_auto_momentum )
+        ->group( "Stokes Solver" );
     add_option_with_default(
         app, "--stokes-krylov-max-iterations", parameters.stokes_solver_parameters.krylov_max_iterations )
         ->group( "Stokes Solver" );
@@ -892,6 +990,9 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
         ->group( "Stokes Solver" )
         ->description( "Relaxation scale on the Schur preconditioner (HyTeG Uzawa relaxParamSchur analogue). "
                        "1.0 = unscaled; tune for strongly-varying viscosity." );
+    add_option_with_default( app, "--stokes-penalty-epsilon", parameters.stokes_solver_parameters.penalty_epsilon )
+        ->group( "Stokes Solver" )
+        ->description( "Rigid-rotation null-space penalty strength of the viscous block (fs/fs only)." );
     add_flag_with_default(
         app, "--stokes-refresh-viscous-pc", parameters.stokes_solver_parameters.refresh_viscous_pc )
         ->group( "Stokes Solver" )
