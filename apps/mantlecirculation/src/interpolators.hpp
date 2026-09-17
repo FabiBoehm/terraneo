@@ -14,20 +14,6 @@ using grid::Grid3DDataVec;
 using grid::Grid4DDataScalar;
 using grid::Grid4DDataVec;
 
-// Helper to check whether given datatype exposes .grid_data() method,
-// i.e. distinguish between wrapped vector classes and raw Kokkos::View.
-template < typename T >
-concept HasGridData = requires( const T& t ) { t.grid_data(); };
-
-template < typename FieldType >
-auto extractGridData( const FieldType& field )
-{
-    if constexpr ( HasGridData< FieldType > )
-        return field.grid_data();
-    else
-        return field;
-}
-
 // Interpolate from radial profile to Q1 field
 struct RadialProfileToQ1
 {
@@ -148,7 +134,7 @@ struct BuoyancyForceAssemblyPDA
     ScalarType                     rayleigh_number_pda_;
     ScalarType                     prefactor_;
 
-    BuoyancyForceAssembly(
+    BuoyancyForceAssemblyPDA(
         const Grid3DDataVec< ScalarType, 3 >& grid,
         const Grid2DDataScalar< ScalarType >& radii,
         const Grid4DDataVec< ScalarType, 3 >& data_f,

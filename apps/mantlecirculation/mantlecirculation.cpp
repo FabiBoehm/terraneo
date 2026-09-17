@@ -207,7 +207,10 @@ Result<> run( const Parameters& prm )
 
     // Logging nondimensional numbers
     logroot << "\n----------Simulation parameters-----------" << std::endl;
-    logroot << "Rayleigh number: " << prm.physics_parameters.rayleigh_number << std::endl;
+    if ( pda_form )
+        logroot << "Rayleigh number (PDA): " << prm.physics_parameters.pda_parameters.rayleigh_number_pda << std::endl;
+    else
+        logroot << "Rayleigh number: " << prm.physics_parameters.rayleigh_number << std::endl;
     logroot << "Peclet number: " << prm.physics_parameters.peclet_number << std::endl;
     logroot << "Reference viscosity: " << prm.physics_parameters.viscosity_parameters.reference_viscosity << std::endl;
     logroot << "Thermal diffusivity: " << prm.physics_parameters.thermal_diffusivity_dim << std::endl;
@@ -337,14 +340,19 @@ Result<> run( const Parameters& prm )
         };
 
         if ( pda_form ) // Add density output
-            fields.scalar_fields.push_back( { pda->density().grid_data(), prm.physics_parameters.reference_density, true } );
+        {
+            fields.scalar_fields.push_back(
+                { pda->density().grid_data(), prm.physics_parameters.reference_density, true } );
+        }
 
         if ( prm.io_parameters.output_pressure )
+        {
             fields.pressure_field.emplace(
                 u.block_2().grid_data(),
                 prm.physics_parameters.viscosity_parameters.reference_viscosity *
                     prm.physics_parameters.characteristic_velocity / prm.mesh_parameters.mantle_thickness_m,
                 true );
+        }
 
         return fields;
     };
@@ -378,7 +386,7 @@ Result<> run( const Parameters& prm )
         }
     }
 
-    // Initialise density Q1 field for PDA from initial temperature via lookup-table 
+    // Initialise density Q1 field for PDA from initial temperature via lookup-table
     if ( pda_form )
     {
         pda->update_density_from_table( T );
@@ -405,22 +413,21 @@ Result<> run( const Parameters& prm )
     logroot << "\n--------- Initial Stokes solve -----------------\n" << std::endl;
 
     // Pass full 3-D density to Stokes for PDA, else radial density profile.
-    if ( pda_form ) 
-        stokes.solve(
-            Tdev,
+    if ( pda_form )
+        stokes.solve_pda(
             pda->density(),
-            alpha_profile,
-            prm.physics_parameters.compressible,
-            /*log_convergence=*/true,
-            std::nullopt ); // First stokes solve is TALA-like, since density history is not yet available. 
+            pda->drho_dt(), // No density history yet, this should be zeroes.
+            std::nullopt,
+            /*log_convergence=*/true );
+
     else
-        stokes.solve(
+        stokes.solve_tala_or_incompressible(
             Tdev,
             rho_profile,
             alpha_profile,
+            std::nullopt,
             prm.physics_parameters.compressible,
-            /*log_convergence=*/true,
-            std::nullopt );
+            /*log_convergence=*/true );
 
     if ( prm.devel_parameters.extended_diagnostics )
         log_hbm( "after first Stokes solve (peak)" );
@@ -668,30 +675,29 @@ Result<> run( const Parameters& prm )
             }
 
             // --- Stokes solve ---
-            // Pass 3-D density and it's precomputed time-derivative for PDA, radial density profile else.
+            // Pass 3-D density and its precomputed time-derivative for PDA, radial density profile else.
             if ( pda_form )
             {
                 // Update density from tables (pda) -- and compute time-derivative
                 pda->update_density_from_table( T );
-                pda->compute_density_time_derivative( timestep - prm.time_stepping_parameters.timestep_initial, dt, dt_prev );
+                pda->compute_density_time_derivative(
+                    timestep - prm.time_stepping_parameters.timestep_initial, dt, dt_prev );
 
-                stokes.solve(
-                    Tdev,
+                stokes.solve_pda(
                     pda->density(),
-                    alpha_profile,
-                    prm.physics_parameters.compressible,
-                    /*log_convergence=*/ ( picard == num_picard - 1 ),
-                    std::optional( pda->drho_dt() ) );
+                    pda->drho_dt(),
+                    std::nullopt,
+                    /*log_convergence=*/( picard == num_picard - 1 ) );
             }
             else
             {
-                stokes.solve(
+                stokes.solve_tala_or_incompressible(
                     Tdev,
                     rho_profile,
                     alpha_profile,
+                    std::nullopt,
                     prm.physics_parameters.compressible,
-                    /*log_convergence=*/( picard == num_picard - 1 ),
-                    std::nullopt );
+                    /*log_convergence=*/( picard == num_picard - 1 ) );
             }
 
         } // end Picard loop
