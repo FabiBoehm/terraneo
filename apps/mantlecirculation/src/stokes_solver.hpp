@@ -786,7 +786,13 @@ class StokesContext
         util::Timer timer_stokes( "stokes" );
 
         if ( compressible )
+        {
             util::logroot << "Setting up Stokes rhs (TALA) ..." << std::endl;
+
+            // Assign u from the last timestep / picard iteration to u_prev.
+            // Only needed for compressible (frozen-velocity) case...
+            linalg::assign( stok_vecs_["u_prev"], stok_vecs_["u"] );
+        }
         else
             util::logroot << "Setting up Stokes rhs (incompressible) ..." << std::endl;
 
@@ -842,6 +848,9 @@ class StokesContext
         util::Timer timer_stokes( "stokes" );
 
         util::logroot << "Setting up Stokes rhs (PDA) ..." << std::endl;
+
+        // Assign u from the last timestep / picard iteration to u_prev.
+        linalg::assign( stok_vecs_["u_prev"], stok_vecs_["u"] );
 
         // Momentum equation rhs
         Kokkos::parallel_for(
@@ -918,9 +927,6 @@ class StokesContext
             kernels::common::masked_sum( p.grid_data(), p.mask_data(), grid::NodeOwnershipFlag::OWNED ) /
             static_cast< ScalarType >( num_dofs_pressure_ );
         linalg::lincomb( p, { 1.0 }, { p }, -avg_pressure_approximation );
-
-        // Store u_prev for the next timestep or picard step
-        linalg::assign( stok_vecs_["u_prev"], stok_vecs_["u"] );
     }
 
     /// Strong enforcement of the velocity BCs on the RHS, applied per boundary.

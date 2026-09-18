@@ -377,7 +377,8 @@ struct IOParameters
 
     bool        load_checkpoint = false;
     std::string checkpoint_dir;
-    int         checkpoint_step = -1;
+    int         checkpoint_step     = -1;
+    bool        continue_simulation = true;
 
     int output_frequency = 1;
 
@@ -960,14 +961,18 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
 
     add_option_with_default( app, "--outdir", parameters.io_parameters.outdir )->group( "I/O" );
     add_flag_with_default( app, "--outdir-overwrite", parameters.io_parameters.overwrite )->group( "I/O" );
-    add_option_with_default( app, "--output-pressure", parameters.io_parameters.output_pressure )->group( "I/O" );
+    add_flag_with_default( app, "--output-pressure", parameters.io_parameters.output_pressure )->group( "I/O" );
 
     // Checkpoint loading
-    add_option_with_default( app, "--load-checkpoint", parameters.io_parameters.load_checkpoint )
+    add_flag_with_default( app, "--load-checkpoint", parameters.io_parameters.load_checkpoint )
         ->group( "I/O" )
         ->description( "Starting from checkpoint" );
     add_option_with_default( app, "--checkpoint-dir", parameters.io_parameters.checkpoint_dir )->group( "I/O" );
     add_option_with_default( app, "--checkpoint-step", parameters.io_parameters.checkpoint_step )->group( "I/O" );
+    add_flag_with_default( app, "--continue-simulation", parameters.io_parameters.continue_simulation )
+        ->group( "I/O" )
+        ->description(
+            "Preserve timestep counter and model time through checkpoint restart (true) or restart from 0 (false)." );
 
     add_option_with_default( app, "--output-frequency", parameters.io_parameters.output_frequency )
         ->group( "I/O" )
@@ -1068,7 +1073,7 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
     nondimensionalise( parameters );
 
     // Determine timestep_initial from checkpointing parameters
-    if ( parameters.io_parameters.load_checkpoint )
+    if ( parameters.io_parameters.load_checkpoint && parameters.io_parameters.continue_simulation )
     {
         parameters.time_stepping_parameters.timestep_initial = parameters.io_parameters.checkpoint_step;
     }
