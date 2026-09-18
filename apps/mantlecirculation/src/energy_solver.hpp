@@ -22,6 +22,7 @@
 #include "linalg/solvers/fgmres.hpp"
 #include "linalg/solvers/fgmres_lowmem.hpp"
 #include "linalg/vector_q1.hpp"
+#include "linalg/vector_fv.hpp"
 #include "parameters.hpp"
 #include "util/logging.hpp"
 #include "util/table.hpp"
@@ -105,6 +106,65 @@ ScalarType ramp_dt( const ScalarType dt, const int timestep, const int ramp_step
 /// Operator: A = M + dt · (K_diff + K_adv + K_supg), Dirichlet rows treated
 /// strongly.  Inverse diagonal recomputed each step (dt changes); the solver
 /// is FGMRES with a Jacobi preconditioner.
+template < typename ScalarType >
+void log_timestep_info(
+    const Parameters& prm,
+    const int         timestep,
+    ScalarType        max_velocity,
+    ScalarType        max_radial_h,
+    ScalarType        dt_cfl,
+    ScalarType        dt )
+{
+    const bool log_dimensional = prm.devel_parameters.output_dimensional;
+
+    const ScalarType vel_scale  = log_dimensional ? prm.physics_parameters.calc_cm_per_year : ScalarType( 1 );
+    const ScalarType grid_scale = log_dimensional ? prm.mesh_parameters.mantle_thickness_m : ScalarType( 1 );
+    const ScalarType time_scale = log_dimensional ? prm.physics_parameters.calc_time_Ma : ScalarType( 1 );
+
+    // Compute dimensional values if required
+    max_velocity *= vel_scale;
+    max_radial_h *= grid_scale;
+    dt_cfl *= time_scale;
+    dt *= time_scale;
+
+    const ScalarType dt_max =
+        log_dimensional ? prm.time_stepping_parameters.dt_max_Ma : prm.time_stepping_parameters.dt_max;
+    const ScalarType dt_min =
+        log_dimensional ? prm.time_stepping_parameters.dt_min_Ma : prm.time_stepping_parameters.dt_min;
+
+    // Logging body
+    util::logroot << "    max_vel" << ( log_dimensional ? " (cm/a) :               " : " :                      " )
+                  << max_velocity << std::endl;
+    util::logroot << "    h"
+                  << ( log_dimensional ? " (m)   :                      " : " :                            " )
+                  << max_radial_h << std::endl;
+    util::logroot << "    cfl timestep size (= dt_scaling * h/v_max): " << dt_cfl << ( log_dimensional ? " Ma" : "" )
+                  << std::endl;
+    if ( dt_cfl > dt_max )
+    {
+        util::logroot << "....limiting maximum timestep size to " << dt_max
+                      << ( log_dimensional ? " Ma....." : " ....." ) << std::endl;
+    }
+    else if ( dt_cfl < dt_min )
+    {
+        util::logroot << "....limiting minimum timestep size to " << dt_min
+                      << ( log_dimensional ? " Ma....." : " ....." ) << std::endl;
+    }
+    if ( timestep <= prm.time_stepping_parameters.initial_dt_ramp_steps )
+    {
+        util::logroot << "....enforcing exponential ramp-up in first "
+                      << prm.time_stepping_parameters.initial_dt_ramp_steps << " timesteps....." << std::endl;
+    }
+    util::logroot << "-------------------------------------------------" << std::endl;
+    util::logroot << "=>   dt: " << dt << ( log_dimensional ? " Ma.\n" : ".\n" ) << std::endl;
+}
+
+/// Implicit Galerkin SUPG advection-diffusion energy solve.
+///
+/// Operator: A = M + dt · (K_diff + K_adv + K_supg), Dirichlet rows treated
+/// strongly.  Inverse diagonal recomputed each step (dt changes); the solver
+/// is FGMRES with a Jacobi preconditioner.
+
 template < typename ScalarType >
 class SUPGSolver : public EnergySolver< ScalarType >
 {
@@ -224,28 +284,7 @@ class SUPGSolver : public EnergySolver< ScalarType >
             prm_.time_stepping_parameters.dt_max );
 
         util::logroot << "Computing dt (SUPG advection CFL) ..." << std::endl;
-        util::logroot << "    max_vel (cm/a) :             " << max_vel * prm_.physics_parameters.calc_cm_per_year
-                      << std::endl;
-        util::logroot << "    h (m) :                      " << h_ * prm_.mesh_parameters.radius_surface_m << std::endl;
-        util::logroot << "    cfl timestep size (= dt_scaling * h/v_max): "
-                      << dt_cfl * prm_.physics_parameters.calc_time_Ma << " Ma" << std::endl;
-        if ( dt_cfl > prm_.time_stepping_parameters.dt_max )
-        {
-            util::logroot << "....limiting maximum timestep size to " << prm_.time_stepping_parameters.dt_max_Ma
-                          << " Ma....." << std::endl;
-        }
-        else if ( dt_cfl < prm_.time_stepping_parameters.dt_min )
-        {
-            util::logroot << "....dt_min floor (" << prm_.time_stepping_parameters.dt_min_Ma
-                          << " Ma) exceeds the CFL-stable step; floor yields to CFL....." << std::endl;
-        }
-        if ( timestep <= prm_.time_stepping_parameters.initial_dt_ramp_steps )
-        {
-            util::logroot << "....enforcing exponential ramp-up in first "
-                          << prm_.time_stepping_parameters.initial_dt_ramp_steps << " timesteps....." << std::endl;
-        }
-        util::logroot << "-------------------------------------------------" << std::endl;
-        util::logroot << "=>   dt: " << dt * prm_.physics_parameters.calc_time_Ma << " Ma.\n" << std::endl;
+        log_timestep_info( prm_, timestep, max_vel, h_, dt_cfl, dt );
 
         return dt;
     }
@@ -465,7 +504,8 @@ class EVSolver : public EnergySolver< ScalarType >
         }
 
         util::logroot << "Setting up entropy-viscosity (EV) energy solver ..." << std::endl;
-        log_hbm( "EV: after Q1 scalar fields (T_prev/rhs/lap/M_lumped/backups/g/tmp/q/diag)" );
+        if ( prm_.devel_parameters.extended_diagnostics )
+            log_hbm( "EV: after Q1 scalar fields (T_prev/rhs/lap/M_lumped/backups/g/tmp/q/diag)" );
 
         // Per-wedge ν_h field: extents (#subdomains, N-1, N-1, N_r-1, num_wedges).
         const auto num_sub = static_cast< long long >( domain_->subdomains().size() );
@@ -514,7 +554,8 @@ class EVSolver : public EnergySolver< ScalarType >
         // (a single physics parameter), so we use the constant-coefficient
         // overload of the ∇·(ν ∇·) operator — no per-wedge Grid5D κ field is
         // stored — giving the standard ∫ κ ∇φ_i · ∇φ_j with additive halo exchange.
-        log_hbm( "EV: + nu_h_wedge (1 Grid5D per-wedge field; kappa is a scalar)" );
+        if ( prm_.devel_parameters.extended_diagnostics )
+            log_hbm( "EV: + nu_h_wedge (1 Grid5D per-wedge field; kappa is a scalar)" );
         A_kappa_ = std::make_unique< EVDiffOp >(
             *domain_, coords_shell_, coords_radii_,
             static_cast< ScalarType >( prm_.physics_parameters.thermal_diffusivity_nondim ) );
@@ -600,7 +641,8 @@ class EVSolver : public EnergySolver< ScalarType >
             const ScalarType Di = static_cast< ScalarType >( prm_.physics_parameters.dissipation_number );
             const ScalarType Ra = static_cast< ScalarType >( prm_.physics_parameters.rayleigh_number );
             shear_op_->set_scale( Ra != ScalarType( 0 ) ? Di / Ra : ScalarType( 0 ) );
-            log_hbm( "EV: + compressible heating source fields (2 Q1)" );
+            if ( prm_.devel_parameters.extended_diagnostics )
+                log_hbm( "EV: + compressible heating source fields (2 Q1)" );
         }
 
         // Apply runtime EV parameter overrides from the CLI.
@@ -629,28 +671,7 @@ class EVSolver : public EnergySolver< ScalarType >
             prm_.time_stepping_parameters.dt_max );
 
         util::logroot << "Computing dt (EV advection CFL) ..." << std::endl;
-        util::logroot << "    max_vel (cm/a) :             " << max_vel * prm_.physics_parameters.calc_cm_per_year
-                      << std::endl;
-        util::logroot << "    h (m) :                      " << h_ * prm_.mesh_parameters.radius_surface_m << std::endl;
-        util::logroot << "    cfl timestep size (= dt_scaling * h/v_max): "
-                      << dt_cfl * prm_.physics_parameters.calc_time_Ma << " Ma " << std::endl;
-        if ( dt_cfl > prm_.time_stepping_parameters.dt_max )
-        {
-            util::logroot << "....limiting maximum timestep size to " << prm_.time_stepping_parameters.dt_max_Ma
-                          << " Ma....." << std::endl;
-        }
-        else if ( dt_cfl < prm_.time_stepping_parameters.dt_min )
-        {
-            util::logroot << "....dt_min floor (" << prm_.time_stepping_parameters.dt_min_Ma
-                          << " Ma) exceeds the CFL-stable step; floor yields to CFL....." << std::endl;
-        }
-        if ( timestep <= prm_.time_stepping_parameters.initial_dt_ramp_steps )
-        {
-            util::logroot << "....enforcing exponential ramp-up in first "
-                          << prm_.time_stepping_parameters.initial_dt_ramp_steps << " timesteps....." << std::endl;
-        }
-        util::logroot << "-------------------------------------------------" << std::endl;
-        util::logroot << "=>   dt: " << dt * prm_.physics_parameters.calc_time_Ma << " Ma.\n" << std::endl;
+        log_timestep_info( prm_, timestep, max_vel, h_, dt_cfl, dt );
 
         return dt;
     }
@@ -971,9 +992,12 @@ class EVSolver : public EnergySolver< ScalarType >
             linalg::invert_entries( diag_ );
         }
 
-        const ScalarType gamma = prm_.physics_parameters.internal_heating ?
-                                     static_cast< ScalarType >( prm_.physics_parameters.internal_heating_rate ) :
-                                     ScalarType( 0 );
+        // Internal heating enters nondimensionally as H / c_p (upstream 2913b8c),
+        // not as a raw rate.
+        const ScalarType gamma =
+            prm_.physics_parameters.internal_heating ?
+                static_cast< ScalarType >( prm_.physics_parameters.h_number / prm_.physics_parameters.cp_profile ) :
+                ScalarType( 0 );
 
         // OPT: shear-heating Phi depends only on (velocity, viscosity), both constant
         // across the energy substeps (Stokes + update_viscosity run once per outer
@@ -1425,7 +1449,8 @@ class MMOCSolver : public EnergySolver< ScalarType >
             const ScalarType Di = static_cast< ScalarType >( prm_.physics_parameters.dissipation_number );
             const ScalarType Ra = static_cast< ScalarType >( prm_.physics_parameters.rayleigh_number );
             shear_op_->set_scale( Ra != ScalarType( 0 ) ? Di / Ra : ScalarType( 0 ) );
-            log_hbm( "MMOC: + compressible heating source fields (2 Q1)" );
+            if ( prm_.devel_parameters.extended_diagnostics )
+                log_hbm( "MMOC: + compressible heating source fields (2 Q1)" );
         }
 
         util::logroot << "MMOC energy solver ready (max Courant " << Transport::max_courant()
@@ -1449,28 +1474,7 @@ class MMOCSolver : public EnergySolver< ScalarType >
             static_cast< ScalarType >( prm_.time_stepping_parameters.dt_max ) );
 
         util::logroot << "Computing dt (MMOC, ghost-layer Courant bound) ..." << std::endl;
-        util::logroot << "    max_vel (cm/a) :             " << max_vel * prm_.physics_parameters.calc_cm_per_year
-                      << std::endl;
-        util::logroot << "    h (m) :                      " << h_ * prm_.mesh_parameters.radius_surface_m << std::endl;
-        util::logroot << "    cfl timestep size (= min(dt_scaling, max_courant) * h/v_max): "
-                      << dt_cfl * prm_.physics_parameters.calc_time_Ma << " Ma " << std::endl;
-        if ( dt_cfl > prm_.time_stepping_parameters.dt_max )
-        {
-            util::logroot << "....limiting maximum timestep size to " << prm_.time_stepping_parameters.dt_max_Ma
-                          << " Ma....." << std::endl;
-        }
-        else if ( dt_cfl < prm_.time_stepping_parameters.dt_min )
-        {
-            util::logroot << "....dt_min floor (" << prm_.time_stepping_parameters.dt_min_Ma
-                          << " Ma) exceeds the Courant-stable step; floor yields to Courant....." << std::endl;
-        }
-        if ( timestep <= prm_.time_stepping_parameters.initial_dt_ramp_steps )
-        {
-            util::logroot << "....enforcing exponential ramp-up in first "
-                          << prm_.time_stepping_parameters.initial_dt_ramp_steps << " timesteps....." << std::endl;
-        }
-        util::logroot << "-------------------------------------------------" << std::endl;
-        util::logroot << "=>   dt: " << dt * prm_.physics_parameters.calc_time_Ma << " Ma.\n" << std::endl;
+        log_timestep_info( prm_, timestep, max_vel, h_, dt_cfl, dt );
         return dt;
     }
 
@@ -1560,9 +1564,12 @@ class MMOCSolver : public EnergySolver< ScalarType >
 
         // RHS: q = M * T (after transport), plus dt * M * F for the heat sources.
         linalg::apply( *M_, T_, q_ );
-        const ScalarType gamma = prm_.physics_parameters.internal_heating ?
-                                     static_cast< ScalarType >( prm_.physics_parameters.internal_heating_rate ) :
-                                     ScalarType( 0 );
+        // Internal heating enters nondimensionally as H / c_p (upstream 2913b8c),
+        // not as a raw rate.
+        const ScalarType gamma =
+            prm_.physics_parameters.internal_heating ?
+                static_cast< ScalarType >( prm_.physics_parameters.h_number / prm_.physics_parameters.cp_profile ) :
+                ScalarType( 0 );
         if ( prm_.physics_parameters.compressible )
         {
             assemble_heating_source( gamma );
@@ -1657,6 +1664,170 @@ class MMOCSolver : public EnergySolver< ScalarType >
     linalg::VectorQ1Scalar< ScalarType >                g_, tmp_, q_, diag_;
     linalg::VectorQ1Scalar< ScalarType >                T_backup_;
     std::vector< linalg::VectorQ1Scalar< ScalarType > > tmp_gmres_;
+};
+
+
+template < typename ScalarType >
+class FCTSolver : public EnergySolver< ScalarType >
+{
+  public:
+    FCTSolver(
+        const std::shared_ptr< grid::shell::DistributedDomain >&        domain,
+        const grid::Grid3DDataVec< ScalarType, 3 >&                     coords_shell,
+        const grid::Grid2DDataScalar< ScalarType >&                     coords_radii,
+        const grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag >& boundary_mask,
+        const grid::Grid4DDataScalar< grid::NodeOwnershipFlag >&        ownership_mask,
+        const linalg::VectorQ1Vec< ScalarType, 3 >&                     velocity,
+        linalg::VectorQ1Scalar< ScalarType >&                           T,
+        linalg::VectorFVScalar< ScalarType >&                           T_fct,
+        const linalg::VectorFVVec< ScalarType, 3 >&                     fv_cell_centers,
+        const fv::hex::DirichletBCs< ScalarType >&                      fct_bcs,
+        const Parameters&                                               prm,
+        std::shared_ptr< util::Table >                                  table )
+    : domain_( domain )
+    , coords_shell_( coords_shell )
+    , coords_radii_( coords_radii )
+    , boundary_mask_( boundary_mask )
+    , velocity_( velocity )
+    , T_( T )
+    , T_fct_( T_fct )
+    , fv_cell_centers_( fv_cell_centers )
+    , fct_bcs_( fct_bcs )
+    , prm_( prm )
+    , table_( std::move( table ) )
+    , T_source_( "T_source", *domain_ )
+    , fv_fct_bufs_( *domain_ )
+    {
+        // FCT Picard backup: only touched when iterating; leave empty otherwise.
+        if ( prm_.time_stepping_parameters.picard_iterations > 1 )
+            T_fct_backup_ = linalg::VectorFVScalar< ScalarType >( "T_fct_backup", *domain_ );
+
+        linalg::assign( T_source_, ScalarType( 0 ) );
+
+        // l2_project_fv_to_fe needs at least 5 Q1 scalar temporaries.
+        constexpr int num_l2_proj_tmps = 5;
+        l2_proj_tmps_.reserve( num_l2_proj_tmps );
+        for ( int i = 0; i < num_l2_proj_tmps; ++i )
+        {
+            l2_proj_tmps_.emplace_back( "fct_l2_proj_tmp_" + std::to_string( i ), *domain_, ownership_mask );
+        }
+    }
+
+    void snapshot_for_picard() override
+    {
+        if ( prm_.time_stepping_parameters.picard_iterations > 1 )
+            Kokkos::deep_copy( T_fct_backup_.grid_data(), T_fct_.grid_data() );
+    }
+
+    void restore_for_picard() override { Kokkos::deep_copy( T_fct_.grid_data(), T_fct_backup_.grid_data() ); }
+
+    ScalarType compute_dt( const int timestep ) override
+    {
+        const auto dt_stable = fv::hex::operators::compute_dt_stable(
+            *domain_,
+            velocity_,
+            fv_cell_centers_.grid_data(),
+            coords_shell_,
+            coords_radii_,
+            prm_.physics_parameters.thermal_diffusivity_nondim );
+        const auto dt =
+            std::min( prm_.time_stepping_parameters.dt_scaling * dt_stable, prm_.time_stepping_parameters.dt_max );
+
+        util::logroot << "Computing dt (FCT stable) ..." << std::endl;
+        util::logroot << "    dt_stable:                     " << dt_stable * prm_.physics_parameters.calc_time_Ma
+                      << " Ma" << std::endl;
+        util::logroot << "=>  dt (= dt_stable * dt_scaling): " << dt * prm_.physics_parameters.calc_time_Ma << " Ma"
+                      << std::endl;
+        return dt;
+    }
+
+    void step( ScalarType dt, bool /*print_convergence*/ ) override
+    {
+        util::Timer timer_energy( "energy" );
+        util::logroot << "Setting up energy solve ..." << std::endl;
+
+        {
+            util::Timer timer_fct_substeps( "fct_substeps" );
+
+            for ( int i = 0; i < prm_.energy_solver_parameters.energy_substeps; ++i )
+            {
+                util::logroot << "Solving energy (FCT, substep " << i << ") ..." << std::endl;
+
+                {
+                    util::Timer timer_fct_source_step( "fct_explicit_step_updating_source_term" );
+                    if ( prm_.physics_parameters.internal_heating )
+                    {
+                        linalg::assign(
+                            T_source_, prm_.physics_parameters.h_number / prm_.physics_parameters.cp_profile );
+                    }
+                    timer_fct_source_step.stop();
+
+                    util::Timer timer_fct_step( "fct_explicit_step" );
+                    fv::hex::operators::fct_explicit_step(
+                        *domain_,
+                        T_fct_,
+                        velocity_,
+                        fv_cell_centers_.grid_data(),
+                        coords_shell_,
+                        coords_radii_,
+                        dt,
+                        fv_fct_bufs_,
+                        prm_.physics_parameters.thermal_diffusivity_nondim,
+                        T_source_.grid_data(),
+                        /*subtract_divergence=*/true,
+                        boundary_mask_,
+                        fct_bcs_ );
+                    timer_fct_step.stop();
+                }
+
+                fv::hex::apply_dirichlet_bcs( T_fct_, boundary_mask_, fct_bcs_, *domain_ );
+            }
+
+            timer_fct_substeps.stop();
+        }
+
+        // Project T_fct -> Q1 T once after all substeps.
+        {
+            util::Timer timer_fct_projection( "fct_l2_projection" );
+            fv::hex::l2_project_fv_to_fe_lumped( T_, T_fct_, *domain_, coords_shell_, coords_radii_, l2_proj_tmps_ );
+
+            // Enforce Dirichlet BCs on the Q1 temperature.
+            auto       T_grid    = T_.grid_data();
+            auto       mask      = boundary_mask_;
+            const auto T_cmb_val = static_cast< ScalarType >( prm_.boundary_parameters.temperature_max );
+            const auto T_top_val = static_cast< ScalarType >( prm_.boundary_parameters.temperature_min );
+            Kokkos::parallel_for(
+                "enforce_T_dirichlet_bcs",
+                grid::shell::local_domain_md_range_policy_nodes( *domain_ ),
+                KOKKOS_LAMBDA( const int sd, const int x, const int y, const int r ) {
+                    const auto flag = mask( sd, x, y, r );
+                    if ( flag == grid::shell::ShellBoundaryFlag::CMB )
+                        T_grid( sd, x, y, r ) = T_cmb_val;
+                    else if ( flag == grid::shell::ShellBoundaryFlag::SURFACE )
+                        T_grid( sd, x, y, r ) = T_top_val;
+                } );
+            Kokkos::fence();
+        }
+    }
+
+  private:
+    std::shared_ptr< grid::shell::DistributedDomain >               domain_;
+    const grid::Grid3DDataVec< ScalarType, 3 >&                     coords_shell_;
+    const grid::Grid2DDataScalar< ScalarType >&                     coords_radii_;
+    const grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag >& boundary_mask_;
+    const linalg::VectorQ1Vec< ScalarType, 3 >&                     velocity_;
+    linalg::VectorQ1Scalar< ScalarType >&                           T_;
+    linalg::VectorFVScalar< ScalarType >&                           T_fct_;
+    const linalg::VectorFVVec< ScalarType, 3 >&                     fv_cell_centers_;
+    const fv::hex::DirichletBCs< ScalarType >&                      fct_bcs_;
+    const Parameters&                                               prm_;
+    std::shared_ptr< util::Table >                                  table_;
+
+    // Owned scratch.
+    linalg::VectorFVScalar< ScalarType >                T_source_;
+    linalg::VectorFVScalar< ScalarType >                T_fct_backup_;
+    fv::hex::operators::FVFCTBuffers< ScalarType >      fv_fct_bufs_;
+    std::vector< linalg::VectorQ1Scalar< ScalarType > > l2_proj_tmps_;
 };
 
 } // namespace terra::mantlecirculation

@@ -1,29 +1,29 @@
-# TerraNeo
+# TERRA-NG
 
-[![CI](https://github.com/mantleconvection/terraneo/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mantleconvection/terraneo/actions/workflows/ci.yml)
-[![Doxygen Docs](https://github.com/mantleconvection/terraneo/actions/workflows/doxygen.yml/badge.svg?branch=main)](https://github.com/mantleconvection/terraneo/actions/workflows/doxygen.yml)
+[![CI](https://github.com/mantleconvection/TERRA-NG/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mantleconvection/TERRA-NG/actions/workflows/ci.yml)
+[![Doxygen Docs](https://github.com/mantleconvection/TERRA-NG/actions/workflows/doxygen.yml/badge.svg?branch=main)](https://github.com/mantleconvection/TERRA-NG/actions/workflows/doxygen.yml)
 
-Extreme-scale mantle convection code for CPU and GPU systems. Originating from the [TerraNeo project](https://terraneo.fau.de).
+Extreme-scale mantle convection code for CPU and GPU systems.
 
-> ❗️The code is early in development, and thus not yet ready for production. But feel free to try it out!
+> ❗️The code is early in development, but feel free to try it out!
 
 ## Documentation
 
-📜 Check out the [documentation](https://mantleconvection.github.io/terraneo/) pages or jump directly to one of the 
+📜 Check out the [documentation](https://mantleconvection.github.io/TERRA-NG/) pages or jump directly to one of the 
 following sections:
 
-* 🏃‍♀️ [Compiling and running](https://mantleconvection.github.io/terraneo/compiling-and-running.html)
-* 💻 [Cluster setup](https://mantleconvection.github.io/terraneo/cluster-setup.html)
-* 📖 [Framework documentation](https://mantleconvection.github.io/terraneo/framework-documentation.html)
-* 🔨 [How to contribute](https://mantleconvection.github.io/terraneo/contributing.html)
+* 🏃‍♀️ [Compiling and running](https://mantleconvection.github.io/TERRA-NG/compiling-and-running.html)
+* 💻 [Cluster setup](https://mantleconvection.github.io/TERRA-NG/cluster-setup.html)
+* 📖 [Framework documentation](https://mantleconvection.github.io/TERRA-NG/framework-documentation.html)
+* 🔨 [How to contribute](https://mantleconvection.github.io/TERRA-NG/contributing.html)
 
 ## Quickstart
 
 ```bash
-git clone https://github.com/mantleconvection/terraneo.git
-mkdir terraneo-build
-cd terraneo-build
-cmake ../terraneo
+git clone https://github.com/mantleconvection/TERRA-NG.git
+mkdir TERRA-NG-build
+cd TERRA-NG-build
+cmake ../TERRA-NG
 cd apps/mantlecirculation
 make
 ./mantlecirculation -h
@@ -31,13 +31,12 @@ make
 
 ## Features
 
-TerraNeo is a matrix-free finite element code written in modern C++ on top of [Kokkos](https://github.com/kokkos/kokkos)
+TERRA-NG is a matrix-free finite element code written in modern C++ on top of [Kokkos](https://github.com/kokkos/kokkos)
 mainly focused on massively parallel mantle convection simulations on GPU (and CPU) clusters.
 
 An incomplete list of features
 * Runs in massively parallel settings on CPU and GPU systems (via [Kokkos](https://github.com/kokkos/kokkos) and MPI)
 * Stable discretization of the generalized, compressible Stokes equations (Q1-iso-Q2 / Q1) using spherical wedge finite-elements
-* Advection-diffusion discretization using hexahedral [finite volumes with algebraic flux corrected transport (FCT)](#advection-diffusion)
 * Plate boundary conditions
 * Fully matrix-free
 * Krylov methods and geometric multigrid preconditioners (using GCA coarse grid operators)

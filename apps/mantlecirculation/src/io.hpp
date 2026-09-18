@@ -60,63 +60,77 @@ inline Result<> create_directories( const IOParameters& io_parameters )
     return { Ok{} };
 }
 
+// Xdmf output bundle
+template < typename FieldType >
+struct ScalableField
+{
+    FieldType* data;
+    ScalarType scale_factor;
+    bool       restore;
+
+    ScalableField( FieldType& data_, ScalarType scale_factor_, bool restore_ = true )
+    : data( &data_ )
+    , scale_factor( scale_factor_ )
+    , restore( restore_ )
+    {}
+};
+
+using ScalarXdmfField = ScalableField< Grid4DDataScalar< ScalarType > >;
+using VectorXdmfField = ScalableField< Grid4DDataVec< ScalarType, 3 > >;
+
+struct XdmfFields
+{
+    std::vector< ScalarXdmfField >   scalar_fields;
+    std::vector< VectorXdmfField >   vector_fields;
+    std::optional< ScalarXdmfField > pressure_field;
+};
+
 inline Result<> write_xdmf(
     std::optional< io::XDMFOutput< ScalarType > >& xdmf_output,
     std::optional< io::XDMFOutput< ScalarType > >& xdmf_output_pressure,
-    const Parameters&                              prm,
     const int                                      timestep,
-    Grid4DDataScalar< ScalarType >&                Temperature_data,
-    Grid4DDataScalar< ScalarType >&                TemperatureDev_data,
-    Grid4DDataVec< ScalarType, 3 >&                Velocity_data,
-    Grid4DDataScalar< ScalarType >&                Viscosity_data,
-    Grid4DDataScalar< ScalarType >&                Density_data,
-    Grid4DDataScalar< ScalarType >&                Pressure_data )
+    const bool                                     output_dimensional,
+    const std::vector< ScalarXdmfField >&          scalar_fields,
+    const std::vector< VectorXdmfField >&          vector_fields,
+    const std::optional< ScalarXdmfField >&        pressure_field )
 {
     logroot << "Writing XDMF output ..." << std::endl;
 
-    if ( prm.devel_parameters.output_dimensional )
+    if ( output_dimensional )
     {
         // Redimensionalise ...
-        scale( Temperature_data, prm.boundary_parameters.delta_T_K );
-        scale( TemperatureDev_data, prm.boundary_parameters.delta_T_K );
-        scale( Velocity_data, prm.physics_parameters.calc_cm_per_year );
-        scale( Viscosity_data, prm.physics_parameters.viscosity_parameters.reference_viscosity );
-        scale( Density_data, prm.physics_parameters.reference_density );
+        for ( auto& f : scalar_fields )
+            scale( *f.data, f.scale_factor );
+        for ( auto& f : vector_fields )
+            scale( *f.data, f.scale_factor );
 
         xdmf_output->write( timestep );
 
-        // ... and nondimensionalise again.
-        scale( Temperature_data, 1.0 / prm.boundary_parameters.delta_T_K );
-        scale( Velocity_data, 1.0 / prm.physics_parameters.calc_cm_per_year );
-        scale( Viscosity_data, 1.0 / prm.physics_parameters.viscosity_parameters.reference_viscosity );
-        scale( Density_data, 1.0 / prm.physics_parameters.reference_density );
-        // no need to rescale TemperatureDev, will be recomputed anyway.
+        // ... and nondimensionalise again, if required
+        for ( auto& f : scalar_fields )
+            if ( f.restore )
+                scale( *f.data, ScalarType( 1 ) / f.scale_factor );
+        for ( auto& f : vector_fields )
+            if ( f.restore )
+                scale( *f.data, ScalarType( 1 ) / f.scale_factor );
 
         // Redim, write and nondim pressure
-        if ( xdmf_output_pressure )
+        if ( pressure_field )
         {
-            scale(
-                Pressure_data,
-                ( prm.physics_parameters.viscosity_parameters.reference_viscosity *
-                  prm.physics_parameters.characteristic_velocity ) /
-                    prm.mesh_parameters.mantle_thickness_m );
+            scale( *pressure_field->data, pressure_field->scale_factor );
 
             xdmf_output_pressure->write( timestep );
 
-            scale(
-                Pressure_data,
-                prm.mesh_parameters.mantle_thickness_m /
-                    ( prm.physics_parameters.viscosity_parameters.reference_viscosity *
-                      prm.physics_parameters.characteristic_velocity ) );
+            if ( pressure_field->restore )
+                scale( *pressure_field->data, ScalarType( 1 ) / pressure_field->scale_factor );
         }
     }
     else
     {
         xdmf_output->write( timestep );
-        if ( xdmf_output_pressure )
+        if ( pressure_field )
             xdmf_output_pressure->write( timestep );
     }
-
     return { Ok{} };
 }
 
@@ -126,7 +140,7 @@ inline Result<> compute_and_write_radial_profiles(
     const std::vector< double >&        radial_coords,
     const Parameters&                   prm,
     const int                           timestep,
-    const ScalarType                    field_scale  = 1.0,
+    const ScalarType                    field_scale  = ScalarType( 1 ),
     const std::string&                  radial_label = "radius" )
 {
     const auto profiles = shell::radial_profiles_to_table< ScalarType >(
@@ -168,7 +182,7 @@ inline Result<> compute_and_write_velocity_radial_profiles(
     const grid::Grid4DDataScalar< grid::NodeOwnershipFlag >& mask,
     const Parameters&                                        prm,
     const int                                                timestep,
-    const ScalarType                                         field_scale  = 1.0,
+    const ScalarType                                         field_scale  = ScalarType( 1 ),
     const std::string&                                       radial_label = "radius" )
 {
     VectorQ1Scalar< ScalarType > u_r( "u_r", domain, mask );

@@ -16,6 +16,9 @@
 #include "fe/wedge/operators/shell/stokes.hpp"
 #include "fe/wedge/operators/shell/unsteady_advection_diffusion_supg_kerngen.hpp"
 #include "fe/wedge/operators/shell/vector_mass.hpp"
+#include "fv/hex/conversion.hpp"
+#include "fv/hex/helpers.hpp"
+#include "fv/hex/operators/fct_advection_diffusion.hpp"
 #include "geophysics/viscosity/viscosity_interpolation.hpp"
 #include "grid/grid_types.hpp"
 #include "grid/shell/spherical_shell.hpp"
@@ -39,6 +42,7 @@
 #include "src/diagnostics.hpp"
 #include "src/hbm_probe.hpp"
 #include "src/energy_solver.hpp"
+#include "src/hbm_probe.hpp"
 #include "src/interpolators.hpp"
 #include "src/io.hpp"
 #include "src/parameters.hpp"
@@ -165,7 +169,46 @@ Result<> run( const Parameters& prm )
     VectorQ1Scalar< ScalarType > T( "T", ( *domains[velocity_level] ), ownership_mask_data[velocity_level] );
     VectorQ1Scalar< ScalarType > Tdev( "Tdev", ( *domains[velocity_level] ), ownership_mask_data[velocity_level] );
 
-    Grid2DDataScalar< ScalarType > T_ref;
+    // True when compressibility is on and any PDA form is used.
+    const bool pda_form =
+        ( prm.physics_parameters.compressible &&
+          ( prm.physics_parameters.compressible_form == CompressibleForm::PDA ||
+            prm.physics_parameters.compressible_form == CompressibleForm::PDA_ENTROPY ) );
+
+    // Optional 3-D density field for PDA
+    // Density is needed in Stokes and energy -- so we set it up here
+    std::optional< VectorQ1Scalar< ScalarType > > density;
+    // The 3-D density is also what the compressible (TALA) heating terms read,
+    // so it is needed whenever compressibility is on, not only for the PDA form.
+    // The EV and MMOC solvers bind the field at construction (their heating terms
+    // ignore it when running incompressible), so it must exist for them as well.
+    const bool energy_binds_density = prm.energy_solver_parameters.energy_solver == EnergySolverType::ENTROPY_VISCOSITY ||
+                                      prm.energy_solver_parameters.energy_solver == EnergySolverType::MMOC;
+    if ( pda_form || prm.physics_parameters.compressible || energy_binds_density )
+    {
+        density.emplace( "density", ( *domains[velocity_level] ), ownership_mask_data[velocity_level] );
+    }
+
+    // Radial parameter profiles
+    Grid2DDataScalar< ScalarType > T_ref(
+        "T_ref", coords_radii[velocity_level].extent( 0 ), coords_radii[velocity_level].extent( 1 ) );
+    Grid2DDataScalar< ScalarType > rho_profile(
+        "rho_profile", coords_radii[velocity_level].extent( 0 ), coords_radii[velocity_level].extent( 1 ) );
+    Grid2DDataScalar< ScalarType > alpha_profile(
+        "alpha_profile", coords_radii[velocity_level].extent( 0 ), coords_radii[velocity_level].extent( 1 ) );
+    Grid2DDataScalar< ScalarType > cp_profile(
+        "cp_profile", coords_radii[velocity_level].extent( 0 ), coords_radii[velocity_level].extent( 1 ) );
+    Grid2DDataScalar< ScalarType > kappa_profile(
+        "kappa_profile", coords_radii[velocity_level].extent( 0 ), coords_radii[velocity_level].extent( 1 ) );
+
+    // Finite-volume functions/vectors.
+
+    // FV cell-centred temperature field (the FCT prognostic variable).
+    linalg::VectorFVScalar< ScalarType > T_fct( "T_fct", ( *domains[velocity_level] ) );
+    // Pre-computed cell centres (with ghost layers filled once and reused every step).
+    linalg::VectorFVVec< ScalarType, 3 > fv_cell_centers( "fv_cell_centers", ( *domains[velocity_level] ) );
+    fv::hex::initialize_cell_centers(
+        fv_cell_centers, ( *domains[velocity_level] ), coords_shell[velocity_level], coords_radii[velocity_level] );
 
     // Counting DoFs.
     int world_size = mpi::num_processes();
@@ -183,13 +226,37 @@ Result<> run( const Parameters& prm )
             << num_dofs_velocity / world_size << ", " << num_dofs_pressure / world_size << ")" << std::endl;
 
     // Logging nondimensional numbers
-    logroot << "\n----------Simulation parameters-----------"
-               "\nRayleigh number: "
-            << prm.physics_parameters.rayleigh_number
-            << "\nCharacteristic velocity: " << prm.physics_parameters.characteristic_velocity
-            << "\nThermal diffusivity: " << prm.physics_parameters.thermal_diffusivity_dim
-            << "\n------------------------------------------\n"
-            << std::endl;
+    logroot << "\n----------Simulation parameters-----------" << std::endl;
+    logroot << "Rayleigh number: " << prm.physics_parameters.rayleigh_number << std::endl;
+    logroot << "Peclet number: " << prm.physics_parameters.peclet_number << std::endl;
+    logroot << "Reference viscosity: " << prm.physics_parameters.viscosity_parameters.reference_viscosity << std::endl;
+    logroot << "Viscosity clamp (x reference): [" << prm.physics_parameters.viscosity_parameters.min_viscosity << ", "
+            << prm.physics_parameters.viscosity_parameters.max_viscosity << "]" << std::endl;
+    logroot << "Thermal diffusivity: " << prm.physics_parameters.thermal_diffusivity_dim << std::endl;
+    if ( !prm.devel_parameters.nondimensional_input )
+        logroot << "Characteristic velocity: " << prm.physics_parameters.characteristic_velocity << std::endl;
+    logroot << "------------------------------------------\n" << std::endl;
+
+    // Fill radial profile arrays
+    radial_profile_init(
+        rho_profile,
+        alpha_profile,
+        cp_profile,
+        kappa_profile,
+        *domains[velocity_level],
+        coords_radii[velocity_level],
+        prm );
+
+    // Initialise density Q1 field from radial profile -- before Stokes solver setup.
+    // Also needed for the compressible (TALA) heating terms, which read a 3-D density.
+    if ( density )
+    {
+        Kokkos::parallel_for(
+            "RadialProfileToQ1",
+            grid::shell::local_domain_md_range_policy_nodes( *domains[velocity_level] ),
+            RadialProfileToQ1{ density->grid_data(), rho_profile } );
+        Kokkos::fence();
+    }
 
     // Setting up Stokes velocity boundary conditions.
     //
@@ -213,7 +280,9 @@ Result<> run( const Parameters& prm )
     }
 
     // ---- Stokes solver context: viscosity hierarchy, GCA, MG, Schur, FGMRES.
-    log_hbm( "before StokesContext (domains + grids only)" );
+    if ( prm.devel_parameters.extended_diagnostics )
+        log_hbm( "before StokesContext (domains + grids only)" );
+
     StokesContext< ScalarType > stokes(
         domains, coords_shell, coords_radii, ownership_mask_data, boundary_mask_data, bcs, agglom, prm, table );
 
@@ -225,22 +294,25 @@ Result<> run( const Parameters& prm )
 
     logroot << "Setting up energy equation solver ..." << std::endl;
 
+    // FCT Dirichlet BCs (also used by FCTSolver below for the FV step).
+    const fv::hex::DirichletBCs< ScalarType > fct_bcs{
+        .T_cmb         = static_cast< ScalarType >( prm.boundary_parameters.temperature_max ),
+        .T_surface     = static_cast< ScalarType >( prm.boundary_parameters.temperature_min ),
+        .apply_cmb     = true,
+        .apply_surface = true };
+
     initialize_temperature_fields(
         T,
+        T_fct,
         T_ref,
+        fct_bcs,
         ( *domains[velocity_level] ),
         coords_shell[velocity_level],
         coords_radii[velocity_level],
+        fv_cell_centers,
         ownership_mask_data[velocity_level],
         boundary_mask_data[velocity_level],
         prm );
-
-    // If temperature-dependent viscosity is enabled, compute the initial viscosity from the initial T.
-    if ( prm.physics_parameters.viscosity_parameters.law != ViscosityLaw::CONSTANT )
-    {
-        logroot << "Computing initial temperature-dependent viscosity ..." << std::endl;
-        stokes.update_viscosity( T );
-    }
 
     table->add_row( {
         { "tag", "setup" },
@@ -253,6 +325,11 @@ Result<> run( const Parameters& prm )
 
     table->print_pretty();
     table->clear();
+
+    // Reference conductive temperature profile (also used for the Nusselt number).
+    VectorQ1Scalar< ScalarType > T_cond( "T_cond", ( *domains[velocity_level] ), ownership_mask_data[velocity_level] );
+    compute_reference_conductive_profile(
+        T_cond, ( *domains[velocity_level] ), coords_shell[velocity_level], coords_radii[velocity_level], prm );
 
     // Setting up XDMF output (serves for both checkpointing and visualization).
 
@@ -273,15 +350,13 @@ Result<> run( const Parameters& prm )
         coords_scale_factor );
 
     // Reference conductive temperature profile (also used for the Nusselt number).
-    VectorQ1Scalar< ScalarType > T_cond( "T_cond", ( *domains[velocity_level] ), ownership_mask_data[velocity_level] );
-    compute_reference_conductive_profile(
-        T_cond, ( *domains[velocity_level] ), coords_shell[velocity_level], coords_radii[velocity_level], prm );
 
     xdmf_output->add( T.grid_data() );                 // Temperature
     xdmf_output->add( Tdev.grid_data() );              // Temperature deviation
     xdmf_output->add( u.block_1().grid_data() );       // Velocity
     xdmf_output->add( stokes.eta_fine().grid_data() ); // Viscosity
-    xdmf_output->add( stokes.density().grid_data() );  // Density
+    if ( density )
+        xdmf_output->add( density->grid_data() ); // Density
 
     if ( prm.io_parameters.output_pressure )
     {
@@ -295,18 +370,59 @@ Result<> run( const Parameters& prm )
         xdmf_output_pressure->add( u.block_2().grid_data() ); // Pressure
     }
 
+    // Helper function to gather all xdmf output fields for write_xdmf().
+    // Combine with corresponding scaling factor for redimensionalisation and a flag specifying if the nondimensional field should be restored or not.
+    auto collect_xdmf_fields = [&]() -> XdmfFields {
+        XdmfFields fields;
+
+        fields.scalar_fields = {
+            { T.grid_data(), prm.boundary_parameters.delta_T_K, true },
+            { Tdev.grid_data(), prm.boundary_parameters.delta_T_K, false },
+            { stokes.eta_fine().grid_data(), prm.physics_parameters.viscosity_parameters.reference_viscosity, true },
+        };
+
+        fields.vector_fields = {
+            { u.block_1().grid_data(), prm.physics_parameters.calc_cm_per_year, true },
+        };
+
+        if ( pda_form ) // Add density output
+            fields.scalar_fields.push_back( { density->grid_data(), prm.physics_parameters.reference_density, true } );
+
+        if ( prm.io_parameters.output_pressure )
+            fields.pressure_field.emplace(
+                u.block_2().grid_data(),
+                prm.physics_parameters.viscosity_parameters.reference_viscosity *
+                    prm.physics_parameters.characteristic_velocity / prm.mesh_parameters.mantle_thickness_m,
+                true );
+
+        return fields;
+    };
+
+    // Loading checkpoint
     if ( prm.io_parameters.load_checkpoint )
     {
         load_temperature_checkpoint(
             u.block_1(),
             T,
+            T_fct,
             ( *domains[velocity_level] ),
+            coords_shell[velocity_level],
+            coords_radii[velocity_level],
             prm );
+    }
 
-        // Refresh viscosity from the loaded T: the IC-based eta computed
-        // earlier would otherwise drive the first Stokes solve with a stale
-        // viscosity field and produce an unphysical velocity at restart.
-        if ( prm.physics_parameters.viscosity_parameters.law != ViscosityLaw::CONSTANT )
+    // Update Tdev
+    subtract_radial_profile( Tdev, T, T_ref, *domains[velocity_level] );
+
+    // Compute temperature-dependent viscosity
+    if ( prm.physics_parameters.viscosity_parameters.law != ViscosityLaw::CONSTANT )
+    {
+        logroot << "Computing initial temperature-dependent viscosity ..." << std::endl;
+        if ( prm.physics_parameters.viscosity_parameters.law == ViscosityLaw::FK_TYPE3 )
+        {
+            stokes.update_viscosity( Tdev );
+        }
+        else
         {
             stokes.update_viscosity( T );
         }
@@ -366,10 +482,27 @@ Result<> run( const Parameters& prm )
     // ----- Initial Stokes solve -----
     logroot << "\n--------- Initial Stokes solve -----------------\n" << std::endl;
 
-    stokes.solve( Tdev, plate_velocities, prm.physics_parameters.compressible, /*log_convergence=*/true );
+    // The PDA form passes the 3-D density unwrapped; TALA passes the radial profile.
+    if ( pda_form )
+        stokes.solve( Tdev,
+                      plate_velocities,
+                      density->grid_data(),
+                      alpha_profile,
+                      prm.physics_parameters.compressible,
+                      /*log_convergence=*/true );
+    else
+        stokes.solve( Tdev,
+                      plate_velocities,
+                      rho_profile,
+                      alpha_profile,
+                      prm.physics_parameters.compressible,
+                      /*log_convergence=*/true );
 
     ScalarType simulated_time    = ScalarType( 0 );
     ScalarType simulated_time_Ma = ScalarType( 0 );
+
+    // Most negative temperature seen so far; only a new record is logged (see the guard below).
+    ScalarType T_min_record = ScalarType( 0 );
 
     // We need some global h. Let's, for simplicity (does not need to be too accurate) just choose the smallest h in
     // radial direction.
@@ -380,7 +513,7 @@ Result<> run( const Parameters& prm )
     // nu_h_nodal_view() can be registered with the XDMF output.
 
     std::unique_ptr< EnergySolver< ScalarType > > energy;
-    switch ( prm.time_stepping_parameters.energy_solver )
+    switch ( prm.energy_solver_parameters.energy_solver )
     {
     case EnergySolverType::SUPG:
         energy = std::make_unique< SUPGSolver< ScalarType > >(
@@ -411,7 +544,7 @@ Result<> run( const Parameters& prm )
             // reference density (aliased, updated in place). Ignored when
             // running incompressible.
             stokes.eta_fine().grid_data(),
-            stokes.density().grid_data() );
+            density->grid_data() );
         break;
     case EnergySolverType::MMOC:
         energy = std::make_unique< MMOCSolver< ScalarType > >(
@@ -426,8 +559,31 @@ Result<> run( const Parameters& prm )
             prm,
             table,
             stokes.eta_fine().grid_data(),
-            stokes.density().grid_data() );
+            density->grid_data() );
         break;
+    case EnergySolverType::FCT:
+        energy = std::make_unique< FCTSolver< ScalarType > >(
+            domains[velocity_level],
+            coords_shell[velocity_level],
+            coords_radii[velocity_level],
+            boundary_mask_data[velocity_level],
+            ownership_mask_data[velocity_level],
+            u.block_1(),
+            T,
+            T_fct,
+            fv_cell_centers,
+            fct_bcs,
+            prm,
+            table );
+        break;
+    }
+
+    // fv_cell_centers is consumed only by the FCT advection solver after
+    // initialization; for SUPG/EV it is dead weight (a 3-component FV field,
+    // ~0.5 GB/GCD at production scale). Release it for the non-FCT solvers.
+    if ( prm.energy_solver_parameters.energy_solver != EnergySolverType::FCT )
+    {
+        fv_cell_centers = linalg::VectorFVVec< ScalarType, 3 >();
     }
 
     // EV-specific: register the Q1-projected per-wedge ν_h diagnostic field
@@ -443,17 +599,15 @@ Result<> run( const Parameters& prm )
         logroot << "Writing initial XDMF ..." << std::endl;
 
         // Write to xdmf
+        auto fields = collect_xdmf_fields();
         write_xdmf(
             xdmf_output,
             xdmf_output_pressure,
-            prm,
             prm.time_stepping_parameters.timestep_initial,
-            T.grid_data(),
-            Tdev.grid_data(),
-            u.block_1().grid_data(),
-            stokes.eta_fine().grid_data(),
-            stokes.density().grid_data(),
-            u.block_2().grid_data() );
+            prm.devel_parameters.output_dimensional,
+            fields.scalar_fields,
+            fields.vector_fields,
+            fields.pressure_field );
     }
 
     // ---Radial profiles---
@@ -529,7 +683,8 @@ Result<> run( const Parameters& prm )
 
     logroot << "Starting time stepping!" << std::endl;
 
-    // Compute Nusselt at timestep 0 (before time stepping) for diagnostics.
+    // Compute Nusselt at timestep 0 (before any FCT steps) for diagnostics.
+    if ( prm.devel_parameters.extended_diagnostics )
     {
         const auto Nu_top_0 = compute_nusselt(
             ( *domains[velocity_level] ),
@@ -637,14 +792,38 @@ Result<> run( const Parameters& prm )
             subtract_radial_profile( Tdev, T, T_ref, *domains[velocity_level] );
 
             // Update viscosity from the new temperature field.
-            stokes.update_viscosity( T );
+            if ( prm.physics_parameters.viscosity_parameters.law == ViscosityLaw::FK_TYPE3 )
+            {
+                stokes.update_viscosity( Tdev );
+            }
+            else
+            {
+                stokes.update_viscosity( T );
+            }
+
+            // --- Stokes solve ---
+            // Using full density for PDA, radial density profile else.
+            // 3-D density for pda_form is passed unwrapped, see comment at
+            // initial stokes solve.
+            if ( pda_form )
+                stokes.solve(
+                    Tdev,
+                    plate_velocities,
+                    density->grid_data(),
+                    alpha_profile,
+                    prm.physics_parameters.compressible,
+                    /*log_convergence=*/( picard == num_picard - 1 ) );
+            else
+                stokes.solve(
+                    Tdev,
+                    plate_velocities,
+                    rho_profile,
+                    alpha_profile,
+                    prm.physics_parameters.compressible,
+                    /*log_convergence=*/( picard == num_picard - 1 ) );
 
             // --- Stokes solve ---
             stokes.set_solve_time( simulated_time + prm.time_stepping_parameters.energy_substeps * dt );
-            stokes.solve( Tdev,
-                          plate_velocities,
-                          prm.physics_parameters.compressible,
-                          /*log_convergence=*/( picard == num_picard - 1 ) );
 
             if ( timestep == prm.time_stepping_parameters.timestep_initial + 1 && picard == 0 )
                 log_hbm( "after first Stokes solve (peak)" );
@@ -660,17 +839,16 @@ Result<> run( const Parameters& prm )
         if ( write_output && !prm.io_parameters.no_xdmf )
         {
             // Write to xdmf
+            auto fields = collect_xdmf_fields();
+
             write_xdmf(
                 xdmf_output,
                 xdmf_output_pressure,
-                prm,
                 timestep,
-                T.grid_data(),
-                Tdev.grid_data(),
-                u.block_1().grid_data(),
-                stokes.eta_fine().grid_data(),
-                stokes.density().grid_data(),
-                u.block_2().grid_data() );
+                prm.devel_parameters.output_dimensional,
+                fields.scalar_fields,
+                fields.vector_fields,
+                fields.pressure_field );
         }
 
         // Energy-solver-specific diagnostics dump first — refreshes EV
@@ -715,7 +893,7 @@ Result<> run( const Parameters& prm )
 
         // Nusselt number: computed and appended to <outdir>/nu.csv at the
         // same cadence as XDMF output (output_frequency).
-        if ( write_output )
+        if ( write_output && prm.devel_parameters.extended_diagnostics )
         {
             const auto Nu_top = compute_nusselt(
                 ( *domains[velocity_level] ),
@@ -792,11 +970,25 @@ Result<> run( const Parameters& prm )
             break;
         }
 
-        if ( has_negative( T ) )
+        // MMOC is semi-Lagrangian with a quintic reconstruction, i.e. not monotone, so a small
+        // undershoot below T_min is expected and harmless -- a strict "any negative value" test
+        // aborts healthy runs on it. Abort past a tolerance instead, and report the minimum
+        // whenever it sets a new negative record so a genuine blow-up stays visible.
+        const ScalarType T_min_global = kernels::common::min_entry( T.grid_data() );
+        if ( T_min_global < T_min_record )
         {
-            logroot << "[WARN] Negative temperature values detected (continuing anyway; "
-                       "negative-T abort disabled for now). min(T) = "
-                    << min_entry( T ) << std::endl;
+            T_min_record = T_min_global;
+            logroot << "[WARN] minimum temperature " << T_min_global << " is negative (abort below "
+                    << -prm.devel_parameters.negative_temperature_tolerance << ")." << std::endl;
+        }
+
+        if ( T_min_global < -static_cast< ScalarType >( prm.devel_parameters.negative_temperature_tolerance ) )
+        {
+            logroot << "\nDETECTED NEGATIVE TEMPERATURE VALUES.\n"
+                       "Minimum temperature: "
+                    << T_min_global << "\nAborting simulation...\n"
+                    << std::endl;
+            break;
         }
     }
 

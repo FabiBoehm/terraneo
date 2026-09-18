@@ -28,6 +28,7 @@
 #include "grid/grid_types.hpp"
 #include "grid/shell/agglomerated_distribution.hpp"
 #include "grid/shell/spherical_shell.hpp"
+#include "hbm_probe.hpp"
 #include "interpolators.hpp"
 #include "kernels/common/grid_operations.hpp"
 #include "kokkos/kokkos_wrapper.hpp"
@@ -44,6 +45,7 @@
 #include "linalg/solvers/velocity_prec_handle.hpp"
 #include "linalg/vector_q1.hpp"
 #include "linalg/vector_q1isoq2_q1.hpp"
+#include "low_prec_vcycle.hpp"
 #include "mpi/level_comms.hpp"
 #include "mpi/mpi.hpp"
 #include "parameters.hpp"
@@ -160,26 +162,25 @@ class MGAgglomeration
 template < typename ScalarType >
 class StokesContext
 {
-    using Stokes            = fe::wedge::operators::shell::EpsDivDivStokes< ScalarType >;
-    using Viscous           = typename Stokes::Block11Type;
-    using Gradient          = typename Stokes::Block12Type;
-    using ViscousMass       = fe::wedge::operators::shell::VectorMass< ScalarType >;
-    using Prolongation      = fe::wedge::operators::shell::ProlongationVecConstant< ScalarType >;
-    using Restriction       = fe::wedge::operators::shell::RestrictionVecConstant< ScalarType >;
+    using Stokes           = fe::wedge::operators::shell::EpsDivDivStokes< ScalarType >;
+    using Viscous          = typename Stokes::Block11Type;
+    using Gradient         = typename Stokes::Block12Type;
+    using ViscousMass      = fe::wedge::operators::shell::VectorMass< ScalarType >;
+    using Prolongation     = fe::wedge::operators::shell::ProlongationVecConstant< ScalarType >;
+    using Restriction      = fe::wedge::operators::shell::RestrictionVecConstant< ScalarType >;
     using RestrictionScalar = fe::wedge::operators::shell::RestrictionConstant< ScalarType >;
-    using PressureMass      = fe::wedge::operators::shell::KMass< ScalarType >;
-    using TALARHS           = fe::wedge::linearforms::shell::InvRhoGradRhoDotU< ScalarType >;
-    using Smoother          = linalg::solvers::Chebyshev< Viscous >;
-    using CoarseGridSolver  = linalg::solvers::PCG< Viscous >;
-    using VelGridData       = grid::Grid4DDataVec< ScalarType, 3 >;
-    using Redistribute      = communication::shell::Redistribute< VelGridData >;
+    using PressureMass     = fe::wedge::operators::shell::KMass< ScalarType >;
+    using Smoother         = linalg::solvers::Chebyshev< Viscous >;
+    using CoarseGridSolver = linalg::solvers::PCG< Viscous >;
+    using VelGridData      = grid::Grid4DDataVec< ScalarType, 3 >;
+    using Redistribute     = communication::shell::Redistribute< VelGridData >;
     using PrecVisc =
         linalg::solvers::Multigrid< Viscous, Prolongation, Restriction, Smoother, CoarseGridSolver, Redistribute >;
-    using PrecSchur  = linalg::solvers::DiagonalSolver< PressureMass >;
+    using PrecSchur = linalg::solvers::DiagonalSolver< PressureMass >;
     // The (1,1) velocity preconditioner is type-erased so its internal precision
     // (the MG V-cycle precision) can be chosen at runtime via --stokes-mg-precision.
     using VelPrecHandle = linalg::solvers::VelocityPrecHandle< Viscous >;
-    using PrecStokes     = linalg::solvers::
+    using PrecStokes    = linalg::solvers::
         BlockTriangularPreconditioner2x2< Stokes, Viscous, PressureMass, Gradient, VelPrecHandle, PrecSchur >;
     // Outer solver: either the standard double FGMRES or the low-memory variant
     // that stores the Krylov basis in single precision (operator/preconditioner/
@@ -271,35 +272,20 @@ class StokesContext
                 ownership_mask_[pressure_level_] );
         }
 
-        // ---------------- Density ------------------
-        // Initialise and fill density -- time-independent for now (either constant or background profile )
-        rho_ =
-            linalg::VectorQ1Scalar< ScalarType >( "rho", *domains_[velocity_level_], ownership_mask_[velocity_level_] );
-
-        Kokkos::parallel_for(
-            "density_init",
-            grid::shell::local_domain_md_range_policy_nodes( *domains_[velocity_level_] ),
-            DensityInit{
-                rho_.grid_data(),
-                coords_radii_[velocity_level_],
-                prm_.mesh_parameters.radius_max,
-                prm_.physics_parameters.surface_density_nondim,
-                prm_.physics_parameters.dissipation_number,
-                prm_.physics_parameters.grueneisen_parameter,
-                prm_.physics_parameters.compressible } );
-        Kokkos::fence();
+        // Density is owned by the caller now (upstream's layout) and passed into
+        // solve(); it is initialised there, not here.
 
         // ---------------- Viscosity ----------------
         // Radial profile (constant or CSV-driven), then projected into Q1 on every level.
-        radial_viscosity_profile_.clear();
-        radial_viscosity_profile_.reserve( num_levels_ );
-        if ( !prm_.physics_parameters.viscosity_parameters.radial_profile_enabled )
+        std::vector< grid::Grid2DDataScalar< ScalarType > > radial_viscosity_profile;
+        radial_viscosity_profile.reserve( num_levels_ );
+        if ( prm_.physics_parameters.viscosity_parameters.viscosity_profile_csv_path.empty() )
         {
             logroot << "Using constant viscosity profile." << std::endl;
             for ( int level = 0; level < num_levels_; level++ )
             {
-                radial_viscosity_profile_.push_back(
-                    shell::interpolate_constant_radial_profile( coords_radii_[level], 1.0 ) );
+                radial_viscosity_profile.push_back(
+                    shell::interpolate_constant_radial_profile( coords_radii_[level], ScalarType( 1 ) ) );
             }
         }
         else
@@ -307,11 +293,13 @@ class StokesContext
             logroot << "Using radially varying viscosity profile." << std::endl;
             for ( int level = 0; level < num_levels_; level++ )
             {
-                radial_viscosity_profile_.push_back( shell::interpolate_radial_profile_into_subdomains_from_csv(
-                    prm_.physics_parameters.viscosity_parameters.radial_profile_csv_filename,
-                    prm_.physics_parameters.viscosity_parameters.radial_profile_radii_key,
-                    prm_.physics_parameters.viscosity_parameters.radial_profile_viscosity_key,
-                    coords_radii_[level] ) );
+                radial_viscosity_profile.push_back( shell::interpolate_radial_profile_into_subdomains_from_csv(
+                    prm_.physics_parameters.viscosity_parameters.viscosity_profile_csv_path,
+                    prm_.physics_parameters.radial_profiles_radii_key,
+                    prm_.physics_parameters.viscosity_parameters.viscosity_profile_value_key,
+                    coords_radii_[level],
+                    ScalarType( 1 ) / prm_.mesh_parameters.mantle_thickness_m,
+                    ScalarType( 1 ) / prm_.physics_parameters.viscosity_parameters.reference_viscosity ) );
             }
         }
 
@@ -328,30 +316,15 @@ class StokesContext
             // GCA still needs an approximation of viscosity on coarse grids
             // for the weighting of the mass matrix.
             geophysics::viscosity::RadialProfileViscosityInterpolator viscosity_interpolator(
-                radial_viscosity_profile_[level], prm_.physics_parameters.viscosity_parameters.viscosity );
+                radial_viscosity_profile[level],
+                ScalarType( 1 ),
+                prm_.physics_parameters.viscosity_parameters.min_viscosity,
+                prm_.physics_parameters.viscosity_parameters.max_viscosity );
             viscosity_interpolator.interpolate( eta_[level].grid_data() );
         }
 
-        // Scalar restrictions to coarsen the (evolving, T-dependent) viscosity down the
-        // MG hierarchy on refresh. RestrictionScalar is a functional (adjoint-prolongation)
-        // restriction, so on a coefficient it sums; the 1/R(1) normalisation makes it a
-        // weighted average.  Only used when --stokes-refresh-coarse-viscosity is set.
-        eta_restr_.resize( num_levels_ );
-        eta_restr_inv_norm_.reserve( num_levels_ );
-        for ( int level = 0; level < num_levels_; level++ )
-            eta_restr_inv_norm_.emplace_back(
-                "eta_restr_norm_" + std::to_string( level ), *domains_[level], ownership_mask_[level] );
-        for ( int level = 0; level < num_levels_ - 1; level++ )
-        {
-            if ( domains_[level]->comm() == MPI_COMM_NULL )
-                continue;
-            eta_restr_[level] =
-                std::make_unique< RestrictionScalar >( *domains_[level], linalg::OperatorApplyMode::Replace );
-            VectorQ1Scalar< ScalarType > ones( "eta_restr_ones", *domains_[level + 1], ownership_mask_[level + 1] );
-            linalg::assign( ones, ScalarType( 1 ) );
-            linalg::apply( *eta_restr_[level], ones, eta_restr_inv_norm_[level] );
-            linalg::invert_entries( eta_restr_inv_norm_[level] );
-        }
+        // Assign radial_viscosity_profile at highest level to class member eta_profile_, since we need the reference profile for viscosity laws
+        eta_profile_ = radial_viscosity_profile[velocity_level_];
 
         // ---------------- GCA element selection ----------------
         GCAElements_  = VectorQ1Scalar< ScalarType >( "GCAElements", *domains_[0], ownership_mask_[0] );
@@ -452,220 +425,235 @@ class StokesContext
         const bool build_double_mg = ( prm_.stokes_solver_parameters.mg_precision == MGPrecision::DOUBLE );
         if ( build_double_mg )
         {
-        // ---------------- Coarse grid operators / transfer ----------------
-        logroot << "Setting up Stokes solver and preconditioners ..." << std::endl;
+            // ---------------- Coarse grid operators / transfer ----------------
+            logroot << "Setting up Stokes solver and preconditioners ..." << std::endl;
 
-        for ( int level = 0; level < num_levels_ - 1; level++ )
-        {
-            A_c_.emplace_back(
-                *domains_[level],
-                coords_shell_[level],
-                coords_radii_[level],
-                boundary_mask_[level],
-                eta_[level].grid_data(),
-                bcs_,
-                false );
-            A_c_.back().set_penalty_epsilon(
-                static_cast< ScalarType >( prm_.stokes_solver_parameters.penalty_epsilon ) );
-            if ( gca == 2 )
+            for ( int level = 0; level < num_levels_ - 1; level++ )
             {
-                A_c_.back().set_stored_matrix_mode(
-                    linalg::OperatorStoredMatrixMode::Selective, level, GCAElements_.grid_data() );
-            }
-            else if ( gca == 1 )
-            {
-                A_c_.back().set_stored_matrix_mode(
-                    linalg::OperatorStoredMatrixMode::Full, level, GCAElements_.grid_data() );
-            }
-            P_.emplace_back( linalg::OperatorApplyMode::Add );
-            R_.emplace_back( *domains_[level] );
-        }
-
-        // GCA assembly (top-down)
-        if ( gca > 0 )
-        {
-            for ( int level = num_levels_ - 2; level >= 0; level-- )
-            {
-                logroot << "Assembling GCA on level " << prm_.mesh_parameters.refinement_level_mesh_min + level
-                        << std::endl;
-                linalg::solvers::TwoGridGCA< ScalarType, Viscous >(
-                    ( level == num_levels_ - 2 ) ? K_neumann_->block_11() : A_c_[level + 1],
-                    A_c_[level],
-                    level,
-                    GCAElements_.grid_data() );
-            }
-        }
-
-        // ---------------- Inverse diagonals ----------------
-        for ( int level = 0; level < num_levels_; level++ )
-        {
-            inverse_diagonals_.emplace_back(
-                "inverse_diagonal_" + std::to_string( level ), *domains_[level], ownership_mask_[level] );
-
-            if ( domains_[level]->comm() == MPI_COMM_NULL )
-                continue;
-
-            VectorQ1Vec< ScalarType > tmp(
-                "inverse_diagonal_tmp" + std::to_string( level ), *domains_[level], ownership_mask_[level] );
-            linalg::assign( tmp, 1.0 );
-            if ( level == num_levels_ - 1 )
-            {
-                K_->block_11().set_diagonal( true );
-                linalg::apply( K_->block_11(), tmp, inverse_diagonals_.back() );
-                K_->block_11().set_diagonal( false );
-            }
-            else
-            {
-                A_c_[level].set_diagonal( true );
-                linalg::apply( A_c_[level], tmp, inverse_diagonals_.back() );
-                A_c_[level].set_diagonal( false );
-            }
-            linalg::invert_entries( inverse_diagonals_.back() );
-        }
-
-        // ---------------- Smoothers (Chebyshev) ----------------
-        logroot << "Setting up multigrid smoother ..." << std::endl;
-        smoothers_.reserve( num_levels_ );
-        for ( int level = 0; level < num_levels_; level++ )
-        {
-            std::vector< VectorQ1Vec< ScalarType > > smoother_tmps;
-            smoother_tmps.push_back( tmp_mg_[level] );
-            smoother_tmps.push_back( tmp_mg_2_[level] );
-
-            smoothers_.emplace_back(
-                prm_.stokes_solver_parameters.viscous_pc_chebyshev_order,
-                inverse_diagonals_[level],
-                smoother_tmps,
-                prm_.stokes_solver_parameters.viscous_pc_num_smoothing_steps_prepost,
-                prm_.stokes_solver_parameters.viscous_pc_num_power_iterations );
-        }
-
-        // Diagnostic: estimate Chebyshev spectrum per level (mirrors the
-        // estimate Chebyshev does internally on first solve).
-        for ( int level = 0; level < num_levels_; level++ )
-        {
-            if ( domains_[level]->comm() == MPI_COMM_NULL )
-                continue;
-
-            VectorQ1Vec< ScalarType > tmp_pi_it( "cheby_est_tmpIt", *domains_[level], ownership_mask_[level] );
-            VectorQ1Vec< ScalarType > tmp_pi_aux( "cheby_est_tmpAux", *domains_[level], ownership_mask_[level] );
-            const auto                log_level = prm_.mesh_parameters.refinement_level_mesh_min + level;
-            auto&                     A_lvl     = ( level == num_levels_ - 1 ) ? K_->block_11() : A_c_[level];
-            linalg::DiagonallyScaledOperator< Viscous > inv_diag_A( A_lvl, inverse_diagonals_[level] );
-            const double                                lmax_est = linalg::solvers::power_iteration(
-                inv_diag_A, tmp_pi_it, tmp_pi_aux, prm_.stokes_solver_parameters.viscous_pc_num_power_iterations );
-            logroot << "[Cheby estimate] level " << log_level << ": lambda_max(D^-1 A_viscous) ~ " << lmax_est
-                    << "  => lambda_max_cheby = " << 1.5 * lmax_est << ", lambda_min_cheby = " << 0.1 * lmax_est
-                    << std::endl;
-        }
-
-        // ---------------- Coarse grid solver ----------------
-        logroot << "Setting up multigrid coarse grid solver ..." << std::endl;
-        coarse_grid_tmps_.reserve( 4 );
-        for ( int i = 0; i < 4; i++ )
-        {
-            coarse_grid_tmps_.emplace_back( "tmp_coarse_grid", *domains_[0], ownership_mask_[0] );
-        }
-        coarse_grid_solver_ = std::make_unique< CoarseGridSolver >(
-            linalg::solvers::IterativeSolverParameters{ 50, 1e-6, 1e-16 }, table_, coarse_grid_tmps_ );
-        coarse_grid_solver_->set_tag( "coarse_grid_pcg" );
-
-        // ---------------- Multigrid preconditioner (with optional agglomeration) ----------------
-        logroot << "Setting up multigrid preconditioner ..." << std::endl;
-
-        const int num_mg_levels = num_levels_;
-
-        std::vector< Redistribute >              redistribute_down;
-        std::vector< VectorQ1Vec< ScalarType > > tmp_mg_r_fine;
-        std::vector< VectorQ1Vec< ScalarType > > tmp_mg_e_fine;
-
-        if ( !agglom_factors.empty() )
-        {
-            redistribute_down.reserve( num_mg_levels - 1 );
-            tmp_mg_r_fine.reserve( num_mg_levels - 1 );
-            tmp_mg_e_fine.reserve( num_mg_levels - 1 );
-            domains_upper_.reserve( num_mg_levels - 1 );
-            mask_upper_.reserve( num_mg_levels - 1 );
-
-            const auto orig_subdomain_to_rank = grid::shell::subdomain_to_rank_iterate_diamond_subdomains;
-
-            for ( int L = 0; L < num_mg_levels - 1; ++L )
-            {
-                const int lat_level = prm_.mesh_parameters.refinement_level_mesh_min + L;
-                const int rad_level = lat_level + prm_.mesh_parameters.radial_extra_levels;
-
-                const MPI_Comm upper_comm    = agglom.comm( L + 1 );
-                const int      upper_cf      = agglom.cum_factor( L + 1 );
-                const bool     same_as_lower = ( upper_comm == agglom.comm( L ) );
-
-                if ( same_as_lower )
+                A_c_.emplace_back(
+                    *domains_[level],
+                    coords_shell_[level],
+                    coords_radii_[level],
+                    boundary_mask_[level],
+                    eta_[level].grid_data(),
+                    bcs_,
+                    false );
+                // The free-slip rotation penalty must match the fine operator on every
+                // coarse level, or the Chebyshev spectrum estimate is polluted there.
+                A_c_.back().set_penalty_epsilon(
+                    static_cast< ScalarType >( prm_.stokes_solver_parameters.penalty_epsilon ) );
+                if ( gca == 2 )
                 {
-                    domains_upper_.push_back( domains_[L] );
-                    mask_upper_.push_back( ownership_mask_[L] );
+                    A_c_.back().set_stored_matrix_mode(
+                        linalg::OperatorStoredMatrixMode::Selective, level, GCAElements_.grid_data() );
+                }
+                else if ( gca == 1 )
+                {
+                    A_c_.back().set_stored_matrix_mode(
+                        linalg::OperatorStoredMatrixMode::Full, level, GCAElements_.grid_data() );
+                }
+                P_.emplace_back( linalg::OperatorApplyMode::Add );
+                R_.emplace_back( *domains_[level] );
+            }
+
+            // GCA assembly (top-down)
+            if ( gca > 0 )
+            {
+                for ( int level = num_levels_ - 2; level >= 0; level-- )
+                {
+                    logroot << "Assembling GCA on level " << prm_.mesh_parameters.refinement_level_mesh_min + level
+                            << std::endl;
+                    linalg::solvers::TwoGridGCA< ScalarType, Viscous >(
+                        ( level == num_levels_ - 2 ) ? K_neumann_->block_11() : A_c_[level + 1],
+                        A_c_[level],
+                        level,
+                        GCAElements_.grid_data() );
+                }
+            }
+
+            // ---------------- Inverse diagonals ----------------
+            for ( int level = 0; level < num_levels_; level++ )
+            {
+                inverse_diagonals_.emplace_back(
+                    "inverse_diagonal_" + std::to_string( level ), *domains_[level], ownership_mask_[level] );
+
+                if ( domains_[level]->comm() == MPI_COMM_NULL )
+                    continue;
+
+                VectorQ1Vec< ScalarType > tmp(
+                    "inverse_diagonal_tmp" + std::to_string( level ), *domains_[level], ownership_mask_[level] );
+                linalg::assign( tmp, ScalarType( 1 ) );
+                if ( level == num_levels_ - 1 )
+                {
+                    K_->block_11().set_diagonal( true );
+                    linalg::apply( K_->block_11(), tmp, inverse_diagonals_.back() );
+                    K_->block_11().set_diagonal( false );
                 }
                 else
                 {
-                    DistributedDomain dom_up = DistributedDomain::create_uniform_on_comm(
-                        upper_comm,
-                        lat_level,
-                        build_shell_radii< double >( prm_.mesh_parameters, ( 1 << rad_level ) + 1 ),
-                        lat_sdr,
-                        rad_sdr,
-                        ( upper_cf == 1 ) ?
-                            orig_subdomain_to_rank :
-                            grid::shell::agglomerated_subdomain_to_rank( orig_subdomain_to_rank, upper_cf ) );
-                    mask_upper_.push_back( grid::setup_node_ownership_mask_data( dom_up ) );
-                    domains_upper_.push_back( std::make_shared< DistributedDomain >( std::move( dom_up ) ) );
+                    A_c_[level].set_diagonal( true );
+                    linalg::apply( A_c_[level], tmp, inverse_diagonals_.back() );
+                    A_c_[level].set_diagonal( false );
                 }
-
-                tmp_mg_r_fine.emplace_back(
-                    "tmp_r_fine_L" + std::to_string( L ), *domains_upper_.back(), mask_upper_.back() );
-                tmp_mg_e_fine.emplace_back(
-                    "tmp_e_fine_L" + std::to_string( L ), *domains_upper_.back(), mask_upper_.back() );
-
-                redistribute_down.emplace_back(
-                    *domains_upper_.back(),
-                    *domains_[L],
-                    ( upper_cf == 1 ) ? orig_subdomain_to_rank :
-                                        grid::shell::agglomerated_subdomain_to_rank( orig_subdomain_to_rank, upper_cf ),
-                    agglom.subdomain_fn( L ) );
+                linalg::invert_entries( inverse_diagonals_.back() );
             }
 
-            // Restrictions are halo'd on the upper comm under agglomeration.
-            R_.clear();
-            R_.reserve( num_mg_levels - 1 );
-            for ( int L = 0; L < num_mg_levels - 1; ++L )
-                R_.emplace_back( *domains_upper_[L] );
-        }
+            // ---------------- Smoothers (Chebyshev) ----------------
+            logroot << "Setting up multigrid smoother ..." << std::endl;
+            smoothers_.reserve( num_levels_ );
+            for ( int level = 0; level < num_levels_; level++ )
+            {
+                std::vector< VectorQ1Vec< ScalarType > > smoother_tmps;
+                smoother_tmps.push_back( tmp_mg_[level] );
+                smoother_tmps.push_back( tmp_mg_2_[level] );
 
-        // Zero the restricted residual on Dirichlet velocity boundary shells so the V-cycle keeps u = 0 there
-        // exactly (ported from mmoc-transport-v1 73734950). No-op for free-slip shells.
-        {
-            const bool zero_cmb =
-                grid::shell::get_boundary_condition_flag( bcs_, grid::shell::ShellBoundaryFlag::CMB ) ==
-                grid::shell::BoundaryConditionFlag::DIRICHLET;
-            const bool zero_surface =
-                grid::shell::get_boundary_condition_flag( bcs_, grid::shell::ShellBoundaryFlag::SURFACE ) ==
-                grid::shell::BoundaryConditionFlag::DIRICHLET;
-            for ( auto& restriction : R_ )
-                restriction.set_dirichlet_boundary_zeroing( zero_cmb, zero_surface );
-        }
+                smoothers_.emplace_back(
+                    prm_.stokes_solver_parameters.viscous_pc_chebyshev_order,
+                    inverse_diagonals_[level],
+                    smoother_tmps,
+                    prm_.stokes_solver_parameters.viscous_pc_num_smoothing_steps_prepost,
+                    prm_.stokes_solver_parameters.viscous_pc_num_power_iterations );
+            }
 
-        prec_11_ = std::make_unique< PrecVisc >(
-            P_,
-            R_,
-            A_c_,
-            tmp_mg_r_,
-            tmp_mg_e_,
-            tmp_mg_,
-            smoothers_,
-            smoothers_,
-            *coarse_grid_solver_,
-            prm_.stokes_solver_parameters.viscous_pc_num_vcycles,
-            1e-6,
-            std::move( redistribute_down ),
-            std::move( tmp_mg_r_fine ),
-            std::move( tmp_mg_e_fine ) );
+            // Diagnostic: estimate Chebyshev spectrum per level (mirrors the
+            // estimate Chebyshev does internally on first solve).
+            if ( prm_.devel_parameters.extended_diagnostics )
+            {
+                for ( int level = 0; level < num_levels_; level++ )
+                {
+                    if ( domains_[level]->comm() == MPI_COMM_NULL )
+                        continue;
+
+                    VectorQ1Vec< ScalarType > tmp_pi_it( "cheby_est_tmpIt", *domains_[level], ownership_mask_[level] );
+                    VectorQ1Vec< ScalarType > tmp_pi_aux(
+                        "cheby_est_tmpAux", *domains_[level], ownership_mask_[level] );
+                    const auto log_level = prm_.mesh_parameters.refinement_level_mesh_min + level;
+                    auto&      A_lvl     = ( level == num_levels_ - 1 ) ? K_->block_11() : A_c_[level];
+                    linalg::DiagonallyScaledOperator< Viscous > inv_diag_A( A_lvl, inverse_diagonals_[level] );
+                    const double                                lmax_est = linalg::solvers::power_iteration(
+                        inv_diag_A,
+                        tmp_pi_it,
+                        tmp_pi_aux,
+                        prm_.stokes_solver_parameters.viscous_pc_num_power_iterations );
+                    logroot << "[Cheby estimate] level " << log_level << ": lambda_max(D^-1 A_viscous) ~ " << lmax_est
+                            << "  => lambda_max_cheby = " << 1.5 * lmax_est << ", lambda_min_cheby = " << 0.1 * lmax_est
+                            << std::endl;
+                }
+            }
+
+            // ---------------- Coarse grid solver ----------------
+            logroot << "Setting up multigrid coarse grid solver ..." << std::endl;
+            coarse_grid_tmps_.reserve( 4 );
+            for ( int i = 0; i < 4; i++ )
+            {
+                coarse_grid_tmps_.emplace_back( "tmp_coarse_grid", *domains_[0], ownership_mask_[0] );
+            }
+            coarse_grid_solver_ = std::make_unique< CoarseGridSolver >(
+                linalg::solvers::IterativeSolverParameters{ 50, 1e-6, 1e-16 }, table_, coarse_grid_tmps_ );
+            coarse_grid_solver_->set_tag( "coarse_grid_pcg" );
+
+            // ---------------- Multigrid preconditioner (with optional agglomeration) ----------------
+            logroot << "Setting up multigrid preconditioner ..." << std::endl;
+
+            const int num_mg_levels = num_levels_;
+
+            std::vector< Redistribute >              redistribute_down;
+            std::vector< VectorQ1Vec< ScalarType > > tmp_mg_r_fine;
+            std::vector< VectorQ1Vec< ScalarType > > tmp_mg_e_fine;
+
+            if ( !agglom_factors.empty() )
+            {
+                redistribute_down.reserve( num_mg_levels - 1 );
+                tmp_mg_r_fine.reserve( num_mg_levels - 1 );
+                tmp_mg_e_fine.reserve( num_mg_levels - 1 );
+                domains_upper_.reserve( num_mg_levels - 1 );
+                mask_upper_.reserve( num_mg_levels - 1 );
+
+                const auto orig_subdomain_to_rank = grid::shell::subdomain_to_rank_iterate_diamond_subdomains;
+
+                for ( int L = 0; L < num_mg_levels - 1; ++L )
+                {
+                    const int lat_level = prm_.mesh_parameters.refinement_level_mesh_min + L;
+                    const int rad_level = lat_level + prm_.mesh_parameters.radial_extra_levels;
+
+                    const MPI_Comm upper_comm    = agglom.comm( L + 1 );
+                    const int      upper_cf      = agglom.cum_factor( L + 1 );
+                    const bool     same_as_lower = ( upper_comm == agglom.comm( L ) );
+
+                    if ( same_as_lower )
+                    {
+                        domains_upper_.push_back( domains_[L] );
+                        mask_upper_.push_back( ownership_mask_[L] );
+                    }
+                    else
+                    {
+                        DistributedDomain dom_up = DistributedDomain::create_uniform_on_comm(
+                            upper_comm,
+                            lat_level,
+                            build_shell_radii< double >( prm_.mesh_parameters, ( 1 << rad_level ) + 1 ),
+                            lat_sdr,
+                            rad_sdr,
+                            ( upper_cf == 1 ) ?
+                                orig_subdomain_to_rank :
+                                grid::shell::agglomerated_subdomain_to_rank( orig_subdomain_to_rank, upper_cf ) );
+                        mask_upper_.push_back( grid::setup_node_ownership_mask_data( dom_up ) );
+                        domains_upper_.push_back( std::make_shared< DistributedDomain >( std::move( dom_up ) ) );
+                    }
+
+                    tmp_mg_r_fine.emplace_back(
+                        "tmp_r_fine_L" + std::to_string( L ), *domains_upper_.back(), mask_upper_.back() );
+                    tmp_mg_e_fine.emplace_back(
+                        "tmp_e_fine_L" + std::to_string( L ), *domains_upper_.back(), mask_upper_.back() );
+
+                    redistribute_down.emplace_back(
+                        *domains_upper_.back(),
+                        *domains_[L],
+                        ( upper_cf == 1 ) ?
+                            orig_subdomain_to_rank :
+                            grid::shell::agglomerated_subdomain_to_rank( orig_subdomain_to_rank, upper_cf ),
+                        agglom.subdomain_fn( L ) );
+                }
+
+                // Restrictions are halo'd on the upper comm under agglomeration.
+                R_.clear();
+                R_.reserve( num_mg_levels - 1 );
+                for ( int L = 0; L < num_mg_levels - 1; ++L )
+                    R_.emplace_back( *domains_upper_[L] );
+            }
+
+            // Zero the restricted residual on Dirichlet velocity boundary shells so
+            // the viscous v-cycle preserves the imposed boundary value exactly:
+            // restriction otherwise smears interior residual into the eliminated
+            // coarse boundary rows, the smoother updates them unopposed, and
+            // prolongation leaks a solver-tolerance-sized velocity back onto the
+            // fine boundary. Selection is by the CMB / SURFACE flag, correct under
+            // lateral and radial subdomain decomposition.
+            {
+                const bool zero_cmb =
+                    grid::shell::get_boundary_condition_flag( bcs_, grid::shell::ShellBoundaryFlag::CMB ) ==
+                    grid::shell::BoundaryConditionFlag::DIRICHLET;
+                const bool zero_surface =
+                    grid::shell::get_boundary_condition_flag( bcs_, grid::shell::ShellBoundaryFlag::SURFACE ) ==
+                    grid::shell::BoundaryConditionFlag::DIRICHLET;
+                for ( auto& restriction : R_ )
+                    restriction.set_dirichlet_boundary_zeroing( zero_cmb, zero_surface );
+            }
+
+            prec_11_ = std::make_unique< PrecVisc >(
+                P_,
+                R_,
+                A_c_,
+                tmp_mg_r_,
+                tmp_mg_e_,
+                tmp_mg_,
+                smoothers_,
+                smoothers_,
+                *coarse_grid_solver_,
+                prm_.stokes_solver_parameters.viscous_pc_num_vcycles,
+                1e-6,
+                std::move( redistribute_down ),
+                std::move( tmp_mg_r_fine ),
+                std::move( tmp_mg_e_fine ) );
         } // end if ( build_double_mg )
 
         // ---------------- Schur preconditioner ----------------
@@ -689,7 +677,7 @@ class StokesContext
                 "inverse_diagonal_tmp" + std::to_string( pressure_level_ ),
                 *domains_[pressure_level_],
                 ownership_mask_[pressure_level_] );
-            linalg::assign( tmp, 1.0 );
+            linalg::assign( tmp, ScalarType( 1 ) );
             linalg::apply( *pmass_, tmp, lumped_diagonal_pmass_ );
         }
         // Schur relaxation (HyTeG Uzawa relaxParamSchur analogue): the DiagonalSolver
@@ -728,7 +716,8 @@ class StokesContext
             // would require keeping the operator/coords >= float (vectors-only half),
             // which is a separate mixed-precision-within-the-operator change.
             logroot << "ERROR: --stokes-mg-precision half is not supported (the velocity "
-                       "operator needs >= float geometry). Use 'float'." << std::endl;
+                       "operator needs >= float geometry). Use 'float'."
+                    << std::endl;
             Kokkos::abort( "stokes-mg-precision: half unsupported" );
             break;
         case MGPrecision::DOUBLE:
@@ -741,15 +730,16 @@ class StokesContext
             K_->block_11(), *pmass_, K_->block_12(), triangular_prec_tmp_, vel_prec, *inv_lumped_pmass_ );
 
         // ---------------- Outer FGMRES ----------------
-        logroot << "Setting up FGMRES ... (Krylov basis precision: "
-                << ( use_float_basis_ ? "single" : "double" ) << ")" << std::endl;
+        logroot << "Setting up FGMRES ... (Krylov basis precision: " << ( use_float_basis_ ? "single" : "double" )
+                << ")" << std::endl;
 
         // ---------------- FGMRES (Stokes) workspace (deferred — see note above) ----------------
         // Allocated here, AFTER the MG hierarchy + Chebyshev eigenvalue estimate, so the
         // estimate's transient temps do not coincide with this (the largest) allocation.
         //   double path: 2*restart+4 full-precision vectors.
         //   float-basis path: 3 full-precision scratch (r/w aliased, v, z) + 2*restart+1 basis.
-        log_hbm( "stokes: before FGMRES workspace" );
+        if ( prm_.devel_parameters.extended_diagnostics )
+            log_hbm( "stokes: before FGMRES workspace" );
         if ( use_float_basis_ )
         {
             constexpr int kNumStokesWork = 3; // FGMRESLowMem aliases r/w
@@ -789,13 +779,12 @@ class StokesContext
                     ownership_mask_[pressure_level_] );
             }
         }
-        log_hbm( "stokes: after FGMRES workspace (delta = Krylov basis+scratch)" );
+        if ( prm_.devel_parameters.extended_diagnostics )
+            log_hbm( "stokes: after FGMRES workspace (delta = Krylov basis+scratch)" );
 
         const linalg::solvers::FGMRESOptions< ScalarType > stokes_fgmres_opts{
             .restart                     = prm_.stokes_solver_parameters.krylov_restart,
-            .relative_residual_tolerance = prm_.stokes_solver_parameters.tolerance_relative_to_rhs ?
-                                               static_cast< ScalarType >( 0 ) :
-                                               prm_.stokes_solver_parameters.krylov_relative_tolerance,
+            .relative_residual_tolerance = prm_.stokes_solver_parameters.krylov_relative_tolerance,
             .absolute_residual_tolerance = prm_.stokes_solver_parameters.krylov_absolute_tolerance,
             .max_iterations              = prm_.stokes_solver_parameters.krylov_max_iterations };
         if ( use_float_basis_ )
@@ -863,12 +852,11 @@ class StokesContext
 
     linalg::VectorQ1IsoQ2Q1< ScalarType >& solution() { return stok_vecs_["u"]; }
     linalg::VectorQ1Scalar< ScalarType >&  eta_fine() { return eta_[velocity_level_]; }
-    linalg::VectorQ1Scalar< ScalarType >&  density() { return rho_; }
     long                                   num_dofs_pressure() const { return num_dofs_pressure_; }
     const grid::shell::BoundaryConditions& boundary_conditions() const { return bcs_; }
 
     /// Update the fine-level viscosity from the current temperature using the
-    /// configured viscosity law.  No-op for ViscosityLaw::CONSTANT.  Coarse-
+    /// configured viscosity law. No-op for ViscosityLaw::CONSTANT. Coarse-
     /// level eta (used by MG smoothing/coarse solves) is intentionally not
     /// touched, matching the pre-refactor behavior.
     void update_viscosity( const linalg::VectorQ1Scalar< ScalarType >& T )
@@ -882,17 +870,15 @@ class StokesContext
             grid::shell::local_domain_md_range_policy_nodes( *domains_[velocity_level_] ),
             ViscosityFromTemperature{
                 prm_.physics_parameters.viscosity_parameters.law,
-                prm_.physics_parameters.viscosity_parameters.rmu,
                 eta_[velocity_level_].grid_data(),
                 T.grid_data(),
-                radial_viscosity_profile_[velocity_level_],
+                eta_profile_,
                 coords_radii_[velocity_level_],
-                static_cast< ScalarType >( prm_.mesh_parameters.radius_min ),
-                static_cast< ScalarType >( prm_.mesh_parameters.radius_max ),
-                static_cast< ScalarType >( prm_.physics_parameters.viscosity_parameters.activation_energy ),
-                static_cast< ScalarType >( prm_.physics_parameters.viscosity_parameters.depth_viscosity_factor ),
-                static_cast< ScalarType >( prm_.physics_parameters.viscosity_parameters.viscosity_min ),
-                static_cast< ScalarType >( prm_.physics_parameters.viscosity_parameters.viscosity_max ) } );
+                prm_.physics_parameters.viscosity_parameters.activation_energy,
+                prm_.physics_parameters.viscosity_parameters.activation_volume,
+                prm_.mesh_parameters.radius_max,
+                prm_.physics_parameters.viscosity_parameters.min_viscosity,
+                prm_.physics_parameters.viscosity_parameters.max_viscosity } );
         Kokkos::fence();
 
         // The fine viscous operator is matrix-free and now sees the new eta, but the
@@ -956,12 +942,16 @@ class StokesContext
         }
     }
 
-    /// Solve  K · u = f(T_for_buoyancy)  with the configured FGMRES + MG/Schur
-    /// preconditioner.  When `log_convergence` is true, the per-step Stokes
-    /// and coarse-grid PCG tables are printed; in either case the table is
-    /// cleared at the end of the call.
+    /// Solve  K · u = f(T_for_buoyancy, rho, alpha)  with the configured FGMRES +
+    /// MG/Schur preconditioner.  `u_dirichlet`, when set, is an inhomogeneous
+    /// Dirichlet velocity at the surface (assimilated plate velocities).
+    /// When `log_convergence` is true, the per-step Stokes and coarse-grid PCG
+    /// tables are printed; in either case the table is cleared at the end.
+    template < typename RhoFieldType >
     void solve( const linalg::VectorQ1Scalar< ScalarType >&                   T_for_buoyancy,
                 const std::optional< linalg::VectorQ1IsoQ2Q1< ScalarType > >& u_dirichlet,
+                const RhoFieldType&                                           rho,
+                const grid::Grid2DDataScalar< ScalarType >&                   alpha,
                 bool                                                          compressible,
                 bool                                                          log_convergence )
     {
@@ -972,23 +962,28 @@ class StokesContext
         Kokkos::parallel_for(
             "Stokes rhs interpolation",
             grid::shell::local_domain_md_range_policy_nodes( *domains_[velocity_level_] ),
-            RHSVelocityInterpolator(
+            BuoyancyForceAssembly(
                 coords_shell_[velocity_level_],
                 coords_radii_[velocity_level_],
                 triangular_prec_tmp_.block_1().grid_data(),
                 T_for_buoyancy.grid_data(),
-                rho_.grid_data(),
+                rho,
+                alpha,
                 prm_.physics_parameters.rayleigh_number,
-                prm_.physics_parameters.tala_rho_buoyancy ) );
+                1.0 ) );
 
         linalg::apply( *M_, triangular_prec_tmp_.block_1(), stok_vecs_["f"].block_1() );
 
-        // Enforce the velocity BC on the RHS shell by shell. get_shell_boundary_flag() returns only the FIRST
-        // shell with a given BC type, so with fs/fs (or ns/ns) the second shell was silently skipped and kept
-        // a normal velocity component (ported from mmoc-transport-v1 f988bec9).
+        // Strong enforcement of the velocity BCs on the RHS, applied per boundary.
+        // NOTE: get_shell_boundary_flag( bcs_, FLAG ) only returns the FIRST boundary
+        // carrying FLAG, so when both boundaries share a BC type (e.g. no-slip/no-slip
+        // => both DIRICHLET, or free-slip/free-slip => both FREESLIP) the second boundary
+        // would be left completely unenforced. Loop over both boundaries and dispatch on
+        // each one's own flag instead.
         for ( const auto sbf : { grid::shell::ShellBoundaryFlag::CMB, grid::shell::ShellBoundaryFlag::SURFACE } )
         {
             const auto bcf = grid::shell::get_boundary_condition_flag( bcs_, sbf );
+
             if ( bcf == grid::shell::BoundaryConditionFlag::DIRICHLET )
             {
                 // Plate velocities enter here: an inhomogeneous Dirichlet value at the surface.
@@ -1016,19 +1011,22 @@ class StokesContext
             }
         }
 
-        // Apply TALA RHS if needed...
+        // Apply TALA RHS to mass equation if needed...
         if ( compressible )
         {
-            TALARHS tala_rhs(
-                *domains_[velocity_level_],
-                coords_shell_[velocity_level_],
-                coords_radii_[velocity_level_],
-                rho_,
-                stok_vecs_["u_prev"].block_1() );
-            linalg::apply( tala_rhs, tala_rhs_tmp_ );
+            using MassRHS = fe::wedge::linearforms::shell::InvRhoGradRhoDotU< ScalarType, RhoFieldType >;
 
-            // Restrict from velocity level to pressure level
-            linalg::apply( *R_scalar_, tala_rhs_tmp_, stok_vecs_["f"].block_2() );
+            MassRHS mass_rhs(
+                *domains_[pressure_level_],
+                *domains_[velocity_level_],
+                coords_shell_[pressure_level_],
+                coords_shell_[velocity_level_],
+                coords_radii_[pressure_level_],
+                coords_radii_[velocity_level_],
+                rho,
+                stok_vecs_["u_prev"].block_1() );
+
+            linalg::apply( mass_rhs, stok_vecs_["f"].block_2() );
         }
 
         util::logroot << "Solving Stokes ..." << std::endl;
@@ -1447,6 +1445,7 @@ class StokesContext
     std::vector< grid::Grid2DDataScalar< ScalarType > >                     coords_radii_;
     std::vector< grid::Grid4DDataScalar< grid::NodeOwnershipFlag > >        ownership_mask_;
     std::vector< grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag > > boundary_mask_;
+    grid::Grid2DDataScalar< ScalarType >                                    eta_profile_;
     grid::shell::BoundaryConditions                                         bcs_{}; // velocity BC set (owned copy)
     const Parameters&                                                       prm_;
     std::shared_ptr< util::Table >                                          table_;
@@ -1460,10 +1459,6 @@ class StokesContext
     // destroyed later, so things that other members hold by-reference (eta_,
     // stok_vecs_, *_tmp_*) must come first.
     std::vector< linalg::VectorQ1Scalar< ScalarType > >            eta_;
-    // Per-level radial reference viscosity profile eta_ref(r); retained so the
-    // T-dependent viscosity update can multiply it in each step.
-    std::vector< grid::Grid2DDataScalar< ScalarType > >           radial_viscosity_profile_;
-    linalg::VectorQ1Scalar< ScalarType >                           rho_;
     linalg::VectorQ1Scalar< ScalarType >                           GCAElements_;
     std::map< std::string, linalg::VectorQ1IsoQ2Q1< ScalarType > > stok_vecs_;
     std::vector< linalg::VectorQ1IsoQ2Q1< ScalarType > >   stokes_tmp_fgmres_;   // double path

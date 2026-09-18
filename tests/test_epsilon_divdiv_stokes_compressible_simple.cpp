@@ -240,6 +240,30 @@ struct RhoInterpolator
     }
 };
 
+struct RhoRadialInterpolator
+{
+    Grid2DDataScalar< double > radii_;
+    Grid2DDataScalar< double > data_;
+
+    RhoRadialInterpolator( const Grid2DDataScalar< double >& radii, const Grid2DDataScalar< double >& data )
+    : radii_( radii )
+    , data_( data )
+    {}
+
+    KOKKOS_INLINE_FUNCTION
+    void operator()( const int local_subdomain_id, const int r_idx ) const
+    {
+        if ( SETUP == 1 )
+        {
+            data_( local_subdomain_id, r_idx ) = 1.0;
+        }
+        else
+        {
+            data_( local_subdomain_id, r_idx ) = radii_( local_subdomain_id, r_idx );
+        }
+    }
+};
+
 struct DRhoDtInterpolator
 {
     Grid3DDataVec< double, 3 > grid_;
@@ -276,8 +300,13 @@ struct DRhoDtInterpolator
 // Test
 // -----------------------------------------------------------------------------
 
-std::tuple< double, double, int >
-    test( int gca, int min_level, int max_level, int level_subdomains, const std::shared_ptr< util::Table >& table )
+std::tuple< double, double, int > test(
+    int                                   gca,
+    int                                   min_level,
+    int                                   max_level,
+    int                                   level_subdomains,
+    const std::shared_ptr< util::Table >& table,
+    bool                                  rho_radial_path = false )
 {
     using ScalarType = double;
 
@@ -503,7 +532,6 @@ std::tuple< double, double, int >
     // auto& rho     = stok_vecs["tmp_3"].block_2();
     // auto& drho_dt = stok_vecs["tmp_4"].block_2();
 
-    VectorQ1Scalar< double > rho( "rho", domains[velocity_level], mask_data[velocity_level] );
     VectorQ1Scalar< double > drho_dt( "drho_dt", domains[velocity_level], mask_data[velocity_level] );
 
     // VectorQ1Vec< double, 3 > pressure_level_velocity(
@@ -511,11 +539,6 @@ std::tuple< double, double, int >
 
     VectorQ1Vec< double, 3 > fine_level_velocity(
         "fine_level_velocity", domains[velocity_level], mask_data[velocity_level] );
-
-    Kokkos::parallel_for(
-        "rho interpolation",
-        local_domain_md_range_policy_nodes( domains[velocity_level] ),
-        RhoInterpolator( coords_shell[velocity_level], coords_radii[velocity_level], rho.grid_data() ) );
 
     Kokkos::parallel_for(
         "drho/dt interpolation",
@@ -535,19 +558,53 @@ std::tuple< double, double, int >
     auto& tala_term           = stok_vecs["tmp_1"].block_2();
     auto& pda_additional_term = stok_vecs["tmp_2"].block_2();
 
-    using InvRhoGradRhoDotUForm = fe::wedge::linearforms::shell::InvRhoGradRhoDotU< double >;
+    // Always assemble 3-D rho, we need it for InvRhoDrhoDt.
+    VectorQ1Scalar< double > rho( "rho", domains[velocity_level], mask_data[velocity_level] );
 
-    InvRhoGradRhoDotUForm inv_rho_grad_rho_dot_u_form(
-        domains[pressure_level],
-        domains[velocity_level],
-        coords_shell[pressure_level],
-        coords_shell[velocity_level],
-        coords_radii[pressure_level],
-        coords_radii[velocity_level],
-        rho,
-        fine_level_velocity );
+    Kokkos::parallel_for(
+        "rho interpolation",
+        local_domain_md_range_policy_nodes( domains[velocity_level] ),
+        RhoInterpolator( coords_shell[velocity_level], coords_radii[velocity_level], rho.grid_data() ) );
 
-    linalg::apply( inv_rho_grad_rho_dot_u_form, tala_term );
+    // Check 3-D rho and radial-profile rho paths.
+    std::string xdmf_label;
+
+    auto assemble_tala_term = [&]< typename RhoType >( RhoType& rho_data ) {
+        using InvRhoGradRhoDotUForm = fe::wedge::linearforms::shell::InvRhoGradRhoDotU< double, RhoType >;
+
+        InvRhoGradRhoDotUForm inv_rho_grad_rho_dot_u_form(
+            domains[pressure_level],
+            domains[velocity_level],
+            coords_shell[pressure_level],
+            coords_shell[velocity_level],
+            coords_radii[pressure_level],
+            coords_radii[velocity_level],
+            rho_data,
+            fine_level_velocity );
+
+        linalg::apply( inv_rho_grad_rho_dot_u_form, tala_term );
+    };
+
+    if ( rho_radial_path )
+    {
+        xdmf_label = "test_epsilon_divdiv_stokes_compressible_simple_rho_radial_out";
+        Grid2DDataScalar< double > rho_radial(
+            "rho_radial", coords_radii[velocity_level].extent( 0 ), coords_radii[velocity_level].extent( 1 ) );
+
+        Kokkos::parallel_for(
+            "rho_radial interpolation",
+            local_domain_md_range_policy_radial( domains[velocity_level] ),
+            RhoRadialInterpolator( coords_radii[velocity_level], rho_radial ) );
+
+        assemble_tala_term( rho_radial );
+    }
+
+    else // !rho_radial_path
+    {
+        xdmf_label = "test_epsilon_divdiv_stokes_compressible_simple_out";
+
+        assemble_tala_term( rho );
+    }
 
     using InvRhoDrhoDtForm = fe::wedge::linearforms::shell::InvRhoDrhoDt< double >;
 
@@ -780,10 +837,7 @@ std::tuple< double, double, int >
     table->print_pretty();
 
     io::XDMFOutput xdmf(
-        "test_epsilon_divdiv_stokes_compressible_simple_out",
-        domains[velocity_level],
-        coords_shell[velocity_level],
-        coords_radii[velocity_level] );
+        xdmf_label, domains[velocity_level], coords_shell[velocity_level], coords_radii[velocity_level] );
     xdmf.add( k.grid_data() );
     xdmf.add( u.block_1().grid_data() );
     xdmf.add( solution.block_1().grid_data() );
@@ -831,123 +885,140 @@ int main( int argc, char** argv )
     std::map< int, std::map< int, double > > err_vel;
     std::map< int, std::map< int, double > > err_pre;
 
-    for ( int minlevel = 2; minlevel <= 2; ++minlevel )
+    // test both rho options - 3D and radial profile
+    for ( bool rho_radial_path : { false, true } )
     {
-        util::logroot << "minlevel = " << minlevel << "\n";
-
-        for ( int gca : gcas )
+        if ( rho_radial_path )
         {
-            // reset error storage for this configuration
-            err_vel.clear();
-            err_pre.clear();
-
-            // Loop levels outer, so we can compare subdomain refinements on each fixed level.
-            for ( int level = minlevel + 1; level <= max_level; ++level )
-            {
-                // convergence orders (computed against previous level, using subdomain=0)
-                static bool   have_prev_level = false;
-                static double prev_l2_vel     = 1.0;
-                static double prev_l2_pre     = 1.0;
-
-                for ( int level_subdomains = 0; level_subdomains <= 0; ++level_subdomains )
-                {
-                    util::logroot << "  level_subdomains = " << level_subdomains << "\n";
-
-                    Kokkos::Timer timer;
-                    timer.reset();
-
-                    const auto [l2_error_vel, l2_error_pre, iterations] =
-                        test( gca, minlevel, level, level_subdomains, table );
-
-                    const auto time_total = timer.seconds();
-
-                    table->add_row(
-                        { { "level", level },
-                          { "level_subdomains", level_subdomains },
-                          { "time_total", time_total } } );
-
-                    util::logroot << "  errors: vel=" << l2_error_vel << " pre=" << l2_error_pre
-                                  << " iters=" << iterations << " time_total=" << time_total << "\n";
-
-                    // store and sanity-check invariance across subdomain refinements at fixed level
-                    err_vel[level][level_subdomains] = l2_error_vel;
-                    err_pre[level][level_subdomains] = l2_error_pre;
-
-                    if ( level_subdomains > 0 )
-                    {
-                        const double dv =
-                            std::abs( err_vel[level][level_subdomains] - err_vel[level][level_subdomains - 1] );
-                        const double dp =
-                            std::abs( err_pre[level][level_subdomains] - err_pre[level][level_subdomains - 1] );
-
-                        // same spirit as your working test
-                        if ( dv > 1e-3 || dp > 1e-3 )
-                        {
-                            util::logroot
-                                << "ERROR: Same global level should have same error regardless of subdomains.\n"
-                                << "  level=" << level << " vel_diff=" << dv << " pre_diff=" << dp << "\n";
-                            Kokkos::abort( "Error invariance w.r.t. subdomain refinement violated." );
-                        }
-                    }
-
-                    terra::util::Table::Row cycles;
-
-                    if ( gca == 1 )
-                        table_gca->add_row( cycles );
-                    else if ( gca == 2 )
-                        table_agca->add_row( cycles );
-                    else
-                        table_dca->add_row( cycles );
-                }
-
-                // compute per-level order using subdomain refinement 0 (arbitrary choice; all match)
-                const double curr_l2_vel = err_vel[level][0];
-                const double curr_l2_pre = err_pre[level][0];
-
-                if ( have_prev_level )
-                {
-                    const double order_vel = prev_l2_vel / curr_l2_vel;
-                    const double order_pre = prev_l2_pre / curr_l2_pre;
-
-                    util::logroot << "Level " << level << ": order_vel=" << order_vel << " order_pre=" << order_pre
-                                  << " (using level_subdomains=0)\n";
-
-                    table->add_row(
-                        { { "level", level },
-                          { "level_subdomains", 0 },
-                          { "order_vel", order_vel },
-                          { "order_pre", order_pre } } );
-                }
-
-                prev_l2_vel     = curr_l2_vel;
-                prev_l2_pre     = curr_l2_pre;
-                have_prev_level = true;
-            }
+            util::logroot << "\n########################\n";
+            util::logroot << "Testing radial-profile rho.\n";
+            util::logroot << "########################\n\n";
+        }
+        else
+        {
+            util::logroot << "\n########################\n";
+            util::logroot << "Testing 3-D rho.\n";
+            util::logroot << "########################\n\n";
         }
 
-        table->query_rows_not_none( "dofs_vel" )
-            .select_columns(
-                { "level",
-                  "level_subdomains",
-                  "dofs_pre",
-                  "dofs_vel",
-                  "l2_error_pre",
-                  "l2_error_vel",
-                  "h_vel",
-                  "h_p" } )
-            .print_pretty();
+        for ( int minlevel = 2; minlevel <= 2; ++minlevel )
+        {
+            util::logroot << "minlevel = " << minlevel << "\n";
 
-        table->query_rows_not_none( "order_vel" )
-            .select_columns( { "level", "level_subdomains", "order_pre", "order_vel" } )
-            .print_pretty();
+            for ( int gca : gcas )
+            {
+                // reset error storage for this configuration
+                err_vel.clear();
+                err_pre.clear();
+
+                // Loop levels outer, so we can compare subdomain refinements on each fixed level.
+                for ( int level = minlevel + 1; level <= max_level; ++level )
+                {
+                    // convergence orders (computed against previous level, using subdomain=0)
+                    static bool   have_prev_level = false;
+                    static double prev_l2_vel     = 1.0;
+                    static double prev_l2_pre     = 1.0;
+
+                    for ( int level_subdomains = 0; level_subdomains <= 0; ++level_subdomains )
+                    {
+                        util::logroot << "  level_subdomains = " << level_subdomains << "\n";
+
+                        Kokkos::Timer timer;
+                        timer.reset();
+
+                        const auto [l2_error_vel, l2_error_pre, iterations] =
+                            test( gca, minlevel, level, level_subdomains, table, rho_radial_path );
+
+                        const auto time_total = timer.seconds();
+
+                        table->add_row(
+                            { { "level", level },
+                              { "level_subdomains", level_subdomains },
+                              { "time_total", time_total } } );
+
+                        util::logroot << "  errors: vel=" << l2_error_vel << " pre=" << l2_error_pre
+                                      << " iters=" << iterations << " time_total=" << time_total << "\n";
+
+                        // store and sanity-check invariance across subdomain refinements at fixed level
+                        err_vel[level][level_subdomains] = l2_error_vel;
+                        err_pre[level][level_subdomains] = l2_error_pre;
+
+                        if ( level_subdomains > 0 )
+                        {
+                            const double dv =
+                                std::abs( err_vel[level][level_subdomains] - err_vel[level][level_subdomains - 1] );
+                            const double dp =
+                                std::abs( err_pre[level][level_subdomains] - err_pre[level][level_subdomains - 1] );
+
+                            // same spirit as your working test
+                            if ( dv > 1e-3 || dp > 1e-3 )
+                            {
+                                util::logroot
+                                    << "ERROR: Same global level should have same error regardless of subdomains.\n"
+                                    << "  level=" << level << " vel_diff=" << dv << " pre_diff=" << dp << "\n";
+                                Kokkos::abort( "Error invariance w.r.t. subdomain refinement violated." );
+                            }
+                        }
+
+                        terra::util::Table::Row cycles;
+
+                        if ( gca == 1 )
+                            table_gca->add_row( cycles );
+                        else if ( gca == 2 )
+                            table_agca->add_row( cycles );
+                        else
+                            table_dca->add_row( cycles );
+                    }
+
+                    // compute per-level order using subdomain refinement 0 (arbitrary choice; all match)
+                    const double curr_l2_vel = err_vel[level][0];
+                    const double curr_l2_pre = err_pre[level][0];
+
+                    if ( have_prev_level )
+                    {
+                        const double order_vel = prev_l2_vel / curr_l2_vel;
+                        const double order_pre = prev_l2_pre / curr_l2_pre;
+
+                        util::logroot << "Level " << level << ": order_vel=" << order_vel << " order_pre=" << order_pre
+                                      << " (using level_subdomains=0)\n";
+
+                        table->add_row(
+                            { { "level", level },
+                              { "level_subdomains", 0 },
+                              { "order_vel", order_vel },
+                              { "order_pre", order_pre } } );
+                    }
+
+                    prev_l2_vel     = curr_l2_vel;
+                    prev_l2_pre     = curr_l2_pre;
+                    have_prev_level = true;
+                }
+            }
+
+            table->query_rows_not_none( "dofs_vel" )
+                .select_columns(
+                    { "level",
+                      "level_subdomains",
+                      "dofs_pre",
+                      "dofs_vel",
+                      "l2_error_pre",
+                      "l2_error_vel",
+                      "h_vel",
+                      "h_p" } )
+                .print_pretty();
+
+            table->query_rows_not_none( "order_vel" )
+                .select_columns( { "level", "level_subdomains", "order_pre", "order_vel" } )
+                .print_pretty();
+        }
+
+        util::logroot << "DCA:\n";
+        table_dca->print_pretty();
+        util::logroot << "GCA:\n";
+        table_gca->print_pretty();
+        util::logroot << "AGCA:\n";
+        table_agca->print_pretty();
     }
-
-    util::logroot << "DCA:\n";
-    table_dca->print_pretty();
-    util::logroot << "GCA:\n";
-    table_gca->print_pretty();
-    util::logroot << "AGCA:\n";
-    table_agca->print_pretty();
 
     return 0;
 }
