@@ -9,8 +9,7 @@ the repository at all.
 benchmarks/           verification benchmark configs (A3, C1, C3, C4, C5), MMOC
 production/           the MT1024 MMOC production run
 scaling/              strong-scaling sweep
-  config_fscmb_nsurf_lvl6_10steps.toml   config used by the published sweep
-  config_scal_A3.toml                    same case, ported to the current app
+  config_scal_A3.toml                    the sweep case, current app
   sng2/                                  SuperMUC-NG Phase 2 launch scripts
   lumi/                                  LUMI-G launch scripts
   sng2_reproduction/                     re-run of the sng2 sweep, Sept 2026
@@ -67,6 +66,10 @@ precision.
 
 `scaling/sng2/` and `scaling/lumi/` are the scripts as they ran for the paper.
 The `_menv` sng2 variants use a different MPI/offload environment; see below.
+Those scripts name `config_fscmb_nsurf_lvl6_10steps.toml`, which is no longer
+here: it is a hard parse failure on the current app, because the viscosity law
+it names was removed from the law table. `config_scal_A3.toml` replaces it and
+describes the same case.
 
 ### Environment matters more than expected
 
@@ -81,7 +84,8 @@ Keep the environment in these scripts when extending the sweep.
 
 `scaling/sng2_reproduction/` re-runs every sng2 point on the merged
 MMOC/compressible app. Three keys of the original config no longer bind and were
-translated in `config_scal_A3.toml`:
+translated in `config_scal_A3.toml`, which is the only sweep config kept here
+because it is the only one the current app can run:
 
 | original                          | now                                        |
 |-----------------------------------|--------------------------------------------|
