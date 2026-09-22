@@ -10,9 +10,8 @@ benchmarks/           verification benchmark configs (A3, C1, C3, C4, C5), MMOC
 production/           the MT1024 MMOC production run
 scaling/              strong-scaling sweep
   config_scal_A3.toml                    the sweep case, current app
-  sng2/                                  SuperMUC-NG Phase 2 launch scripts
-  lumi/                                  LUMI-G launch scripts
-  sng2_reproduction/                     re-run of the sng2 sweep, Sept 2026
+  sng2_reproduction/                     SuperMUC-NG Phase 2, current app
+  lumi/                                  LUMI-G launch scripts, as they ran
   submit/                                sweep generators and collector
 ```
 
@@ -64,12 +63,15 @@ absolute tolerances pinned to 0 so the iteration count is never cut short.
 Low-memory variants set both restarts to 5 and hold the Krylov basis in single
 precision.
 
-`scaling/sng2/` and `scaling/lumi/` are the scripts as they ran for the paper.
-The `_menv` sng2 variants use a different MPI/offload environment; see below.
-Those scripts name `config_fscmb_nsurf_lvl6_10steps.toml`, which is no longer
-here: it is a hard parse failure on the current app, because the viscosity law
-it names was removed from the law table. `config_scal_A3.toml` replaces it and
-describes the same case.
+`scaling/lumi/` holds the LUMI-G scripts as they ran for the paper. They name
+`config_fscmb_nsurf_lvl6_10steps.toml`, which is not in this tree: it is a hard
+parse failure on the current app, because the viscosity law it names was removed
+from the law table. They also carry LUMI absolute paths. Treat them as a record
+of what ran, not as something to launch.
+
+The original sng2 launch scripts were removed for the same reason.
+`scaling/sng2_reproduction/` supersedes them: same points, same environment,
+running against the current app with `config_scal_A3.toml`.
 
 ### Environment matters more than expected
 
