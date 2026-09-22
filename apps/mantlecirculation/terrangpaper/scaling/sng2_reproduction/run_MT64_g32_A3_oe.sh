@@ -1,0 +1,40 @@
+#!/bin/bash -l
+#SBATCH --job-name=oe_MT64_g32_A3_oe
+#SBATCH --output=/hppfs/scratch/0E/di35guv2/mc_runs/scal_jobs_origenv/MT64_g32_A3_oe.o%j
+#SBATCH --error=/hppfs/scratch/0E/di35guv2/mc_runs/scal_jobs_origenv/MT64_g32_A3_oe.e%j
+#SBATCH --account=pn39jo
+#SBATCH --partition=test
+#SBATCH --nodes=4
+#SBATCH --ntasks-per-node=8
+#SBATCH --time=00:30:00
+module load slurm_setup
+module sw stack/24.5.0
+module load cmake gcc/14.2.0
+export I_MPI_OFFLOAD=1
+export I_MPI_OFFLOAD_RDMA=1
+export I_MPI_OFFLOAD_FAST_MEMCPY_COLL=1
+export PSM3_RDMA=1
+export PSM3_GPUDIRECT=0
+export OMP_PROC_BIND=spread
+export OMP_PLACES=threads
+export OMP_NUM_THREADS=8
+export ZE_FLAT_DEVICE_HIERARCHY=FLAT
+export ONEAPI_DEVICE_SELECTOR=level_zero:gpu
+ulimit -c 0
+export TMPDIR=/hppfs/scratch/0E/di35guv2/tmp
+mkdir -p "$TMPDIR" "/hppfs/scratch/0E/di35guv2/scal_a3_origenv/MT64_g32_A3_oe"
+cd "/hppfs/scratch/0E/di35guv2/scal_a3_origenv/MT64_g32_A3_oe"
+srun --chdir="/hppfs/scratch/0E/di35guv2/scal_a3_origenv/MT64_g32_A3_oe" "/hppfs/scratch/0E/di35guv2/terraneo-merged-build/apps/mantlecirculation/mantlecirculation" --config "/hppfs/scratch/0E/di35guv2/mc_runs/merged_configs/config_scal_A3.toml" --extended-parameters \
+  --energy-solver ev \
+  --reference-viscosity 2.459983e25 --radius-cmb 3527020 --radius-surface 6418020 \
+  --temperature-surface 0 --temperature-cmb 3500 \
+  --viscosity-min 1e18 --viscosity-max 1e28 \
+  --refinement-level-mesh-min 3 --refinement-level-mesh-max 6 \
+  --refinement-level-subdomains 2 --radial-extra-levels -1 \
+  --max-timesteps 10 --no-xdmf --no-radial-profiles --output-frequency 9 --dt-min 1e-8 \
+  --stokes-krylov-max-iterations 10 --stokes-krylov-restart 10 \
+  --stokes-krylov-relative-tolerance 0 --stokes-krylov-absolute-tolerance 0 \
+  --stokes-viscous-pc-num-smoothing-steps-prepost 2 \
+  --energy-krylov-max-iterations 50 \
+  --energy-krylov-relative-tolerance 0 --energy-krylov-absolute-tolerance 0 \
+  --outdir "/hppfs/scratch/0E/di35guv2/scal_a3_origenv/MT64_g32_A3_oe" --outdir-overwrite

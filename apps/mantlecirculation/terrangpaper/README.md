@@ -1,0 +1,86 @@
+# TERRA-NG GPU paper: benchmark and scaling inputs
+
+Everything the paper's mantle-circulation results were produced from, in one place.
+Previously these files were split between `apps/mantlecirculation/parameterfiles/`
+and `apps/mantlecirculation/bench_mt/`, and the sbatch launch scripts were not in
+the repository at all.
+
+```
+benchmarks/           verification benchmark configs (A3, C1, C3, C4, C5)
+production/           MT256/MT512 production configs (TALA, HyTeG comparison)
+scaling/              strong-scaling sweep
+  config_fscmb_nsurf_lvl6_10steps.toml   config used by the published sweep
+  config_scal_A3.toml                    same case, ported to the current app
+  sng2/                                  SuperMUC-NG Phase 2 launch scripts
+  lumi/                                  LUMI-G launch scripts
+  sng2_reproduction/                     re-run of the sng2 sweep, Sept 2026
+  submit/                                sweep generators and collector
+```
+
+## Scaling sweep
+
+Each point runs **10 timesteps** (indices 0..9) with `--output-frequency 9`, which
+writes exactly one `timer_trees/timer_tree_9.json`. Per-step wall time is that
+file's `timestep` node, `root_time / count`. Note `sum_time` is the sum **across
+ranks** and `avg_time` the rank mean, so neither should be divided by `count`
+to get a per-step time for a single rank.
+
+Solver settings are fixed so every point does identical work: Stokes 10 FGMRES
+iterations with restart 10, energy 50 FGMRES iterations, both with relative and
+absolute tolerances pinned to 0 so the iteration count is never cut short.
+Low-memory variants set both restarts to 5 and hold the Krylov basis in single
+precision.
+
+`scaling/sng2/` and `scaling/lumi/` are the scripts as they ran for the paper.
+The `_menv` sng2 variants use a different MPI/offload environment; see below.
+
+### Environment matters more than expected
+
+The sng2 scripts set `PSM3_GPUDIRECT=0` and deliberately set **neither**
+`I_MPI_OFFLOAD_IPC` nor `FI_MR_CACHE_MAX_COUNT` / `PSM3_MR_CACHE_SIZE`. Using the
+environment from the production mantle-circulation run scripts instead costs
+13-79 % per timestep. Single-rank points are unaffected and the penalty grows
+with ranks per node, which points at intra-node GPU peer-to-peer transfers.
+Keep the environment in these scripts when extending the sweep.
+
+### Reproduction on the current app
+
+`scaling/sng2_reproduction/` re-runs every sng2 point on the merged
+MMOC/compressible app. Three keys of the original config no longer bind and were
+translated in `config_scal_A3.toml`:
+
+| original                          | now                                        |
+|-----------------------------------|--------------------------------------------|
+| `viscosity-law="frank-kamenetskii"` | `"fk-benchmark"` (same law)              |
+| `initial-temperature-sph-epsilon` | `perturbation-amplitude`                   |
+| `radius-min/max`, `diffusivity`, `rayleigh-number` | unbound; supplied dimensionally on the CLI |
+
+Two traps worth knowing. `t-end` is interpreted in **Ma** by the current app but
+was nondimensional time before, so the original `t-end=1.0` stops the run after
+three steps and writes no timer tree; let `--max-timesteps` govern instead. And
+the A3 reference viscosity sits above the default viscosity clamp, so pass
+`--viscosity-min 1e18 --viscosity-max 1e28` or the law is silently cut.
+
+Agreement with the published sng2 numbers over 32 of 34 points: median +2.3 %,
+and within about 1 % for every point costing 3 s/step or more. Points below
+3 s/step run ~5 % heavy, which is fixed per-step overhead that does not scale down.
+
+## Degrees of freedom
+
+The app reports `(T, u, p)` separately. The paper's per-level DoF totals are
+`T + u + p`, not the velocity-pressure Stokes system alone.
+
+## Two caveats when comparing machines
+
+**The LUMI scripts do not write a usable timer tree.** 114 of the 123 pass
+`--output-frequency 11` alongside `--max-timesteps 10`, and since output is
+written when `timestep % frequency == 0`, nothing fires after step 0. Only 9 use
+frequency 9 or 4. So LUMI per-step times come from the `### Timestep` log
+timestamps, while sng2 times come from `timer_tree_9.json`. The two are close
+but not the same measurement, and the discrepancy is worth keeping in mind when
+reading a cross-vendor plot.
+
+**The launch scripts keep their original absolute paths.** They are the record of
+what actually ran, so the LUMI ones still point into `/pfs/lustrep3/...` and the
+sng2 ones into the scratch tree. Adapt paths before reusing rather than expecting
+them to run as-is from a checkout.
