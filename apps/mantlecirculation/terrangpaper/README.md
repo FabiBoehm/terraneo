@@ -7,7 +7,7 @@ the repository at all.
 
 ```
 benchmarks/           verification benchmark configs (A3, C1, C3, C4, C5), MMOC
-production/           MT256/MT512 production configs (TALA, HyTeG comparison)
+production/           the MT1024 MMOC production run
 scaling/              strong-scaling sweep
   config_fscmb_nsurf_lvl6_10steps.toml   config used by the published sweep
   config_scal_A3.toml                    same case, ported to the current app
@@ -36,6 +36,20 @@ All five take dimensional inputs, since the nondimensional keys no longer bind,
 and all five parse clean against the current app with no unbound keys. The
 Rayleigh number is set through `reference-viscosity`; the shell 1.22..2.22 comes
 from the two radii. Pass mesh and subdomain levels on the command line.
+
+## Production
+
+One config, `config_MT1024_C5dim_Raeff1e7_mmoc.toml`, the last MT1024 run:
+compressible TALA with MMOC, Frank-Kamenetskii rmu 100 on the Lin et al. 2022
+radial profile, free slip both boundaries, broadband initial condition over
+degrees 8 to 96. The four earlier MT256 and MT512 configs were removed.
+
+It is a port, not the original file. Six keys of the pre-merge config no longer
+bind and were translated, and the viscosity profile is now read from the
+dimensional CSV columns rather than the pre-normalised ones. A missing column
+yields a profile of zeros with no error, so do not change those two key names.
+The config parses clean against the current app with no unbound keys, but the
+effective Rayleigh number has not been re-verified by a run.
 
 ## Scaling sweep
 

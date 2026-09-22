@@ -1,0 +1,91 @@
+## MT1024 production run: "C5" case in dimensional mode with variable viscosity,
+## effective Ra = 1e7. TALA-compressible, Frank-Kamenetskii rmu = 100 applied to
+## the Lin et al. 2022 radial profile, free slip at both boundaries, broadband
+## initial condition over spherical-harmonic degrees 8..96.
+##
+## This is the configuration of the last MT1024 run (MT1024_C5dim_Raeff1e7_mmoc,
+## continued as *_cont), ported from the pre-merge app. Keys that no longer bind
+## were translated:
+##   set-nondimensional-numbers   -> dropped (dimensional is the default path)
+##   rho-weighted-tala            -> dropped (removed during the merge)
+##   diffusivity                  -> dropped (unbound)
+##   viscosity-law "frank-kamenetskii" -> "fk-type2" (FK tied to a radial profile)
+##   initial-temperature-sph-epsilon   -> perturbation-amplitude
+##   viscosity-radial-profile{,-csv-filename} -> viscosity-profile-csv-path
+##
+## IMPORTANT: the profile loader now wants the DIMENSIONAL columns of the CSV.
+## The old config asked for radius_normalized_1p22_2p22 / viscosity_scaled_by_min,
+## which the current loader does not find -- and a missing column yields a profile
+## of ZEROS with no error. Keep the two keys below as they are.
+##
+## Two numbers worth knowing. The original run printed a NOMINAL Rayleigh number
+## of 4.49e8, computed from the reference viscosity alone; the "Raeff1e7" in the
+## run name is the EFFECTIVE value once the Lin profile raises the mean viscosity.
+## And because the profile is now read in dimensional units rather than the
+## pre-normalised column, the effective value has NOT been re-verified on the
+## current app. Check the printed Rayleigh number on the first run before
+## treating this as a continuation of the old one.
+##
+## Mesh and subdomain levels came from the job script:
+##   --refinement-level-mesh-min 4 --refinement-level-mesh-max 10
+##   --radial-extra-levels -1 --lat-sdr 4 --rad-sdr 0
+
+compressible=true
+adiabat-surface-temperature=0.41
+
+reference-viscosity=3.38322e20
+reference-density=4686
+thermal-expansivity=2e-5
+thermal-conductivity=3.0
+specific-heat-capacity=1250
+
+radius-cmb=3480000
+radius-surface=6371000
+temperature-cmb=4200
+temperature-surface=300
+
+viscosity-min=1e18
+viscosity-max=1e28
+viscosity-law="fk-type2"
+viscosity-rmu=100
+
+velocity-bc-cmb="freeslip"
+velocity-bc-surface="freeslip"
+
+initial-temperature-profile="conductive"
+perturbation-amplitude=0.05
+initial-temperature-sph-degree-min=8
+initial-temperature-sph-degree-max=96
+initial-temperature-sph-seed=7
+
+dt-scaling=2.7
+dt-min=1e-8
+dt-max=1000
+t-end=1e9
+max-timesteps=1000000
+energy-solver="mmoc"
+energy-substeps=1
+picard-iterations=1
+
+stokes-krylov-restart=30
+stokes-krylov-max-iterations=10
+stokes-krylov-relative-tolerance=1e-06
+stokes-krylov-absolute-tolerance=1e-12
+stokes-viscous-pc-num-vcycles=1
+stokes-viscous-pc-cheby-order=2
+stokes-viscous-pc-num-smoothing-steps-prepost=3
+stokes-viscous-pc-num-power-iterations=10
+stokes-viscous-pc-agglom-factors=[]
+stokes-penalty-epsilon=1e-7
+
+energy-krylov-max-iterations=20
+energy-krylov-relative-tolerance=1e-3
+
+outdir-overwrite=1
+output-frequency=100
+
+## Lin et al. 2022 radial viscosity profile. Path is relative to the repository
+## root; make it absolute if the app runs from elsewhere.
+viscosity-profile-csv-path="data/radialprofiles/ViscosityProfile_Lin_et_al_2022.csv"
+viscosity-radial-profile-radii-key="Radius (m)"
+viscosity-radial-profile-value-key="Viscosity (Pa s)"
