@@ -22,9 +22,19 @@ export ZE_FLAT_DEVICE_HIERARCHY=FLAT
 export ONEAPI_DEVICE_SELECTOR=level_zero:gpu
 ulimit -c 0
 export TMPDIR=/hppfs/scratch/0E/di35guv2/tmp
-mkdir -p "$TMPDIR" "/hppfs/scratch/0E/di35guv2/scal_a3_origenv/MT64_g2_A3_oe"
-cd "/hppfs/scratch/0E/di35guv2/scal_a3_origenv/MT64_g2_A3_oe"
-srun --chdir="/hppfs/scratch/0E/di35guv2/scal_a3_origenv/MT64_g2_A3_oe" "/hppfs/scratch/0E/di35guv2/terraneo-merged-build/apps/mantlecirculation/mantlecirculation" --config "/hppfs/scratch/0E/di35guv2/mc_runs/merged_configs/config_scal_A3.toml" --extended-parameters \
+# Paths. Override any of these to run from a checkout instead of the
+# original scratch tree:
+#   TERRANG_BIN  the mantlecirculation binary
+#   TERRANG_CFG  config_scal_A3.toml (defaults to the copy next to this tree)
+#   TERRANG_OUT  output directory for this point
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BIN="${TERRANG_BIN:-/hppfs/scratch/0E/di35guv2/terraneo-merged-build/apps/mantlecirculation/mantlecirculation}"
+CFG="${TERRANG_CFG:-$HERE/../config_scal_A3.toml}"
+OUT="${TERRANG_OUT:-/hppfs/scratch/0E/di35guv2/scal_a3_origenv/MT64_g2_A3_oe}"
+
+mkdir -p "$TMPDIR" "$OUT"
+cd "$OUT"
+srun --chdir="$OUT" "$BIN" --config "$CFG" --extended-parameters \
   --energy-solver ev \
   --reference-viscosity 2.459983e25 --radius-cmb 3527020 --radius-surface 6418020 \
   --temperature-surface 0 --temperature-cmb 3500 \
@@ -37,4 +47,4 @@ srun --chdir="/hppfs/scratch/0E/di35guv2/scal_a3_origenv/MT64_g2_A3_oe" "/hppfs/
   --stokes-viscous-pc-num-smoothing-steps-prepost 2 \
   --energy-krylov-max-iterations 50 \
   --energy-krylov-relative-tolerance 0 --energy-krylov-absolute-tolerance 0 \
-  --outdir "/hppfs/scratch/0E/di35guv2/scal_a3_origenv/MT64_g2_A3_oe" --outdir-overwrite
+  --outdir "$OUT" --outdir-overwrite

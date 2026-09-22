@@ -99,6 +99,12 @@ three steps and writes no timer tree; let `--max-timesteps` govern instead. And
 the A3 reference viscosity sits above the default viscosity clamp, so pass
 `--viscosity-min 1e18 --viscosity-max 1e28` or the law is silently cut.
 
+The 34 scripts there are the sweep as run on 2026-09-22: every published sng2
+point, 50 energy iterations, and the original environment restored. They take
+their config from `../config_scal_A3.toml` by default, and `TERRANG_BIN`,
+`TERRANG_CFG` and `TERRANG_OUT` override the binary, config and output paths so
+they run from a checkout rather than only from the original scratch tree.
+
 Agreement with the published sng2 numbers over 32 of 34 points: median +2.3 %,
 and within about 1 % for every point costing 3 s/step or more. Points below
 3 s/step run ~5 % heavy, which is fixed per-step overhead that does not scale down.
