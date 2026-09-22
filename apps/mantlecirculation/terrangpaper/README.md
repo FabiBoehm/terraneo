@@ -6,7 +6,7 @@ and `apps/mantlecirculation/bench_mt/`, and the sbatch launch scripts were not i
 the repository at all.
 
 ```
-benchmarks/           verification benchmark configs (A3, C1, C3, C4, C5)
+benchmarks/           verification benchmark configs (A3, C1, C3, C4, C5), MMOC
 production/           MT256/MT512 production configs (TALA, HyTeG comparison)
 scaling/              strong-scaling sweep
   config_fscmb_nsurf_lvl6_10steps.toml   config used by the published sweep
@@ -16,6 +16,26 @@ scaling/              strong-scaling sweep
   sng2_reproduction/                     re-run of the sng2 sweep, Sept 2026
   submit/                                sweep generators and collector
 ```
+
+## Benchmarks
+
+One config per case, all using MMOC for the energy equation at Courant number
+2.7, which is what the paper's verification figure reports. The earlier EV and
+SUPG variants were removed; the solver is a command-line override if you want to
+compare against them.
+
+| config | Rayleigh | viscosity | initial condition |
+|---|---|---|---|
+| `config_A3_mmoc.toml` | 7e3 | FK rmu 20 | Y_3^2 |
+| `config_C1_mmoc.toml` | 1e5 | isoviscous | Y_4^0 + 5/7 Y_4^4 |
+| `config_C3_mmoc.toml` | 1e5 | FK rmu 30 | Y_4^0 + 5/7 Y_4^4 |
+| `config_C4_mmoc.toml` | 1e6 | FK rmu 30 | Y_4^0 + 5/7 Y_4^4 |
+| `config_C5_mmoc.toml` | 1e7 | FK rmu 30 | Y_4^0 + 5/7 Y_4^4 |
+
+All five take dimensional inputs, since the nondimensional keys no longer bind,
+and all five parse clean against the current app with no unbound keys. The
+Rayleigh number is set through `reference-viscosity`; the shell 1.22..2.22 comes
+from the two radii. Pass mesh and subdomain levels on the command line.
 
 ## Scaling sweep
 
