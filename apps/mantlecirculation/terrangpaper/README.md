@@ -17,23 +17,41 @@ scaling/              strong-scaling sweep
 
 ## Benchmarks
 
-One config per case, all using MMOC for the energy equation at Courant number
-2.7, which is what the paper's verification figure reports. The earlier EV and
-SUPG variants were removed; the solver is a command-line override if you want to
-compare against them.
+The ten cases of the paper's Nusselt table, from the Zhong et al. (2008)
+spherical-shell suite. One config each, all MMOC at Courant number 2.7, MT256,
+free slip at both boundaries, isothermal Dirichlet temperatures. The earlier
+EV and SUPG variants were removed; the solver is a command-line override if you
+want to compare against them.
 
-| config | Rayleigh | viscosity | initial condition |
+| config | Rayleigh | contrast | perturbation |
 |---|---|---|---|
-| `config_A3_mmoc.toml` | 7e3 | FK rmu 20 | Y_3^2 |
-| `config_C1_mmoc.toml` | 1e5 | isoviscous | Y_4^0 + 5/7 Y_4^4 |
-| `config_C3_mmoc.toml` | 1e5 | FK rmu 30 | Y_4^0 + 5/7 Y_4^4 |
-| `config_C4_mmoc.toml` | 1e6 | FK rmu 30 | Y_4^0 + 5/7 Y_4^4 |
-| `config_C5_mmoc.toml` | 1e7 | FK rmu 30 | Y_4^0 + 5/7 Y_4^4 |
+| `config_A1_mmoc.toml` | 7e3 | 1 | Y_3^2 |
+| `config_A3_mmoc.toml` | 7e3 | 20 | Y_3^2 |
+| `config_A4_mmoc.toml` | 7e3 | 100 | Y_3^2 |
+| `config_A5_mmoc.toml` | 7e3 | 1000 | Y_3^2 |
+| `config_A6_mmoc.toml` | 7e3 | 1e4 | Y_3^2 |
+| `config_A7_mmoc.toml` | 7e3 | 1e5 | Y_3^2 |
+| `config_C1_mmoc.toml` | 1e5 | 1 | Y_4^0 + 5/7 Y_4^4 |
+| `config_C3_mmoc.toml` | 1e5 | 30 | Y_4^0 + 5/7 Y_4^4 |
+| `config_C4_mmoc.toml` | 1e5 | 100 | Y_4^0 + 5/7 Y_4^4 |
+| `config_C1star_mmoc.toml` | 1e7 | 1 | Y_4^0 + 5/7 Y_4^4 |
 
-All five take dimensional inputs, since the nondimensional keys no longer bind,
-and all five parse clean against the current app with no unbound keys. The
-Rayleigh number is set through `reference-viscosity`; the shell 1.22..2.22 comes
-from the two radii. Pass mesh and subdomain levels on the command line.
+`viscosity-rmu` is the top-to-bottom contrast directly, since the law is
+eta(T) = rmu^(1/2 - T). The Rayleigh number is set through `reference-viscosity`,
+which is 1.721988e24 at Ra = 1e5 and scales inversely with Ra; the shell
+1.22..2.22 comes from the two radii. Picard iterations are 1 for the isoviscous
+cases and 2 where viscosity depends on temperature. All ten parse clean against
+the current app with no unbound keys.
+
+**One caveat.** A3, C1 and C3 have contrasts confirmed by runs that reproduced
+the published Nusselt numbers, and C4 follows by elimination from the paper's
+C-series set {1, 30, 100}. The contrasts for A4, A5, A6 and A7 are inferred: the
+paper gives the A-series set {1, 20, 100, 1e3, 1e4, 1e5} but not the per-case
+assignment, and no configs or logs survive for those runs. The order is
+supported by the archived radial profiles, whose interior mean temperature rises
+monotonically 0.19, 0.27, 0.35, 0.41, 0.65 across A1, A4, A5, A6, A7, which is
+the stagnant-lid signature of increasing contrast. Confirm against the original
+benchmark paper before publishing.
 
 ## Production
 

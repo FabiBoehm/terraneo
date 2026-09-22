@@ -1,5 +1,5 @@
-## Zhong et al. (2008) spherical-shell benchmark, case C4:
-##   Rayleigh number 1e5, viscosity contrast 100
+## Zhong et al. (2008) spherical-shell benchmark, case A6:
+##   Rayleigh number 7e3, viscosity contrast 1e4 (contrast inferred, see README)
 ## Free slip at both boundaries, isothermal Dirichlet temperatures, MT256.
 ## Energy equation: MMOC semi-Lagrangian transport at Courant number 2.7.
 ##
@@ -13,7 +13,7 @@ radius-cmb=3527020
 radius-surface=6418020
 temperature-surface=0
 temperature-cmb=3500
-reference-viscosity=1.721988e24
+reference-viscosity=2.459983e25
 
 ## Widen the viscosity clamp: the A-series reference viscosity sits above the
 ## default ceiling, which would silently cut the viscosity law.
@@ -22,7 +22,7 @@ viscosity-max=1e28
 
 ## eta(T) = rmu^(1/2 - T), so viscosity-rmu is the top-to-bottom contrast.
 viscosity-law="fk-benchmark"
-viscosity-rmu=100
+viscosity-rmu=10000
 
 velocity-bc-cmb="freeslip"
 velocity-bc-surface="freeslip"
@@ -30,11 +30,8 @@ temperature-bc-value-cmb=1.0
 temperature-bc-value-surface=0.0
 
 initial-temperature-profile="conductive"
-initial-temperature-sph-degree=4
-initial-temperature-sph-order=0
-initial-temperature-sph-degree-2=4
-initial-temperature-sph-order-2=4
-initial-temperature-sph-factor-2=0.714286
+initial-temperature-sph-degree=3
+initial-temperature-sph-order=2
 perturbation-amplitude=0.01
 
 dt-scaling=2.7

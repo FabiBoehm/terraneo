@@ -1,9 +1,12 @@
-## A3 benchmark: Ra = 7e3, Frank-Kamenetskii rmu = 20, tetrahedral Y_3^2 initial condition.
+## Zhong et al. (2008) spherical-shell benchmark, case A3:
+##   Rayleigh number 7e3, viscosity contrast 20
+## Free slip at both boundaries, isothermal Dirichlet temperatures, MT256.
 ## Energy equation: MMOC semi-Lagrangian transport at Courant number 2.7.
 ##
 ## Dimensional inputs, because the nondimensional keys (radius-min/max,
-## diffusivity, rayleigh-number) no longer bind. Shell 1.22..2.22 comes from the
-## two radii, and the Rayleigh number from the reference viscosity.
+## diffusivity, rayleigh-number) no longer bind. The shell 1.22..2.22 comes from
+## the two radii and the Rayleigh number from the reference viscosity, which is
+## 1.721988e24 at Ra = 1e5 and scales inversely with Ra.
 ## Mesh and subdomain refinement levels are passed on the command line.
 
 radius-cmb=3527020
@@ -12,11 +15,12 @@ temperature-surface=0
 temperature-cmb=3500
 reference-viscosity=2.459983e25
 
-## A3's reference viscosity sits above the default clamp ceiling, which would
-## silently cut the viscosity law. Widen the clamp so it never bites.
+## Widen the viscosity clamp: the A-series reference viscosity sits above the
+## default ceiling, which would silently cut the viscosity law.
 viscosity-min=1e18
 viscosity-max=1e28
 
+## eta(T) = rmu^(1/2 - T), so viscosity-rmu is the top-to-bottom contrast.
 viscosity-law="fk-benchmark"
 viscosity-rmu=20
 
@@ -37,7 +41,7 @@ t-end=1e9
 max-timesteps=1000000
 energy-solver="mmoc"
 energy-substeps=1
-picard-iterations=1
+picard-iterations=2
 
 stokes-krylov-restart=10
 stokes-krylov-max-iterations=10
