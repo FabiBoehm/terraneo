@@ -228,6 +228,12 @@ struct PhysicsParameters
     double specific_heat_capacity = 1230;
     double grueneisen_parameter   = 1.1;
 
+    /// Independent switches for the two compressible heating terms. Both default to true, so
+    /// with --compressible the behaviour is unchanged; setting either to false isolates the
+    /// contribution of the other (BA / EBA / TALA variants, per-term attribution).
+    bool shear_heating     = true;
+    bool adiabatic_heating = true;
+
     bool   internal_heating      = false;
     double internal_heating_rate = 3e-12;
 
@@ -875,6 +881,19 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
     //////////////////////////////
     add_flag_with_default( app, "--compressible", parameters.physics_parameters.compressible )
         ->group( "Physical Parameters" );
+    add_flag_with_default( app, "--shear-heating", parameters.physics_parameters.shear_heating )
+        ->group( "Physical Parameters" )
+        ->description( "Viscous dissipation source in the energy equation; only acts with --compressible." );
+    add_flag_with_default( app, "--adiabatic-heating", parameters.physics_parameters.adiabatic_heating )
+        ->group( "Physical Parameters" )
+        ->description( "Adiabatic (de)compression source in the energy equation; only acts with --compressible." );
+    add_option_with_default( app, "--grueneisen-parameter", parameters.physics_parameters.grueneisen_parameter )
+        ->group( "Physical Parameters" )
+        ->description( "Grueneisen parameter of the Adams-Williamson profile "
+                       "rho(r) = rho_s * exp( Di*(r_max-r)/gamma ); larger flattens the density contrast." );
+    add_option_with_default( app, "--surface-density", parameters.physics_parameters.surface_density_dim )
+        ->group( "Physical Parameters" )
+        ->description( "Surface density of the Adams-Williamson profile, kg/m^3." );
 
     std::map< std::string, CompressibleForm > compressible_form_map{
         { "tala", CompressibleForm::TALA },

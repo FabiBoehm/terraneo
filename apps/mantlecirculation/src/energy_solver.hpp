@@ -34,6 +34,21 @@
 
 namespace terra::mantlecirculation {
 
+/// Radial (nondimensional) material profiles the energy equation needs, all normalised by
+/// their reference values so an incompressible run has every one of them identically 1:
+///   rho = rho_bar/rho_0, alpha = alpha/alpha_0, cp = cp_bar/cp_0,
+///   kappa = k_hat/(rho*cp)  (the diffusion coefficient shape; k_hat is 1 while the code
+///                            treats conductivity as constant).
+/// Dividing the energy equation by rho_bar*cp_bar puts these into every term:
+///   diffusion  kappa(r)/Pe        internal  H/cp(r)
+///   adiabatic  Di*alpha(r)/cp(r)  shear     (Di*Pe/Ra)/(rho(r)*cp(r))
+template < typename ScalarType >
+struct RadialProfiles
+{
+    grid::Grid2DDataScalar< ScalarType > rho, alpha, cp, kappa;
+    bool                                 valid = false;
+};
+
 /// Abstract energy-equation solver: one step advances the temperature state
 /// from t to t + dt using a scheme-specific update.  Concrete subclasses own
 /// all of their scheme-specific state (operators, solver, scratch); the call
@@ -43,6 +58,10 @@ class EnergySolver
 {
   public:
     virtual ~EnergySolver() = default;
+
+    /// Supply the radial material profiles. Called once after construction; solvers that
+    /// do not use them ignore the call. Must come before the first step().
+    virtual void set_radial_profiles( const RadialProfiles< ScalarType >& ) {}
 
     /// CFL/stability-bound dt for the scheme at the current velocity field.
     virtual ScalarType compute_dt( const int timestep ) = 0;
@@ -174,6 +193,17 @@ class SUPGSolver : public EnergySolver< ScalarType >
     using FGMRESType  = linalg::solvers::FGMRES< AD, DiagSolverT >;
 
   public:
+    /// Radial profiles: kappa goes into the three AD operators (they multiply the scalar
+    /// diffusivity by it); the rest are read by the heating terms.
+    void set_radial_profiles( const RadialProfiles< ScalarType >& p ) override
+    {
+        profiles_ = p;
+        if ( !p.valid )
+            return;
+        for ( auto* op : { A_.get(), A_neumann_.get(), A_neumann_diag_.get() } )
+            if ( op != nullptr )
+                op->set_kappa_profile( p.kappa );
+    }
     SUPGSolver(
         const std::shared_ptr< grid::shell::DistributedDomain >&        domain,
         const grid::Grid3DDataVec< ScalarType, 3 >&                     coords_shell,
@@ -371,6 +401,7 @@ class SUPGSolver : public EnergySolver< ScalarType >
     std::shared_ptr< util::Table >                                  table_;
 
     // Owned state.
+    RadialProfiles< ScalarType > profiles_;
     std::unique_ptr< AD >                               A_, A_neumann_, A_neumann_diag_;
     std::unique_ptr< TempMass >                         M_;
     std::unique_ptr< FGMRESType >                       solver_;
@@ -455,6 +486,17 @@ class EVSolver : public EnergySolver< ScalarType >
     using FGMRESFloat  = linalg::solvers::FGMRESLowMem< AD_EV, BasisVecT, DiagSolverT >;
 
   public:
+    /// Radial profiles: kappa goes into the three AD operators (they multiply the scalar
+    /// diffusivity by it); the rest are read by the heating terms.
+    void set_radial_profiles( const RadialProfiles< ScalarType >& p ) override
+    {
+        profiles_ = p;
+        if ( !p.valid )
+            return;
+        for ( auto* op : { A_.get(), A_neumann_.get(), A_neumann_diag_.get() } )
+            if ( op != nullptr )
+                op->set_kappa_profile( p.kappa );
+    }
     EVSolver(
         const std::shared_ptr< grid::shell::DistributedDomain >&        domain,
         const grid::Grid3DDataVec< ScalarType, 3 >&                     coords_shell,
@@ -1009,9 +1051,32 @@ class EVSolver : public EnergySolver< ScalarType >
             const ScalarType Di_h = static_cast< ScalarType >( prm_.physics_parameters.dissipation_number );
             const ScalarType Ra_h = static_cast< ScalarType >( prm_.physics_parameters.rayleigh_number );
             linalg::assign( heating_base_, gamma );
+            // Internal heating carries 1/cp(r); Di, Ra, Pe already hold the reference values.
+            if ( profiles_.valid && gamma != ScalarType( 0 ) )
+            {
+                Kokkos::parallel_for(
+                    "ev_internal_heating_cp_scale",
+                    grid::shell::local_domain_md_range_policy_nodes( *domain_ ),
+                    ScaleByRadialProfile{ heating_base_.grid_data(), profiles_.cp, profiles_.cp, false, true } );
+                Kokkos::fence();
+            }
+            // --shear-heating / --adiabatic-heating gate the two terms independently so a run
+            // can isolate one of them; both default to on, so --compressible alone is unchanged.
+            if ( prm_.physics_parameters.shear_heating )
+            {
             shear_op_->assemble_phi_nodal( velocity_, heating_scratch_ );
+            // Shear heating carries 1/(rho(r)*cp(r)).
+            if ( profiles_.valid )
+            {
+                Kokkos::parallel_for(
+                    "ev_shear_rho_cp_scale",
+                    grid::shell::local_domain_md_range_policy_nodes( *domain_ ),
+                    ScaleByRadialProfile{ heating_scratch_.grid_data(), profiles_.rho, profiles_.cp, true, true } );
+                Kokkos::fence();
+            }
             const ScalarType visc_scale_h = ( Ra_h != ScalarType( 0 ) ) ? Di_h / Ra_h : ScalarType( 0 );
             linalg::lincomb( heating_base_, { ScalarType( 1 ), visc_scale_h }, { heating_base_, heating_scratch_ } );
+            }
         }
 
         for ( int i = 0; i < prm_.time_stepping_parameters.energy_substeps; ++i )
@@ -1033,6 +1098,8 @@ class EVSolver : public EnergySolver< ScalarType >
                 //   This term is ρ̄-free in BOTH formulations: canonical King divides
                 //   the energy equation by ρ̄c̄ₚ, so ρ̄ cancels on the adiabatic term
                 //   (unlike buoyancy and shear, which keep ρ̄ / 1/ρ̄). Full T is used.
+                if ( prm_.physics_parameters.adiabatic_heating )
+                {
                 Kokkos::parallel_for(
                     "ev_adiabatic_source",
                     local_domain_md_range_policy_nodes( *domain_ ),
@@ -1042,10 +1109,19 @@ class EVSolver : public EnergySolver< ScalarType >
                                             T_.grid_data(),
                                             heating_scratch_.grid_data(),
                                             Di,
-                                            ScalarType( -1 ) } );
+                                            ScalarType( -1 ),
+                                            profiles_.alpha,
+                                            profiles_.cp,
+                                            profiles_.valid,
+                                            /*divide_by_cp=*/true } );
                 Kokkos::fence();
                 linalg::lincomb(
                     heating_source_, { ScalarType( 1 ), ScalarType( 1 ) }, { heating_base_, heating_scratch_ } );
+                }
+                else
+                {
+                    linalg::assign( heating_source_, heating_base_ );
+                }
             }
 
             // 1+2) per-wedge lap projection and ν_h.  Computed ONCE per outer step
@@ -1232,7 +1308,11 @@ class EVSolver : public EnergySolver< ScalarType >
                                     T_.grid_data(),
                                     heating_source_.grid_data(),
                                     Di,
-                                    ScalarType( 1 ) } );
+                                    ScalarType( 1 ),
+                                    profiles_.alpha,
+                                    profiles_.cp,
+                                    profiles_.valid,
+                                    /*divide_by_cp=*/false } );
         Kokkos::fence();
         {
             auto       w_v   = heating_source_.grid_data();
@@ -1278,6 +1358,7 @@ class EVSolver : public EnergySolver< ScalarType >
     linalg::VectorQ1Scalar< ScalarType >                                             diag_ones_;
     std::unique_ptr< fe::wedge::operators::shell::ShearHeatingKerngen< ScalarType > > shear_op_;
 
+    RadialProfiles< ScalarType > profiles_;
     std::unique_ptr< AD_EV >                                                A_, A_neumann_, A_neumann_diag_;
     std::unique_ptr< TempMass >                                             M_;
     std::unique_ptr< EVDiffOp >                                             A_evdiff_, A_kappa_;
@@ -1371,6 +1452,17 @@ class MMOCSolver : public EnergySolver< ScalarType >
     using FGMRESType  = linalg::solvers::FGMRES< AD, DiagSolverT >;
 
   public:
+    /// Radial profiles: kappa goes into the three AD operators (they multiply the scalar
+    /// diffusivity by it); the rest are read by the heating terms.
+    void set_radial_profiles( const RadialProfiles< ScalarType >& p ) override
+    {
+        profiles_ = p;
+        if ( !p.valid )
+            return;
+        for ( auto* op : { A_.get(), A_neumann_.get(), A_neumann_diag_.get() } )
+            if ( op != nullptr )
+                op->set_kappa_profile( p.kappa );
+    }
     MMOCSolver(
         const std::shared_ptr< grid::shell::DistributedDomain >&        domain,
         const grid::Grid3DDataVec< ScalarType, 3 >&                     coords_shell,
@@ -1533,9 +1625,32 @@ class MMOCSolver : public EnergySolver< ScalarType >
         const ScalarType Di = static_cast< ScalarType >( prm_.physics_parameters.dissipation_number );
         const ScalarType Ra = static_cast< ScalarType >( prm_.physics_parameters.rayleigh_number );
         linalg::assign( heating_source_, gamma );
+        // Internal heating carries 1/cp(r).
+        if ( profiles_.valid && gamma != ScalarType( 0 ) )
+        {
+            Kokkos::parallel_for(
+                "mmoc_internal_heating_cp_scale",
+                grid::shell::local_domain_md_range_policy_nodes( *domain_ ),
+                ScaleByRadialProfile{ heating_source_.grid_data(), profiles_.cp, profiles_.cp, false, true } );
+            Kokkos::fence();
+        }
+        if ( prm_.physics_parameters.shear_heating )
+        {
         shear_op_->assemble_phi_nodal( velocity_, heating_scratch_ );
+        // Shear heating carries 1/(rho(r)*cp(r)).
+        if ( profiles_.valid )
+        {
+            Kokkos::parallel_for(
+                "mmoc_shear_rho_cp_scale",
+                grid::shell::local_domain_md_range_policy_nodes( *domain_ ),
+                ScaleByRadialProfile{ heating_scratch_.grid_data(), profiles_.rho, profiles_.cp, true, true } );
+            Kokkos::fence();
+        }
         const ScalarType visc_scale = ( Ra != ScalarType( 0 ) ) ? Di / Ra : ScalarType( 0 );
         linalg::lincomb( heating_source_, { ScalarType( 1 ), visc_scale }, { heating_source_, heating_scratch_ } );
+        }
+        if ( prm_.physics_parameters.adiabatic_heating )
+        {
         Kokkos::parallel_for(
             "mmoc_adiabatic_source",
             grid::shell::local_domain_md_range_policy_nodes( *domain_ ),
@@ -1545,9 +1660,14 @@ class MMOCSolver : public EnergySolver< ScalarType >
                                     T_.grid_data(),
                                     heating_scratch_.grid_data(),
                                     Di,
-                                    ScalarType( -1 ) } );
+                                    ScalarType( -1 ),
+                                    profiles_.alpha,
+                                    profiles_.cp,
+                                    profiles_.valid,
+                                    /*divide_by_cp=*/true } );
         Kokkos::fence();
         linalg::lincomb( heating_source_, { ScalarType( 1 ), ScalarType( 1 ) }, { heating_source_, heating_scratch_ } );
+        }
     }
 
     void diffuse( const ScalarType dt, const bool print_convergence )
@@ -1617,7 +1737,9 @@ class MMOCSolver : public EnergySolver< ScalarType >
             "mmoc_dissip_W",
             grid::shell::local_domain_md_range_policy_nodes( *domain_ ),
             AdiabaticHeatingSource{ coords_shell_, coords_radii_, velocity_.grid_data(), T_.grid_data(),
-                                    heating_source_.grid_data(), Di, ScalarType( 1 ) } );
+                                    heating_source_.grid_data(), Di, ScalarType( 1 ),
+                                    profiles_.alpha, profiles_.cp, profiles_.valid,
+                                    /*divide_by_cp=*/false } );
         Kokkos::fence();
         {
             auto       w_v   = heating_source_.grid_data();
@@ -1658,6 +1780,7 @@ class MMOCSolver : public EnergySolver< ScalarType >
     linalg::VectorQ1Vec< ScalarType, 3 > u_prev_;
     linalg::VectorQ1Vec< ScalarType, 3 > u_zero_;
 
+    RadialProfiles< ScalarType > profiles_;
     std::unique_ptr< AD >                               A_, A_neumann_, A_neumann_diag_;
     std::unique_ptr< TempMass >                         M_;
     std::unique_ptr< FGMRESType >                       solver_;

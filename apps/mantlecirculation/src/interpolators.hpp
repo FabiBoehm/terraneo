@@ -470,6 +470,16 @@ struct AdiabaticHeatingSource
     Grid4DDataScalar< ScalarType > dst_;
     ScalarType                     dissipation_number_;
     ScalarType                     prefactor_ = ScalarType( -1 );
+    // Radial alpha/cp (both normalised by their reference values, so the ratio is 1 for an
+    // incompressible run). Di already carries alpha_0/cp_0; this supplies the radial shape.
+    Grid2DDataScalar< ScalarType > alpha_;
+    Grid2DDataScalar< ScalarType > cp_;
+    bool                           use_profiles_ = false;
+    /// true  -> shape = alpha/cp, the coefficient of the adiabatic SOURCE term.
+    /// false -> shape = alpha, for the dissipation-conservation diagnostic, whose identity
+    ///          is  Di * int rho*alpha*u_r*T  =  (Di/Ra) * int Phi  (the equation was
+    ///          multiplied back by rho*cp, so the 1/cp must not appear there).
+    bool                           divide_by_cp_ = true;
 
     KOKKOS_INLINE_FUNCTION
     void operator()( const int id, const int x, const int y, const int r ) const
@@ -481,7 +491,29 @@ struct AdiabaticHeatingSource
         for ( int d = 0; d < 3; ++d )
             u_r += u_( id, x, y, r, d ) * n( d );
 
-        dst_( id, x, y, r ) = prefactor_ * dissipation_number_ * u_r * T_( id, x, y, r );
+        const ScalarType shape =
+            use_profiles_ ? ( divide_by_cp_ ? ( alpha_( id, r ) / cp_( id, r ) ) : alpha_( id, r ) ) : ScalarType( 1 );
+
+        dst_( id, x, y, r ) = prefactor_ * dissipation_number_ * shape * u_r * T_( id, x, y, r );
+    }
+};
+
+/// Multiply a Q1 nodal field in place by a radial profile (or its reciprocal).
+/// Used to apply 1/(rho*cp) to the shear-heating source and 1/cp to internal heating.
+struct ScaleByRadialProfile
+{
+    Grid4DDataScalar< ScalarType > data_;
+    Grid2DDataScalar< ScalarType > p1_;
+    Grid2DDataScalar< ScalarType > p2_;
+    bool                           use_p2_ = false;
+    bool                           invert_ = true;
+
+    KOKKOS_INLINE_FUNCTION
+    void operator()( const int id, const int x, const int y, const int r ) const
+    {
+        const ScalarType p = use_p2_ ? ( p1_( id, r ) * p2_( id, r ) ) : p1_( id, r );
+        if ( p > ScalarType( 0 ) )
+            data_( id, x, y, r ) = invert_ ? ( data_( id, x, y, r ) / p ) : ( data_( id, x, y, r ) * p );
     }
 };
 

@@ -578,6 +578,12 @@ Result<> run( const Parameters& prm )
         break;
     }
 
+    // Hand the radial material profiles to whichever energy solver was built. All four are
+    // normalised by their reference values, so they are identically 1 for an incompressible
+    // run and this call then changes nothing.
+    energy->set_radial_profiles(
+        RadialProfiles< ScalarType >{ rho_profile, alpha_profile, cp_profile, kappa_profile, true } );
+
     // fv_cell_centers is consumed only by the FCT advection solver after
     // initialization; for SUPG/EV it is dead weight (a 3-component FV field,
     // ~0.5 GB/GCD at production scale). Release it for the non-FCT solvers.
