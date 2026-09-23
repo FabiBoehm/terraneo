@@ -148,3 +148,46 @@ reading a cross-vendor plot.
 what actually ran, so the LUMI ones still point into `/pfs/lustrep3/...` and the
 sng2 ones into the scratch tree. Adapt paths before reusing rather than expecting
 them to run as-is from a checkout.
+
+## Convergence studies (hourglass, viscosity, precision)
+
+These three figures do not come from the mantle-circulation app but from test
+drivers, and none of the three was tracked in this repository. Status as of
+2026-09-23:
+
+**Hourglass control — reproduced exactly.** Driver
+`tests/test_epsilon_divdiv_quadrature_matrix.cpp`, which was never committed to
+any branch; it survives only as an untracked file and inside a git stash on the
+Helma clone. It also needs `matrix_rhs_s{1,2,3}.inc`, the operator headers
+`epsilon_divdiv_simple_2pt.hpp` and `epsilon_divdiv_simple_stab.hpp`, and a
+version of `epsilon_divdiv_kerngen.hpp` that still carries a fourth template
+parameter (radial quadrature points) and reads the stabilisation strength from
+the environment. The current kerngen has neither.
+
+Invocation is by environment variable, one level per run:
+
+| series | command |
+|---|---|
+| `1pt`  | `RUN_SCALE=<level> ./test_epsilon_divdiv_quadrature_matrix` |
+| `1ptK` | `RUN_SCALE=<level> STAB_C_KERNGEN=0.3 ...` |
+| `2ptK` | `RUN_SCALE=<level> RUN_QP=2 ...` |
+
+**`STAB_C_KERNGEN=0.3` is the published stabilisation constant.** It is recorded
+nowhere else, and it matters: 0.1 gives errors 19 % above the published values
+and 1.0 gives them 30 % below. At 0.3 the rerun reproduces all four levels to
+eleven significant figures (level 5 2.7708062226e-04, level 6 6.9729667964e-05,
+level 7 1.7505508443e-05, level 8 4.3880244792e-06). The `1pt` and `2ptK` series
+matched immediately without any tuning. Level 9 is in the published figure and
+has not been rerun; it needs more than one node.
+
+**Viscosity convergence — driver not working.** `tests/qp_comparison_test.cpp`
+on the `amr` branch of the Helma clone calls `set_single_quadpoint` and a
+`HexPortable` kernel path that neither kerngen here possesses, so it targets a
+third kerngen version. Its name also suggests quadrature rather than viscosity
+profiles, so it may be the wrong file; the stronger candidate is the manufactured
+solution referenced by `tests/mms_visclocal_gen.py`, not yet located.
+
+**Precision study — producer not found.** The data
+(`data/precision_study_complete.csv`, MT8 to MT4096, double vs single L2 errors)
+exists only in the paper repository. No source anywhere in the local clones or in
+1020 commits of the Helma clone emits those column names.
