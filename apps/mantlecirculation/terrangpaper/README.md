@@ -12,6 +12,7 @@ scaling/              strong-scaling sweep
   config_scal_A3.toml                    the sweep case, current app
   sng2_reproduction/                     SuperMUC-NG Phase 2, current app
   lumi/                                  LUMI-G launch scripts, as they ran
+  lumi_reproduction/                     LUMI-G, current app (generate.sh + feed_lumi.sh)
   submit/                                sweep generators and collector
 ```
 
@@ -136,18 +137,40 @@ The app reports `(T, u, p)` separately. The paper's per-level DoF totals are
 
 ## Two caveats when comparing machines
 
-**The LUMI scripts do not write a usable timer tree.** 114 of the 123 pass
-`--output-frequency 11` alongside `--max-timesteps 10`, and since output is
-written when `timestep % frequency == 0`, nothing fires after step 0. Only 9 use
-frequency 9 or 4. So LUMI per-step times come from the `### Timestep` log
-timestamps, while sng2 times come from `timer_tree_9.json`. The two are close
-but not the same measurement, and the discrepancy is worth keeping in mind when
-reading a cross-vendor plot.
+**The archived LUMI scripts would not write a usable timer tree on the current
+app.** 114 of the 123 pass `--output-frequency 11` alongside `--max-timesteps 10`,
+and output fires only when the step index divides evenly, so nothing lands after
+step 0. Yet the published LUMI table marks 82 of its 88 points as tree-derived
+(6 as log-derived), and a `.pre-trees` version of the same table exists, so the
+trees were obtained after the archived scripts, by a run or an app version not
+in this tree. The reproduction in `scaling/lumi_reproduction/` sidesteps the
+question by using `--output-frequency 9`, which writes exactly one
+`timer_tree_9.json` per point, the same convention as the sng2 reproduction.
 
 **The launch scripts keep their original absolute paths.** They are the record of
 what actually ran, so the LUMI ones still point into `/pfs/lustrep3/...` and the
 sng2 ones into the scratch tree. Adapt paths before reusing rather than expecting
 them to run as-is from a checkout.
+
+## Building on LUMI-G
+
+The one non-obvious ingredient is Cray's GPU transport layer. Without it the
+binary links fine but MPI aborts at startup with "GPU_SUPPORT_ENABLED is
+requested, but GTL library is not linked" as soon as `MPICH_GPU_SUPPORT_ENABLED=1`
+is set, which every job script here sets. With the default LUMI/25.03,
+PrgEnv-amd, rocm/6.3.4 and craype-accel-amd-gfx90a modules:
+
+```
+cmake <source> -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DCMAKE_CXX_COMPILER=/opt/rocm-6.3.4/bin/hipcc \
+  -DKokkos_ENABLE_HIP=ON -DKokkos_ARCH_AMD_GFX90A=ON \
+  -DKokkos_ENABLE_SERIAL=ON -DKokkos_ENABLE_ROCTHRUST=ON -DKokkos_ENABLE_HWLOC=OFF \
+  -DMPI_CXX_LINK_FLAGS="-Wl,--whole-archive,-lhugetlbfs,--no-whole-archive" \
+  -DCMAKE_EXE_LINKER_FLAGS="-L/opt/cray/pe/mpich/8.1.32/gtl/lib -lmpi_gtl_hsa -Wl,-rpath,/opt/cray/pe/mpich/8.1.32/gtl/lib"
+make -j16 mantlecirculation
+```
+
+Check with `ldd mantlecirculation | grep gtl` before submitting anything.
 
 ## Convergence studies (hourglass, viscosity, precision)
 

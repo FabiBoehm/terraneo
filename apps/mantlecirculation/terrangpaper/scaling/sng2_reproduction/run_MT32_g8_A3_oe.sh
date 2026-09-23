@@ -27,7 +27,7 @@ export TMPDIR=/hppfs/scratch/0E/di35guv2/tmp
 #   TERRANG_BIN  the mantlecirculation binary
 #   TERRANG_CFG  config_scal_A3.toml (defaults to the copy next to this tree)
 #   TERRANG_OUT  output directory for this point
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HERE="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 BIN="${TERRANG_BIN:-/hppfs/scratch/0E/di35guv2/terraneo-merged-build/apps/mantlecirculation/mantlecirculation}"
 CFG="${TERRANG_CFG:-$HERE/../config_scal_A3.toml}"
 OUT="${TERRANG_OUT:-/hppfs/scratch/0E/di35guv2/scal_a3_origenv/MT32_g8_A3_oe}"
