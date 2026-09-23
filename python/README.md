@@ -19,11 +19,6 @@ calls it, and a bench mode in the production solver that measures what it is wor
   symmetry group, and the glue (`__init__.py`) the embedded interpreter calls.
 - `scripts` — held-out evaluation, solver-bench problem generation, cross-section plots.
 
-The map is used as the **initial guess** of the production multigrid-preconditioned
-FGMRES solver. The solver still produces and certifies the answer; the network only
-decides where the iteration starts, so a wrong prediction costs iterations, never
-correctness.
-
 ## Install
 
     pip install -e python/
@@ -31,19 +26,85 @@ correctness.
 On SNG-2 the working stack is `module load python/3.10.12-extended` plus the
 `torch 2.7.1+xpu` virtualenv on scratch; the newer XPU wheels see no devices there.
 
-## The operator
+## What we are trying to do
 
-The discrete system `K_eta x = f` is linear in `f` for fixed `eta`; all the difficulty
-is in how `K_eta^-1` depends on `eta`. The model has the same structure: it is
-**exactly linear in `(f_u, f_p)` and nonlinear in `eta`**. Every path the forcing takes
-is bias-free and linear; viscosity enters only through multiplicative gates, through
-the generator of the spectral matrices, and through the mixing weights of the local
-stencils — never as a linear input channel. One weight set serves all four
-refinement levels (L3–L6, `n = 9, 17, 33, 65` nodes per diamond edge).
+Every time step of a mantle convection run solves the Stokes system
 
-Shapes below: `B` batch, `S = 10` diamonds, `N = n^3` nodes per diamond, `C = 128`
-channels, `M = (l_max+1)^2` harmonics, `k_1 = k_max+1` radial modes, `n_b = 8` blocks,
-`b_s = 16`, `tok = b_s k_1`.
+    K_eta x = f,        x = (u, p),   f = (f_u, f_p),
+
+for the velocity and pressure that balance the buoyancy `f_u` under the current
+viscosity field `eta`. It is by far the most expensive part of a step: the operator
+changes every step because `eta` does, and at high viscosity contrast the iterative
+solver needs tens of iterations of 100–200 ms each. The solver starts from zero and is
+told nothing about the previous solutions, the structure of `eta`, or what Stokes
+solutions on a shell look like.
+
+A **neural operator** is a network that learns a map between *functions* rather than
+between vectors of fixed length: here the map from the pair (forcing, viscosity field)
+to the solution field. It is trained once on many solved problems and then, given a
+new `f` and `eta`, produces an approximate solution in a single forward pass — no
+iteration. The important distinction from an ordinary image-to-image network is that
+the learned object should be the *operator* `K_eta^-1`, not a lookup on one grid:
+the same weights should be usable at any mesh resolution, and the output should
+respond to `f` and `eta` the way the true solution operator does. Our target is a
+network that is (i) exactly linear in the forcing, like the true inverse, (ii) as
+mesh-independent as we can make it, and (iii) accurate enough that the solver, when it
+starts from the network's output instead of from zero, needs far fewer iterations.
+
+What we do **not** try to do is replace the solver. The prediction is used as the
+initial guess of the production multigrid-preconditioned FGMRES solver; the solver
+still produces and certifies the answer. A poor prediction costs iterations, never
+correctness, and the required accuracy of the network is whatever saves the most
+solver time (10% turns out to be very valuable).
+
+## The operator, in simple terms
+
+The network takes five fields on the shell mesh — the three components of `f_u`,
+`f_p`, and `log eta` — and returns four — `u` and `p`. It is built from three ideas.
+
+**1. Keep the linearity of the true inverse.** For fixed viscosity the discrete
+system is linear in `f`, and all the difficulty is in how `K_eta^-1` depends on `eta`.
+The network has the same structure: the forcing passes only through bias-free linear
+layers, and the viscosity acts on them from the side — it scales features, it selects
+which stencil is used at each node, and it decides the entries of the spectral
+matrices — but is never added as a channel. Doubling `f` exactly doubles the output,
+and `f = 0` gives exactly zero, at any resolution. This removes a whole family of
+things the network would otherwise have to learn and lets the same weights transfer
+across meshes, because linear maps are what the transforms below preserve.
+
+**2. A global part in spectral space.** The inverse of Stokes is a *global* operator:
+a load anywhere moves fluid everywhere. Writing the fields in spherical harmonics on
+the sphere and Chebyshev polynomials in radius turns the shell into a small set of
+modes (a few hundred to a thousand), and for radially layered viscosity the true
+inverse is exactly a matrix per harmonic degree acting on the radial modes — a
+Green's function. The network has such a matrix for every degree, but instead of
+storing them it *generates* them with a small network fed with the degree, the radial
+mode indices and a short summary of the viscosity profile. This is what makes the
+global part mesh-independent: a finer mesh only means more modes are asked of the
+generator, and what it learned about the operator carries over. It is also what
+makes it a neural operator in the FNO sense, with the Fourier basis replaced by the
+natural basis of the shell.
+
+**3. A local part on the mesh.** Sharp viscosity contrasts are local — a slab, a
+channel, a plume boundary — and the spectral truncation cannot resolve them. Four
+convolutional layers on the mesh's `n x n x n` diamond grids handle this, with one
+twist: the stencil used at a node is a viscosity-dependent mixture of a few learned
+stencils, chosen from `eta` at that node and its neighbourhood. This branch holds most
+of the weights and almost all of the compute, and it is the reason the network is
+not yet fully mesh-independent (next section).
+
+Around this: a projection of the output onto the finite-element space (nodes shared
+between diamonds get the mean of their copies — essential, because the solver cannot
+correct any error that lies outside its own space); a learned *defect correction*
+step, which applies the network a second time to the residual of its own answer;
+and a **router** that picks one of four expert copies by the viscosity contrast of the
+problem, since problems with contrast 2 and contrast 10,000 want different stencils.
+
+### The same in shapes
+
+`B` batch, `S = 10` diamonds, `N = n^3` nodes per diamond, `C = 128` channels,
+`M = (l_max+1)^2` harmonics, `k_1 = k_max+1` radial modes, `n_b = 8` blocks of
+`b_s = 16` channels, `tok = b_s k_1`.
 
 | level | n | nodes | l_max | M | k_1 | tok |
 |---|---|---|---|---|---|---|
@@ -52,49 +113,25 @@ channels, `M = (l_max+1)^2` harmonics, `k_1 = k_max+1` radial modes, `n_b = 8` b
 | L5 | 33 | 359,370 | 32 | 1089 | 17 | 272 |
 | L6 | 65 | 2,746,250 | 32 | 1089 | 17 | 272 |
 
-**Input split.** Channels 0–3 (`f_u`, `f_p`) go to a bias-free `Linear(4 -> 128)`.
-Channel 4 (standardised `log eta`) never enters that lift: concatenated with four
-geometry features (Cartesian position, normalised depth) it drives `gate_in`, a
-`5 -> 128 -> 128` MLP whose output multiplies the lifted features node by node.
-
-**Spectral Green core** (runs in fp32 under bf16 autocast). Reshape to
-`(B, C, S n^2, n)`; spherical-harmonic analysis `A (M x S n^2)` (the pseudo-inverse of
-the real-harmonic basis — nodes shared between diamonds are stored once per diamond, so a
-quadrature would double-count the seams); Chebyshev analysis `A_r^T`
-(`A_r = Y_r^+`, `k_1 x n`); regroup `(B, C, M, k_1) -> (B, n_b, M, tok)`. For each degree
-`l` one dense `tok x tok` matrix per block acts on all orders of that degree: sharing
-across orders is the rotational symmetry of the radially-varying-viscosity operator, not
-an approximation. The matrices are **generated, not stored**: `ggen` maps the normalised
-indices `(l, k, k')` concatenated with a 16-dimensional embedding of the sample's
-viscosity (radial mean and std of `log eta`, resampled to 16 points) through
-`19 -> 64 -> 64 -> n_b b_s^2 = 2048`. So every sample gets its own Green operator, and a
-finer mesh simply queries the generator at a larger truncation. The two high-contrast
-experts add a cross-degree attention (`(B, M, 18) -> q, k (18 -> 32) -> A (B, M, M)`,
-keyed on `eta` only, gated residual). Synthesis with `Y_r (n x k_1)` then
-`Y (S n^2 x M)`; added to the features as a residual.
-
-**Local branch.** Reshape to `(S B, C, n, n, n)`; four residual layers, each a bias-free
-`5^3` convolution (`128 -> 128`) plus a viscosity-mixed kernel bank: a `1^3` projection
-`128 -> 32`, `K = 4` kernels `(32, 32, 5, 5, 5)`, a `3 -> 32 -> K` softmax computed at
-every node from `(log eta, its 5^3 mean, its 5^3 std)`, and `1^3` back to `128`. The
-effective stencil therefore varies node by node with the local viscosity. GELU on the
-residual. This branch is 98% of the parameters and ~95% of the compute (45 TFLOP per
-forward at L6; the whole spectral core is 0.001).
-
-**Head, projection, boundary.** `gate_out` (same inputs as `gate_in`) multiplies the
-features, `Linear(128 -> 4)` yields `(u, p)`. The output is then projected onto the
-finite-element space: every copy of a node shared between diamonds is replaced by the
-mean of its copies (`--seam-average`). This is not cosmetic — a Krylov method cannot
-remove any component of a guess that lies outside that space, and before the projection
-the solver plateaued at 6% error regardless of budget. The caller zeroes velocity on the
-two Dirichlet shells.
-
-**Defect correction.** `x = N(f) + gamma N(f - K_eta N(f))` with one learned scalar
-`gamma`: classical iterative refinement through the same weights, still exactly linear
-in `f`. Doubles the forward cost, adds no parameters, worth about 10% error.
-
-**Mixture of experts.** Four copies, routed deterministically on `max eta / min eta`
-against thresholds `10, 10^2, 10^3`. They are not identical:
+- *Lift and gate.* `(f_u, f_p)` → bias-free `Linear(4 -> 128)`; multiplied node by node
+  by `gate_in(geometry ⊕ log eta)`, a `5 -> 128 -> 128` MLP.
+- *Spectral Green core* (fp32). Reshape to `(B, C, S n^2, n)`; harmonic analysis
+  `A (M x S n^2)` (pseudo-inverse of the basis, so seam nodes are not double-counted),
+  Chebyshev analysis `A_r^T (k_1 x n)`; regroup to `(B, n_b, M, tok)`. Per degree `l`
+  and block one `tok x tok` matrix, shared across the `2l+1` orders (rotational
+  symmetry), generated by `ggen: (l, k, k') ⊕ eta-embedding(16) = 19 -> 64 -> 64 -> 2048`.
+  The two high-contrast experts add a cross-degree attention keyed on `eta`. Synthesis
+  with `Y_r`, `Y`; residual add.
+- *Local branch.* Reshape to `(S B, C, n, n, n)`; four residual layers of a bias-free
+  `5^3` conv `128 -> 128` plus a bank: `1^3` `128 -> 32`, `K = 4` kernels
+  `(32, 32, 5, 5, 5)` mixed by a `3 -> 32 -> K` softmax of `(log eta, local mean,
+  local std)`, `1^3` back to `128`; GELU on the residual. 98% of the parameters,
+  45 TFLOP per forward at L6 (the spectral core: 0.001).
+- *Head.* `gate_out` (as `gate_in`) then `Linear(128 -> 4)`; seam-mean projection;
+  the caller zeroes velocity on the Dirichlet shells.
+- *Defect correction.* `x = N(f) + gamma N(f - K_eta N(f))`, one learned scalar,
+  still exactly linear in `f`; doubles the cost, ~10% less error.
+- *Experts.* Routed on `max eta / min eta` at thresholds `10, 10^2, 10^3`:
 
 | expert | contrast band | stencil banks | bank width | attention | params |
 |---|---|---|---|---|---|
