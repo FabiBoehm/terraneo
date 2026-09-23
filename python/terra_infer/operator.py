@@ -180,7 +180,8 @@ class SpectralMix(nn.Module):
                  attention: str = "linear", spherical: int = 0,
                  wavelet: bool = True, per_degree: bool = False, n_slices: int = 0,
                  sph_couple: bool = False, radial_modes: int = 0,
-                 sph_couple_band: int = 0, gno: bool = False):
+                 sph_couple_band: int = 0, gno: bool = False,
+                 sph_degree_mlp: bool = False):
         super().__init__()
         if attention not in ("linear", "softmax"):
             raise ValueError(f"attention must be linear|softmax, got {attention!r}")
@@ -230,7 +231,8 @@ class SpectralMix(nn.Module):
         self.sph = (SphericalBranch(dim, n_blocks=n_heads, lmax=spherical,
                             per_degree=per_degree, couple=sph_couple,
                             n_radial=radial_modes,
-                            couple_band=sph_couple_band) if spherical else None)
+                            couple_band=sph_couple_band,
+                            degree_mlp=sph_degree_mlp) if spherical else None)
         self.merge = nn.Linear(dim * 2, dim) if spherical else None
         # An additive branch: attention over a fixed set of learned slices, which is
         # invariant where node-token attention cannot be.
@@ -272,7 +274,14 @@ class SpectralMix(nn.Module):
             slice_out = self.slice_attn(flat, node_q).reshape(x.shape)
         if self.gno is not None:
             flat = x.reshape(x.shape[0], -1, x.shape[-1])
-            gno_out = self.gno(flat, gno_idx).reshape(x.shape)
+            # Checkpointed: the chunked gather is cheap to recompute, and holding its
+            # activations for all 8 layers is what ran a level-4 batch out of memory.
+            if torch.is_grad_enabled() and self.training:
+                gno_out = torch.utils.checkpoint.checkpoint(
+                    self.gno, flat, gno_idx, use_reentrant=False)
+            else:
+                gno_out = self.gno(flat, gno_idx)
+            gno_out = gno_out.reshape(x.shape)
             slice_out = gno_out if slice_out is None else slice_out + gno_out
 
         if not self.wavelet and self.sph is None:
@@ -378,13 +387,14 @@ class Block(nn.Module):
                  spherical: int = 0, wavelet: bool = True,
                  per_degree: bool = False, n_slices: int = 0,
                  sph_couple: bool = False, radial_modes: int = 0,
-                 sph_couple_band: int = 0, gno: bool = False):
+                 sph_couple_band: int = 0, gno: bool = False,
+                 sph_degree_mlp: bool = False):
         super().__init__()
         self.ln1 = nn.LayerNorm(dim)
         self.attn = SpectralMix(dim, n_heads, use_filter, band_tokens, n_levels,
                                        attention, spherical, wavelet, per_degree,
                                        n_slices, sph_couple, radial_modes,
-                                       sph_couple_band, gno)
+                                       sph_couple_band, gno, sph_degree_mlp)
         self.ln2 = nn.LayerNorm(dim)
         self.mlp = nn.Sequential(
             nn.Linear(dim, dim * mlp_ratio), nn.GELU(), nn.Linear(dim * mlp_ratio, dim)
@@ -427,6 +437,7 @@ class Model(nn.Module):
         sph_couple: bool = False,
         sph_couple_band: int = 0,
         sph_couple_shared: bool = False,
+        sph_degree_mlp: bool = False,
         gno_radius: float = 0.0,
         gno_k: int = 32,
         head_mlp: bool = False,
@@ -456,7 +467,7 @@ class Model(nn.Module):
             [Block(n_hidden, n_heads, mlp_ratio, use_filter, band_tokens, n_levels,
                    attention, spherical, wavelet,
                    per_degree, n_slices, sph_couple, radial_modes,
-                   sph_couple_band, gno_radius > 0)
+                   sph_couple_band, gno_radius > 0, sph_degree_mlp)
              for _ in range(n_layers)]
         )
         self.ln_out = nn.LayerNorm(n_hidden)
@@ -678,6 +689,626 @@ class Model(nn.Module):
         if pr:
             fx = fx[:, :, :, :, :-pr]
         return fx.squeeze(0) if squeeze else fx
+
+
+class LinearOperator(nn.Module):
+    """A learned preconditioner that is exactly LINEAR in its input field.
+
+    Krylov methods assume the preconditioner behaves like a fixed linear
+    operator: superposition, homogeneity ``M(a r) = a M(r)``, consistency
+    across the orthogonalised directions the iteration produces. A nonlinear
+    network has none of these -- the rough content of a residual shifts every
+    activation, so it corrupts the answer for the smooth part riding
+    underneath. Here every path from input to output is linear and bias-free,
+    so the properties hold to machine precision. The practical payoff: a
+    linear operator trained on ANY input distribution that spans the space is
+    determined on the WHOLE space, so the training-distribution question
+    dissolves.
+
+    Geometry enters only multiplicatively -- FiLM gates computed from the
+    fixed node coordinates -- which preserves linearity in the field (the
+    gates are constants of the mesh, not functions of the input).
+
+    Structure, all residual sums (linear too):
+
+      bias-free lift, geometry-gated
+        -> per-degree spectral GREEN operator: one full (channel-block x
+           radial Chebyshev mode) matrix per SH degree l. This is the matrix
+           form of a rotationally invariant solution operator -- exactly the
+           class the eta = 1 Stokes inverse lives in -- and it mixes radial
+           modes, which the diagonal per-degree branch never does.
+        -> linear 3^3 stencils per subdomain: the local complement for the
+           above-truncation content the spectral basis cannot represent.
+        -> bias-free head, geometry-gated.
+    """
+
+    mesh_buffer_names = ("geom", "sht_Y", "sht_A", "sht_Yr", "sht_Ar", "deg", "ordf",
+                         "seam_idx", "seam_cnt")
+
+    def __init__(self, in_channels, out_channels, shape, coords,
+                 n_hidden=128, n_blocks=8, lmax=16, kmax=8, n_conv=2,
+                 kernel=3, depth_gates=False, radial_dense=False, pyramid=0,
+                 green_mlp=False, eta_gates=False, eta_green=False,
+                 nonlin=False, dilated=False, level_cond=False,
+                 level_pyramid=False, stencil_scale=False, eta_lateral=0,
+                 eta_stencils=0, multi_dilation=False, mode_attn=0,
+                 bank_bottleneck=0, sep_stencils=False, channels_last=False,
+                 seam_average=False, eta_embed_dim=16, eta_quant=0, grad_checkpoint=False):
+        super().__init__()
+        self.nonlin = nonlin
+        # dilated: the local stencils keep a FIXED PHYSICAL footprint across
+        # levels (dilation 2^(L-3), reference L3 = 9 nodes per side), instead
+        # of the index-space (h-relative) footprint of a smoother.
+        # level_cond: log2 of the refinement relative to L3 is appended to the
+        # eta-profile embedding, so the generated Green spectra can depend on h.
+        self.dilated = dilated
+        self.level_cond = level_cond
+        # level_pyramid: use 1 + log2(refinement) of the ``pyramid`` coarse
+        # stencil levels, so the coarsest pyramid level always sits at the
+        # L3 footprint (5^3 per subdomain) whatever the mesh level.
+        self.level_pyramid = level_pyramid
+        self.active_pyr = pyramid
+        # stencil_scale: each stencil layer's output is multiplied by
+        # (h_L3 / h)^q with a LEARNED exponent q per layer (init 0). A
+        # differential-type local kernel wants q ~ 2, an integral-type one
+        # q ~ -3; letting the data choose is the cheap version of DISCO's
+        # resolution-consistent local kernels.
+        self.stencil_scale = stencil_scale
+        # eta_lateral = L > 0: the spherical-harmonic coefficients (degree <= L)
+        # of the standardised log-eta on each shell, resampled to 16 radial
+        # points, are fed to the Green hypernetwork next to the radial
+        # mean/std profile -- the per-sample spectra can then react to the
+        # LATERAL viscosity structure (high-contrast samples), not only to
+        # the radial one.
+        self.eta_lateral = int(eta_lateral)
+        # eta_stencils = K > 0: VISCOSITY-DEPENDENT local stencils. Each stencil
+        # layer owns K weight banks; a per-node MLP of the local viscosity
+        # (standardised log-eta and its 5^3 neighbourhood mean/std) mixes them
+        # (softmax), so the effective kernel changes across viscosity jumps --
+        # where the shared-kernel model fails (error grows with contrast).
+        # The mixing depends on eta only: still exactly linear in f.
+        self.eta_stencils = int(eta_stencils)
+        # multi_dilation: DCNO-style local branch -- each stencil layer adds
+        # 3^3 kernels at dilations 2 and 4 (on top of the dense 5^3 kernel),
+        # so the local path spans 5, 9 and 17 nodes at no extra depth: the
+        # multiscale structure that high-contrast viscosity imposes on u.
+        self.multi_dilation = multi_dilation
+        # mode_attn = d > 0: ETA-KEYED CROSS-DEGREE ATTENTION in the spectral
+        # core. Queries/keys come from the viscosity's own spectral
+        # coefficients (radial profile per (l, m) mode, resampled to 16 pts,
+        # plus degree/order position), values are the operator output per
+        # mode: A = softmax(q k^T / sqrt(d)) is a (modes x modes) mixing that
+        # depends on eta only, so the map stays exactly linear in f while
+        # lateral viscosity structure can scatter energy between degrees --
+        # the coupling a per-degree (block-diagonal) Green core cannot express.
+        # The residual gate starts at 0: warm starts are function-preserving.
+        self.mode_attn = int(mode_attn)
+        if self.mode_attn > 0:
+            self.attn_q = nn.Linear(18, self.mode_attn)
+            self.attn_k = nn.Linear(18, self.mode_attn)
+            self.attn_gate = nn.Parameter(torch.zeros(n_blocks))
+        self.conv_scale_pow = nn.Parameter(torch.zeros(n_conv)) if stencil_scale else None
+        self.stencil_dilation = max(1, (int(shape[1]) - 1) // 8) if dilated else 1
+        self.level_scale = float(np.log2(max(1, (int(shape[1]) - 1) // 8)))
+        if eta_green:
+            if not eta_gates:
+                raise ValueError("eta_green needs eta_gates (viscosity channel)")
+            green_mlp = True
+        if coords is None:
+            raise ValueError("LinearOperator needs the mesh coordinates")
+        if n_hidden % n_blocks:
+            raise ValueError(f"hidden {n_hidden} must divide into {n_blocks} blocks")
+        self.shape_in = tuple(shape)
+        self.lmax, self.kmax, self.n_blocks = lmax, kmax, n_blocks
+
+        h = n_hidden
+        # eta_gates: the viscosity is moved OUT of the linear input channels
+        # and INTO the multiplicative gates. The true Stokes inverse depends on
+        # eta multiplicatively, which a channel-linear model cannot express;
+        # gates make the operator NONLINEAR IN ETA while staying exactly
+        # linear in the residual -- the property iteration needs. Input layout
+        # is unchanged ([f_u, f_p, log-eta-std, (z...)]); forward routes the
+        # eta channel to the gates instead of the lift.
+        self.eta_gates = eta_gates
+        gdim = 5 if eta_gates else 4
+        lift_in = in_channels - 1 if eta_gates else in_channels
+        self.lift = nn.Linear(lift_in, h, bias=False)
+        self.gate_in = nn.Sequential(nn.Linear(gdim, h), nn.GELU(), nn.Linear(h, h))
+        self.gate_out = nn.Sequential(nn.Linear(gdim, h), nn.GELU(), nn.Linear(h, h))
+        bs = h // n_blocks
+        self.bs = bs
+        tok = bs * (kmax + 1)
+        # Continuum-indexed Green function: a table indexed by (l, k, k') is
+        # tied to one truncation, but generating the same matrices from an MLP
+        # over the NORMALISED indices (l/16, k/8, k'/8) defines the operator
+        # for every degree and radial mode -- at a finer mesh the transforms
+        # are simply built with a higher truncation and the generator is
+        # queried further out. This is what makes ONE set of weights
+        # meaningful on every level.
+        self.green_mlp = green_mlp
+        # eta_green: the Green generator is additionally conditioned on an
+        # embedding of the sample's viscosity -- lateral mean+std of the
+        # standardised log-eta per radial shell, resampled to 16 fixed radial
+        # points (level-independent). Each sample then gets its OWN per-degree
+        # spectral matrices: the operator family {K_eta}^-1 needs an
+        # eta-dependent spectrum, which channel gates alone cannot express.
+        # Conditioning is eta-only, so exact linearity in r is untouched.
+        self.eta_green = eta_green
+        # The Green generator's whole knowledge of the viscosity is this embedding.
+        # A 32-number radial summary -> 16 dims is a very thin description of a field
+        # spanning four decades; eta_embed_dim widens it and eta_quant adds Q global
+        # log-eta quantiles (contrast structure the radial mean/std cannot express).
+        self.eta_embed_dim = int(eta_embed_dim)
+        self.eta_quant = int(eta_quant)
+        if eta_green:
+            n_lat = ((self.eta_lateral + 1) ** 2) * 16 if self.eta_lateral > 0 else 0
+            n_in = 32 + (1 if level_cond else 0) + n_lat + self.eta_quant
+            hid = max(64, 2 * self.eta_embed_dim)
+            self.eta_embed = nn.Sequential(nn.Linear(n_in, hid), nn.GELU(),
+                                           nn.Linear(hid, self.eta_embed_dim))
+            with torch.no_grad():
+                self.eta_embed[-1].weight.mul_(0.1)
+                self.eta_embed[-1].bias.zero_()
+        if green_mlp:
+            self.ggen = nn.Sequential(nn.Linear(3 + (self.eta_embed_dim if eta_green else 0), 64),
+                                      nn.GELU(),
+                                      nn.Linear(64, 64), nn.GELU(),
+                                      nn.Linear(64, n_blocks * bs * bs))
+            with torch.no_grad():
+                self.ggen[-1].weight.mul_(0.1)
+                self.ggen[-1].bias.normal_(0.0, 0.02)
+            self.green = None
+        else:
+            self.green = nn.Parameter(
+                0.02 * torch.randn(lmax + 1, n_blocks, tok, tok))
+        self.convs = nn.ModuleList(
+            nn.Conv3d(h, h, kernel, padding=kernel // 2, bias=False)
+            for _ in range(n_conv))
+        if multi_dilation:
+            self.convs_d2 = nn.ModuleList(nn.Conv3d(h, h, 3, padding=2, dilation=2, bias=False) for _ in range(n_conv))
+            self.convs_d4 = nn.ModuleList(nn.Conv3d(h, h, 3, padding=4, dilation=4, bias=False) for _ in range(n_conv))
+            with torch.no_grad():
+                for m in list(self.convs_d2) + list(self.convs_d4):
+                    m.weight.mul_(0.1)
+        else:
+            self.convs_d2 = self.convs_d4 = None
+        # the K bank responses are a dense h x h 5^3 convolution each and dominate the
+        # cost at fine levels (profiled: 87% of an L5 training step). bank_bottleneck
+        # runs them on a C-channel projection instead: cost K*C^2*k^3 + 2*h*C rather
+        # than K*h^2*k^3.
+        self.bank_c = int(bank_bottleneck) if bank_bottleneck else n_hidden
+        if self.eta_stencils > 0:
+            K, C = self.eta_stencils, self.bank_c
+            self.bank_in = nn.Conv3d(h, C, 1, bias=False) if C != h else None
+            self.bank_out = nn.Conv3d(C, h, 1, bias=False) if C != h else None
+            self.conv_banks = nn.ParameterList(
+                nn.Parameter(0.1 * torch.randn(K, C, C, kernel, kernel, kernel) / (C * kernel ** 3) ** 0.5)
+                for _ in range(n_conv))
+            self.bank_mix = nn.ModuleList(
+                nn.Sequential(nn.Linear(3, 32), nn.GELU(), nn.Linear(32, K)) for _ in range(n_conv))
+        else:
+            self.conv_banks = self.bank_in = self.bank_out = None
+        # sep_stencils: depthwise (k^3, per channel) + pointwise (1^3) instead of the
+        # dense h x h k^3 stencil -- h*k^3 + h^2 instead of h^2*k^3 multiply-adds.
+        self.sep_stencils = sep_stencils
+        # channels_last_3d: 3D convolutions on the PVC run through oneDNN, which
+        # prefers the NDHWC layout; converting once around the whole local branch
+        # avoids a reorder per layer.
+        self.channels_last = channels_last
+        # Diamond seams: a node on the boundary between two diamonds is stored once
+        # per diamond, and a finite-element field must hold the SAME value in every
+        # copy. Convolutions computed per diamond do not, and an inconsistent guess
+        # is NOT in the space a Krylov solver searches -- it stalls the solve on the
+        # inconsistent part (measured: 5-7% rms, which was the entire warm-start
+        # plateau). Averaging the copies is the orthogonal projection onto the FE
+        # space; it is linear, so the operator stays exactly linear in f.
+        # At 65^3 per subdomain one stencil layer's activations are ~1.4 GB, so a deep
+        # local branch cannot keep them all for the backward pass. Recomputing each layer
+        # instead costs one extra forward and makes depth affordable at every level.
+        self.grad_checkpoint = grad_checkpoint
+        self.seam_average = seam_average
+        self._set_seams(coords, dev=None)
+        if sep_stencils:
+            self.convs_pw = nn.ModuleList(nn.Conv3d(h, h, 1, bias=False) for _ in range(n_conv))
+            with torch.no_grad():
+                for m in self.convs_pw:
+                    m.weight.mul_(0.1)
+        with torch.no_grad():
+            for m in self.convs:
+                m.weight.mul_(0.1)   # keep the residual stream near-identity at init
+        # Geometry gates per stencil layer: the floor residual concentrates in
+        # the shell-adjacent layers, and depth-shared stencils cannot treat
+        # those rows differently. Gates are functions of the fixed coords, so
+        # linearity in the field is untouched.
+        self.conv_gates = (nn.ModuleList(
+            nn.Sequential(nn.Linear(4, h), nn.GELU(), nn.Linear(h, h))
+            for _ in range(n_conv)) if depth_gates else None)
+        # Full radial-column mixing: one linear layer coupling ALL radial nodes
+        # per lateral position -- boundary layers in a single hop, which the
+        # small stencils reach only after many compositions.
+        self.rad_dense = (nn.Conv3d(h, h, (1, 1, shape[2]),
+                                    padding=(0, 0, shape[2] // 2), bias=False)
+                          if radial_dense else None)
+        # Linear conv pyramid: coarse-level stencils + trilinear prolongation --
+        # a learned linear V-cycle inside the stage, giving the local path a
+        # large effective support at small cost.
+        self.pyr = (nn.ModuleList(
+            nn.Conv3d(h, h, 3, padding=1, bias=False) for _ in range(pyramid))
+            if pyramid else None)
+        with torch.no_grad():
+            if self.rad_dense is not None:
+                self.rad_dense.weight.mul_(0.1)
+            if self.pyr is not None:
+                for m in self.pyr:
+                    m.weight.mul_(0.1)
+        self.head = nn.Linear(h, out_channels, bias=False)
+
+        self._set_basis(coords, lmax, kmax, dev=None)
+
+    def _set_basis(self, coords, lmax, kmax, dev):
+        from .spherical import build_transform
+
+        self.lmax, self.kmax = lmax, kmax
+        geom = Model._physical(coords, (0, 0, 0))
+        t = build_transform(np.asarray(coords, dtype=np.float64), lmax, kmax)
+        deg = torch.cat([torch.full((2 * l + 1,), l, dtype=torch.long)
+                         for l in range(lmax + 1)])
+        ordf = torch.cat([torch.arange(2 * l + 1, dtype=torch.float32) / max(1, 2 * l)
+                          for l in range(lmax + 1)])
+        self.register_buffer("ordf", ordf.to(dev) if dev is not None else ordf, persistent=False)
+        for nm, v in zip(("geom", "sht_Y", "sht_A", "sht_Yr", "sht_Ar", "deg"),
+                         (geom, *t, deg)):
+            self.register_buffer(nm, v.to(dev) if dev is not None else v,
+                                 persistent=False)
+
+    def set_mesh(self, shape, coords, lmax=None, kmax=None):
+        """Point the operator at another mesh (and optionally truncation).
+
+        Only buffers move: the stencils are index-space (h-relative, like a
+        smoother), the gates are functions of the coordinates, and with
+        ``green_mlp`` the spectral weights are generated for whatever (l, k)
+        range the new transforms carry.
+        """
+        if not self.green_mlp and ((lmax or self.lmax) != self.lmax
+                                   or (kmax or self.kmax) != self.kmax):
+            raise ValueError("changing the truncation needs green_mlp=True")
+        dev = next(self.parameters()).device
+        self.shape_in = tuple(shape)
+        nx_ = int(shape[1]) if len(shape) == 4 else int(shape[0])
+        self.stencil_dilation = max(1, (nx_ - 1) // 8) if self.dilated else 1
+        self.level_scale = float(np.log2(max(1, (nx_ - 1) // 8)))
+        if self.level_pyramid and self.pyr is not None:
+            self.active_pyr = min(len(self.pyr), 1 + int(round(self.level_scale)))
+        self._set_basis(coords, lmax or self.lmax, kmax or self.kmax, dev)
+        self._set_seams(coords, dev)
+        return self
+
+    def _set_seams(self, coords, dev):
+        """Storage-slot -> physical-node map of THIS mesh (rebuilt on every set_mesh)."""
+        if not self.seam_average:
+            return
+        key = np.round(np.asarray(coords, dtype=np.float64).reshape(-1, 3), 9)
+        _, inv = np.unique(key, axis=0, return_inverse=True)
+        inv_t = torch.as_tensor(inv, dtype=torch.long)
+        cnt_t = torch.bincount(inv_t).to(torch.float32)
+        if dev is not None:
+            inv_t, cnt_t = inv_t.to(dev), cnt_t.to(dev)
+        self.register_buffer("seam_idx", inv_t, persistent=False)
+        self.register_buffer("seam_cnt", cnt_t, persistent=False)
+
+    def _stencil(self, conv, vol, i=0, eta_feat=None):
+        d = self.stencil_dilation
+        k = conv.kernel_size[0]
+        if self.sep_stencils:
+            h_ = vol.shape[1]
+            w = conv.weight[:, :1]                                        # depthwise slice
+            out = self.convs_pw[i](F.conv3d(vol, w, None, padding=(k // 2) * d,
+                                            dilation=d, groups=h_))
+        elif d == 1:
+            out = conv(vol)
+        else:
+            out = F.conv3d(vol, conv.weight, None, padding=(k // 2) * d, dilation=d)
+        if self.convs_d2 is not None:
+            out = out + F.conv3d(vol, self.convs_d2[i].weight, None, padding=2 * d, dilation=2 * d) \
+                      + F.conv3d(vol, self.convs_d4[i].weight, None, padding=4 * d, dilation=4 * d)
+        if self.conv_banks is not None:
+            # K bank responses, mixed per node by the viscosity features
+            bank = self.conv_banks[i].to(vol.dtype)                      # (K, C, C, k, k, k)
+            vb = vol if self.bank_in is None else self.bank_in(vol)
+            Kb, h_ = bank.shape[0], bank.shape[1]
+            resp = F.conv3d(vb, bank.reshape(Kb * h_, h_, k, k, k), None,
+                            padding=(k // 2) * d, dilation=d)              # (B, K*C, nx, ny, nr)
+            B_ = vb.shape[0]
+            resp = resp.reshape(B_, Kb, h_, *vb.shape[2:])
+            mix = torch.softmax(self.bank_mix[i](eta_feat.to(vol.dtype)), -1)   # (B, nx, ny, nr, K)
+            mix = mix.permute(0, 4, 1, 2, 3)[:, :, None]                  # (B, K, 1, nx, ny, nr)
+            mixed = (resp * mix).sum(1)
+            out = out + (mixed if self.bank_out is None else self.bank_out(mixed))
+        if self.conv_scale_pow is not None and self.level_scale != 0.0:
+            out = out * torch.exp(self.conv_scale_pow[i] * (self.level_scale * float(np.log(2.0)))).to(out.dtype)
+        return out
+
+    def forward(self, fx: torch.Tensor) -> torch.Tensor:
+        squeeze = fx.ndim == 5
+        if squeeze:
+            fx = fx.unsqueeze(0)
+        b, s_dom = fx.shape[0], fx.shape[1]
+        nx, ny, nr = fx.shape[2:5]
+
+        x = fx.reshape(b, s_dom, nx * ny * nr, -1)
+        if self.eta_gates:
+            # channel 4 is the standardised log-viscosity: route it to the
+            # gates (multiplicative, per-sample) and keep the lift linear in
+            # the remaining residual channels
+            eta_ch = x[..., 4:5]
+            x = torch.cat([x[..., :4], x[..., 5:]], -1)
+            gfeat = torch.cat([self.geom.to(x.dtype).expand(b, -1, -1, -1),
+                               eta_ch], -1)
+            gi = self.gate_in(gfeat)
+            go = self.gate_out(gfeat)
+        else:
+            gi = self.gate_in(self.geom.to(x.dtype))
+            go = self.gate_out(self.geom.to(x.dtype))
+        h = self.lift(x) * gi
+
+        # spectral Green operator: SH x Chebyshev analysis, one dense
+        # (block-channel x radial-mode) matrix per degree, synthesis back.
+        # Runs in fp32 even under bf16 autocast: the dense per-degree
+        # matrices are the numerically sensitive path of the operator.
+        c = h.shape[-1]
+        with torch.autocast(device_type=h.device.type, enabled=False):
+            hf = h.float() if h.dtype in (torch.bfloat16, torch.float16) else h
+            lat = hf.reshape(b, s_dom, nx, ny, nr, c).permute(0, 5, 1, 2, 3, 4)
+            lat = lat.reshape(b, c, s_dom * nx * ny, nr)
+            fm = torch.einsum("mn,bcnr->bcmr", self.sht_A.to(hf.dtype), lat)
+            fk = torch.einsum("bcmr,rk->bcmk", fm, self.sht_Ar.to(hf.dtype).T)
+            nb, bs = self.n_blocks, c // self.n_blocks
+            m = fk.shape[2]
+            t = fk.reshape(b, nb, bs, m, -1).permute(0, 1, 3, 2, 4).reshape(b, nb, m, -1)
+            if self.green_mlp:
+                k1 = fk.shape[-1]
+                ls = torch.arange(self.lmax + 1, device=hf.device,
+                                  dtype=hf.dtype) / 16.0
+                ks = torch.arange(k1, device=hf.device, dtype=hf.dtype) / 8.0
+                gi = torch.stack([
+                    ls[:, None, None].expand(-1, k1, k1),
+                    ks[None, :, None].expand(self.lmax + 1, -1, k1),
+                    ks[None, None, :].expand(self.lmax + 1, k1, -1)], -1)
+                if self.eta_green:
+                    prof = eta_ch.reshape(b, s_dom, nx, ny, nr).float()
+                    pf = torch.stack([prof.mean(dim=(1, 2, 3)),
+                                      prof.std(dim=(1, 2, 3))], 1)  # (b,2,nr)
+                    pf = F.interpolate(pf, size=16, mode="linear",
+                                       align_corners=True)
+                    pf = pf.reshape(b, 32)
+                    if self.eta_lateral > 0:
+                        le = eta_ch.reshape(b, 1, s_dom * nx * ny, nr).float()
+                        fme = torch.einsum("mn,bcnr->bcmr", self.sht_A.float(), le)[:, 0]
+                        sel = self.deg <= self.eta_lateral
+                        fme = fme[:, sel, :]                                   # (b, (L+1)^2, nr)
+                        fme = F.interpolate(fme, size=16, mode="linear", align_corners=True)
+                        pf = torch.cat([pf, fme.reshape(b, -1)], 1)
+                    if self.eta_quant > 0:
+                        flat_le = eta_ch.reshape(b, -1).float()
+                        qs = torch.linspace(0.0, 1.0, self.eta_quant, device=flat_le.device,
+                                            dtype=flat_le.dtype)
+                        pf = torch.cat([pf, torch.quantile(flat_le, qs, dim=1).T.to(pf.dtype)], 1)
+                    if self.level_cond:
+                        pf = torch.cat([pf, pf.new_full((b, 1), self.level_scale)], 1)
+                    emb = self.eta_embed(pf.to(hf.dtype))
+                    giB = torch.cat(
+                        [gi[None].expand(b, -1, -1, -1, -1),
+                         emb[:, None, None, None, :].expand(
+                             b, self.lmax + 1, k1, k1, -1)], -1)
+                    g = self.ggen(giB).reshape(b, self.lmax + 1, k1, k1,
+                                               nb, bs, bs)
+                    wl = g.permute(0, 1, 4, 5, 2, 6, 3).reshape(
+                        b, self.lmax + 1, nb, bs * k1, bs * k1)
+                    # per-degree loop instead of wl[:, deg]: avoids
+                    # materialising the (b, M, nb, tok, tok) tensor
+                    o = torch.empty_like(t)
+                    for l in range(self.lmax + 1):
+                        sel = self.deg == l
+                        o[:, :, sel] = torch.einsum(
+                            "bqmt,bqts->bqms", t[:, :, sel], wl[:, l])
+                else:
+                    g = self.ggen(gi).reshape(self.lmax + 1, k1, k1, nb, bs, bs)
+                    # rows (i, k), cols (j, k') -- bs-major, matching t's layout
+                    wl = g.permute(0, 3, 4, 1, 5, 2).reshape(
+                        self.lmax + 1, nb, bs * k1, bs * k1)
+                    o = torch.einsum("bqmt,mqts->bqms", t,
+                                     wl[self.deg])         # (M, nb, tok, tok)
+            else:
+                o = torch.einsum("bqmt,mqts->bqms", t, self.green[self.deg])
+            if self.mode_attn > 0:
+                le_a = eta_ch.reshape(b, 1, s_dom * nx * ny, nr).float()
+                fa = torch.einsum("mn,bcnr->bcmr", self.sht_A.float(), le_a)[:, 0]   # (b, m, nr)
+                fa = F.interpolate(fa, size=16, mode="linear", align_corners=True)
+                pos = torch.stack([self.deg.float() / max(1, self.lmax), self.ordf], -1)  # (m, 2)
+                feat = torch.cat([fa, pos[None].expand(b, -1, -1)], -1)                  # (b, m, 18)
+                q = self.attn_q(feat); kk = self.attn_k(feat)
+                A = torch.softmax(q @ kk.transpose(1, 2) / float(self.mode_attn) ** 0.5, -1)  # (b, m, m)
+                mixed = torch.einsum("bmn,bqnt->bqmt", A.to(o.dtype), o)
+                o = o + self.attn_gate.to(o.dtype)[None, :, None, None] * mixed
+            o = o.reshape(b, nb, m, bs, -1).permute(0, 1, 3, 2, 4).reshape(b, c, m, -1)
+            o = torch.einsum("bcmk,rk->bcmr", o, self.sht_Yr.to(hf.dtype))
+            o = torch.einsum("nm,bcmr->bcnr", self.sht_Y.to(hf.dtype), o)
+            o = o.reshape(b, c, s_dom, nx, ny, nr).permute(0, 2, 3, 4, 5, 1)
+            ospec = o.reshape(b, s_dom, -1, c)
+            h = hf + (F.gelu(ospec) if self.nonlin else ospec)
+
+        vol = h.reshape(b * s_dom, nx, ny, nr, c).permute(0, 4, 1, 2, 3)
+        if self.channels_last:
+            vol = vol.contiguous(memory_format=torch.channels_last_3d)
+        if self.conv_banks is not None:
+            le_ = eta_ch.reshape(b * s_dom, 1, nx, ny, nr).float()
+            mu_ = F.avg_pool3d(le_, 5, stride=1, padding=2, count_include_pad=False)
+            sd_ = (F.avg_pool3d(le_ ** 2, 5, stride=1, padding=2, count_include_pad=False) - mu_ ** 2).clamp_min(0).sqrt()
+            eta_feat = torch.cat([le_, mu_, sd_], 1).permute(0, 2, 3, 4, 1)        # (B, nx, ny, nr, 3)
+        else:
+            eta_feat = None
+        def _layer(vol_, ef, i, conv):
+            if self.conv_gates is not None:
+                g = self.conv_gates[i](self.geom.to(x.dtype))       # (1, S, N, C)
+                g = g.reshape(s_dom, nx, ny, nr, c).permute(0, 4, 1, 2, 3)
+                g = g.repeat(b, 1, 1, 1, 1)
+                cv = self._stencil(conv, vol_ * g, i, ef)
+            else:
+                cv = self._stencil(conv, vol_, i, ef)
+            return vol_ + (F.gelu(cv) if self.nonlin else cv)
+
+        for i, conv in enumerate(self.convs):
+            if self.grad_checkpoint and self.training and torch.is_grad_enabled():
+                vol = torch.utils.checkpoint.checkpoint(
+                    _layer, vol, eta_feat, i, conv, use_reentrant=False)
+            else:
+                vol = _layer(vol, eta_feat, i, conv)
+        if self.rad_dense is not None:
+            vol = vol + self.rad_dense(vol)
+        if self.pyr is not None:
+            cur, sizes = vol, []
+            for conv in list(self.pyr)[:self.active_pyr]:
+                sizes.append(cur.shape[2:])
+                cur = F.avg_pool3d(cur, 2, ceil_mode=True)
+                cur = cur + conv(cur)
+            for size in reversed(sizes):
+                cur = F.interpolate(cur, size=size, mode="trilinear",
+                                    align_corners=True)
+            vol = vol + cur
+        h = vol.permute(0, 2, 3, 4, 1).reshape(b, s_dom, -1, c)
+
+        y = self.head(h * go).reshape(b, s_dom, nx, ny, nr, -1)
+        if self.seam_average:
+            # project onto the FE space: every copy of a shared node gets the mean
+            b_, c_ = y.shape[0], y.shape[-1]
+            flat = y.reshape(b_, -1, c_)
+            idx = self.seam_idx[None, :, None].expand(b_, -1, c_)
+            sums = torch.zeros(b_, int(self.seam_cnt.numel()), c_,
+                               dtype=flat.dtype, device=flat.device)
+            sums.scatter_add_(1, idx, flat)
+            avg = sums / self.seam_cnt.to(flat.dtype)[None, :, None]
+            y = torch.gather(avg, 1, idx).reshape(y.shape)
+        return y.squeeze(0) if squeeze else y
+
+
+class OctaveOperator(nn.Module):
+    """Exactly-linear V-cycle operator: shared stencils per octave, spectral
+    Green core permanently at a fixed reference mesh.
+
+    Discretisation independence by construction, on multigrid's own argument:
+    index-space stencils are the h-invariant objects PER OCTAVE (the reason
+    classical smoothers transfer across levels), so ONE shared stencil set
+    covers every octave between the deployment mesh and the reference; the
+    per-degree Green core always sees the reference discretisation (fixed
+    transforms, fixed truncation, fixed gain -- nothing about it moves with
+    the level). ``set_mesh`` changes only the gate geometry and the recursion
+    depth. Every path is linear and bias-free; geometry enters only as
+    multiplicative gates.
+    """
+
+    mesh_buffer_names = ("geom",)
+
+    def __init__(self, in_channels, out_channels, ref_shape, ref_coords,
+                 n_hidden=128, n_blocks=8, lmax=16, kmax=8, n_conv=2,
+                 kernel=5, coords=None, shape=None):
+        super().__init__()
+        if n_hidden % n_blocks:
+            raise ValueError("hidden must divide into blocks")
+        self.ref_n = ref_shape[0]
+        self.lmax, self.kmax, self.n_blocks = lmax, kmax, n_blocks
+        h = n_hidden
+        self.lift = nn.Linear(in_channels, h, bias=False)
+        self.gate_in = nn.Sequential(nn.Linear(4, h), nn.GELU(), nn.Linear(h, h))
+        self.gate_out = nn.Sequential(nn.Linear(4, h), nn.GELU(), nn.Linear(h, h))
+        self.oct = nn.ModuleList(
+            nn.Conv3d(h, h, kernel, padding=kernel // 2, bias=False)
+            for _ in range(n_conv))
+        bs = h // n_blocks
+        tok = bs * (kmax + 1)
+        self.green = nn.Parameter(0.02 * torch.randn(lmax + 1, n_blocks, tok, tok))
+        self.head = nn.Linear(h, out_channels, bias=False)
+        with torch.no_grad():
+            for m in self.oct:
+                m.weight.mul_(0.1)
+
+        from .spherical import build_transform
+
+        t = build_transform(np.asarray(ref_coords, dtype=np.float64), lmax, kmax)
+        for nm, v in zip(("sht_Y", "sht_A", "sht_Yr", "sht_Ar"), t):
+            self.register_buffer(nm, v, persistent=False)
+        deg = torch.cat([torch.full((2 * l + 1,), l, dtype=torch.long)
+                         for l in range(lmax + 1)])
+        self.register_buffer("deg", deg, persistent=False)
+        self.set_mesh(shape if shape is not None else ref_shape,
+                      coords if coords is not None else ref_coords)
+
+    def set_mesh(self, shape, coords, lmax=None, kmax=None):
+        dev = next(self.parameters()).device if any(
+            True for _ in self.parameters()) else None
+        self.shape_in = tuple(shape)
+        self.depth = int(round(np.log2((shape[0] - 1) / (self.ref_n - 1))))
+        geom = Model._physical(coords, (0, 0, 0))
+        self.register_buffer("geom", geom.to(dev) if dev is not None else geom,
+                             persistent=False)
+        return self
+
+    @staticmethod
+    def _restrict(vol):
+        w1 = torch.tensor([0.25, 0.5, 0.25], dtype=vol.dtype, device=vol.device)
+        ker = (w1[:, None, None] * w1[None, :, None] * w1[None, None, :]
+               ).reshape(1, 1, 3, 3, 3).repeat(vol.shape[1], 1, 1, 1, 1)
+        return F.conv3d(vol, ker, stride=2, padding=1, groups=vol.shape[1])
+
+    def _core(self, vol, b, s_dom):
+        c = vol.shape[1]
+        n = self.ref_n
+        lat = vol.reshape(b, s_dom, c, n, n, n).permute(0, 2, 1, 3, 4, 5)
+        lat = lat.reshape(b, c, s_dom * n * n, n)
+        Fm = torch.einsum("mn,bcnr->bcmr", self.sht_A.to(vol.dtype), lat)
+        Fk = torch.einsum("bcmr,rk->bcmk", Fm, self.sht_Ar.to(vol.dtype).T)
+        nb, bs = self.n_blocks, c // self.n_blocks
+        m = Fk.shape[2]
+        t = Fk.reshape(b, nb, bs, m, -1).permute(0, 1, 3, 2, 4).reshape(b, nb, m, -1)
+        o = torch.einsum("bqmt,mqts->bqms", t, self.green[self.deg])
+        o = o.reshape(b, nb, m, bs, -1).permute(0, 1, 3, 2, 4).reshape(b, c, m, -1)
+        o = torch.einsum("bcmk,rk->bcmr", o, self.sht_Yr.to(vol.dtype))
+        o = torch.einsum("nm,bcmr->bcnr", self.sht_Y.to(vol.dtype), o)
+        o = o.reshape(b, c, s_dom, n, n, n).permute(0, 2, 1, 3, 4, 5)
+        return vol + o.reshape(b * s_dom, c, n, n, n)
+
+    def forward(self, fx):
+        squeeze = fx.ndim == 5
+        if squeeze:
+            fx = fx.unsqueeze(0)
+        b, s_dom = fx.shape[0], fx.shape[1]
+        nx, ny, nr = fx.shape[2:5]
+        x = fx.reshape(b, s_dom, nx * ny * nr, -1)
+        gi = self.gate_in(self.geom.to(x.dtype))
+        go = self.gate_out(self.geom.to(x.dtype))
+        h = self.lift(x) * gi
+        c = h.shape[-1]
+        vol = h.reshape(b * s_dom, nx, ny, nr, c).permute(0, 4, 1, 2, 3)
+
+        def oct_corr(v):
+            o = v
+            for conv in self.oct:
+                o = o + conv(o)
+            return o - v
+
+        stack = []
+        cur = vol
+        for _ in range(self.depth):
+            stack.append(oct_corr(cur))       # the octave CORRECTION at this scale
+            cur = self._restrict(cur)
+        # reference level: the same stencils handle its top octave, the Green
+        # core the spectral band -- the composition every deeper level reuses
+        cur = self._core(cur, b, s_dom) + oct_corr(cur)
+        for corr in reversed(stack):
+            cur = F.interpolate(cur, size=corr.shape[2:], mode="trilinear",
+                                align_corners=True) + corr
+        out = cur.permute(0, 2, 3, 4, 1).reshape(b, s_dom, -1, c)
+        y = self.head(out * go).reshape(b, s_dom, nx, ny, nr, -1)
+        return y.squeeze(0) if squeeze else y
 
 
 # ------------------------------------------------------------------------ terra_infer glue

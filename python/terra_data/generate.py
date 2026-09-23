@@ -225,6 +225,8 @@ def main(argv=None):
                 print(f"  {split}: {len(scales)}/{len(range(args.shard, count, args.num_shards))}"
                       f" of this shard  ({rate:.2f} samples/s)", flush=True)
 
+        if not scales:
+            continue  # nothing of this split in this shard (e.g. --num-train 0)
         print(f"  {split}: degrees {np.bincount(degrees, minlength=args.max_degree+1)[1:].tolist()}, "
               f"contrast {min(contrasts):.3g}..{max(contrasts):.3g}, "
               f"norm factor {min(scales):.3g}..{max(scales):.3g}, "

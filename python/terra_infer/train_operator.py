@@ -77,8 +77,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from . import stokes_residual, symmetry
-from .operator import Model, load_state
+from . import ddp, stokes_residual, symmetry
+from .operator import LinearOperator, Model, load_state
 
 
 def load_coords(root):
@@ -114,6 +114,23 @@ def load_split(root, split, verbose=True, limit=None):
     """
     from terra_data.dataset import StokesDataset
 
+    # One .npz per (split, limit) next to the data: reading 1600 L5 samples as
+    # individual 13 MB files takes 1-3 h on the shared filesystem (and several
+    # concurrent runs make it worse), while the packed archive is one sequential
+    # read. TERRA_NO_SPLIT_CACHE=1 disables it.
+    cache = os.path.join(root, f"_cache_{split}_{limit if limit is not None else 'all'}.npz")
+    if os.environ.get("TERRA_NO_SPLIT_CACHE", "0") != "1" and os.path.exists(cache):
+        try:
+            with np.load(cache, allow_pickle=False) as z_:
+                d = {k: z_[k] for k in z_.files}
+            d["z"] = d["z"] if "z" in d and d["z"].ndim > 1 else None
+            if verbose:
+                print(f"  {split}: {len(d['f_u'])} whole-shell samples of "
+                      f"{d['f_u'].shape[1:]} (from cache)", flush=True)
+            return d
+        except Exception as e:                       # corrupt/partial cache: rebuild
+            print(f"  cache {cache} unreadable ({str(e)[:60]}), rebuilding", flush=True)
+
     ds = StokesDataset(root, split)
     if limit is not None:
         ds = _Truncated(ds, limit)
@@ -124,9 +141,13 @@ def load_split(root, split, verbose=True, limit=None):
     f_p_v = np.empty((len(ds), *ds.shapes["f_p_fine"]), dtype=np.float32)
     log_eta = np.empty((len(ds), *ds.shapes["eta"]), dtype=np.float32)
     eta_mean = np.empty(len(ds), dtype=np.float32)
+    z = (np.empty((len(ds), *ds.shapes["z"]), dtype=np.float32)
+         if "z" in ds.shapes else None)
 
     for i in range(len(ds)):
         smp = ds[i]
+        if z is not None:
+            z[i] = smp["z"]
         f_u[i] = smp["f_u"]
         u[i] = smp["u"]
         p[i] = smp["p_fine"]
@@ -140,8 +161,21 @@ def load_split(root, split, verbose=True, limit=None):
 
     if verbose:
         print(f"  {split}: {len(ds)} whole-shell samples of {f_u.shape[1:]}")
-    return dict(f_u=f_u, u=u, p=p, f_p=f_p, f_p_v=f_p_v,
-                log_eta=log_eta, eta_mean=eta_mean)
+    out = dict(f_u=f_u, u=u, p=p, f_p=f_p, f_p_v=f_p_v,
+               log_eta=log_eta, eta_mean=eta_mean, z=z)
+    if os.environ.get("TERRA_NO_SPLIT_CACHE", "0") != "1" and os.access(root, os.W_OK):
+        # np.savez appends .npz when the name lacks it, so the temp name must already
+        # end in .npz or the rename below looks for a file that was never written.
+        tmp = cache + f".tmp{os.getpid()}.npz"       # atomic: concurrent runs are safe
+        try:
+            np.savez(tmp, **{k: v for k, v in out.items() if v is not None})
+            os.replace(tmp, cache)
+            print(f"  cached -> {os.path.basename(cache)}", flush=True)
+        except Exception as e:
+            print(f"  cache write failed ({str(e)[:60]})", flush=True)
+            if os.path.exists(tmp):
+                os.remove(tmp)
+    return out
 
 
 class _Truncated:
@@ -166,10 +200,15 @@ def mean_free(x):
 
 def relative_l2(pred, target, eps=1e-12):
     """Per-sample ||pred - target|| / ||target||, averaged over the batch."""
+    return relative_l2_ps(pred, target, eps).mean()
+
+
+def relative_l2_ps(pred, target, eps=1e-12):
+    """Per-sample ||pred - target|| / ||target||, NOT averaged: (batch,)."""
     dims = tuple(range(1, pred.ndim))
     num = torch.sqrt(torch.sum((pred - target) ** 2, dim=dims))
     den = torch.sqrt(torch.sum(target**2, dim=dims)) + eps
-    return (num / den).mean()
+    return num / den
 
 
 def main(argv=None):
@@ -183,6 +222,19 @@ def main(argv=None):
     ap.add_argument("--layers", type=int, default=4)
     ap.add_argument("--heads", type=int, default=8)
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--p-weight", type=float, default=1.0,
+                    help="weight of the pressure term in the data loss -- the "
+                         "hybrid cycle's slow mode is pressure, and the "
+                         "default equal weighting leaves it at ~0.8 error")
+    ap.add_argument("--init-from", default=None,
+                    help="warm-start from this checkpoint (same architecture "
+                         "flags required) -- per-viscosity specialization")
+    ap.add_argument("--amp", action="store_true",
+                    help="bf16 autocast on lift/convs/head; the spectral Green "
+                         "core stays fp32 (guarded inside the operator)")
+    ap.add_argument("--cache-device", action="store_true",
+                    help="keep the full training/eval tensors resident on the "
+                         "device -- removes the per-batch host-to-device copy")
     ap.add_argument("--physics-weight", type=float, default=0.0,
                     help="weight of the Stokes residual term; 0 disables it")
     ap.add_argument("--mean-free-target", action="store_true",
@@ -289,6 +341,82 @@ def main(argv=None):
                          "harmonic degree l. The mode count is fixed by the basis, "
                          "not the mesh, so this keeps invariance; and for isotropic "
                          "viscosity the transfer function depends on l alone.")
+    ap.add_argument("--sph-degree-mlp", action="store_true",
+                    help="generate the per-degree spectral weights from an MLP over "
+                         "l/16 instead of a table: same symmetry class, smooth in l, "
+                         "extrapolates beyond the training truncation.")
+    ap.add_argument("--linear", action="store_true",
+                    help="train the LinearOperator: exactly linear in the input "
+                         "field (bias-free, geometry entering only as FiLM gates), "
+                         "with a per-degree spectral Green operator and linear 3^3 "
+                         "stencils. Superposition and homogeneity hold to machine "
+                         "precision -- the properties a Krylov preconditioner "
+                         "needs -- and a linear operator trained on any spanning "
+                         "distribution is determined on the whole space. Uses "
+                         "--hidden/--heads/--spherical/--radial-modes; the other "
+                         "architecture flags are ignored.")
+    ap.add_argument("--linear-convs", type=int, default=2,
+                    help="number of linear stencil layers in the LinearOperator "
+                         "(the rough-content path)")
+    ap.add_argument("--linear-kernel", type=int, default=3,
+                    help="stencil width of the LinearOperator conv layers")
+    ap.add_argument("--linear-depth-gates", action="store_true",
+                    help="geometry-FiLM gate before each LinearOperator stencil "
+                         "layer, so the local path can treat the shell-adjacent "
+                         "layers (where the floor residual concentrates) "
+                         "differently. Keeps linearity in the field.")
+    ap.add_argument("--defect-z", action="store_true",
+                    help="feed the PREVIOUS stage's correction z (the dataset's "
+                         "z field, 4 channels) as extra inputs: learned defect "
+                         "correction instead of blind alternation. z = M1(r) is "
+                         "linear in r, so the composite stays exactly linear.")
+    ap.add_argument("--eta-gates", action="store_true",
+                    help="route the viscosity channel into the FiLM gates: the "
+                         "operator becomes nonlinear in eta (as the true "
+                         "inverse is) while staying exactly linear in the "
+                         "residual. LinearOperator only.")
+    ap.add_argument("--curl-output", action="store_true",
+                    help="HARD divergence-free velocity: the net's 3 velocity "
+                         "channels are a vector potential A and u = curl(A) "
+                         "(finite-difference curl on the block grids). Removes "
+                         "continuity from the learning problem -- the DLR "
+                         "mantle-convection trick (stream function in 2D), "
+                         "lifted to 3D.")
+    ap.add_argument("--nonlin", action="store_true",
+                    help="NONLINEAR operator: GELU after the spectral core and "
+                         "each conv, breaking exact linearity in r. A linear "
+                         "operator provably cannot represent the ill-"
+                         "conditioned near-null inverse of variable-eta Stokes; "
+                         "a nonlinear map can. Deploy in FGMRES (flexible, "
+                         "tolerates nonlinear preconditioners).")
+    ap.add_argument("--eta-green", action="store_true",
+                    help="condition the Green hypernetwork on the viscosity's "
+                         "radial profile: per-sample spectral matrices, the "
+                         "family-{K_eta} fix. Implies the green_mlp core; "
+                         "needs --eta-gates.")
+    ap.add_argument("--linear-radial-dense", action="store_true",
+                    help="add a full radial-column linear mixing layer to the "
+                         "LinearOperator (boundary layers in one hop)")
+    ap.add_argument("--linear-pyramid", type=int, default=0,
+                    help="levels of linear coarse-grid stencils with trilinear "
+                         "prolongation inside the LinearOperator local path")
+    ap.add_argument("--hp-weight", type=float, default=0.0,
+                    help="extra relative-L2 term on the GRID-ROUGH component "
+                         "(3^3-mean-removed) of the velocity error: forces "
+                         "accuracy on the sub-basis content plain rel-L2 "
+                         "under-weights (the measured stall floor).")
+    ap.add_argument("--hard-power", type=float, default=0.0,
+                    help="reweight the per-sample relative errors by "
+                         "(r / mean r)^q before averaging. Preconditioner quality "
+                         "is governed by the WORST directions of I - MA, not the "
+                         "mean; q > 0 makes the loss chase them. 0 = off.")
+    ap.add_argument("--mc-eval-cmd", default=None,
+                    help="script run after every epoch with the fresh checkpoint path as "
+                         "argument; must print the Stokes FGMRES relative residual achieved "
+                         "with the model as preconditioner (extra 'mc=' column).")
+    ap.add_argument("--c-lr-scale", type=float, default=0.1,
+                    help="learning-rate factor for the low-LR parameter group "
+                         "(coupling / radius attention, the .c_ parameters).")
     ap.add_argument("--no-wavelet", action="store_true",
                     help="drop the wavelet/attention branch entirely. With the "
                          "spherical branch on, every remaining component is pointwise "
@@ -303,7 +431,7 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     torch.manual_seed(0)
-    dev = torch.device(args.device)
+    dev, rank, world = ddp.setup(args.device)
 
     print("loading")
     coords_arr = None if args.no_coords else load_coords(args.data)
@@ -312,6 +440,13 @@ def main(argv=None):
 
     # Standardise log eta on the training split only.
     le_mean, le_std = float(tr["log_eta"].mean()), float(tr["log_eta"].std() + 1e-8)
+    if args.eval_only and not np.isfinite(le_mean):
+        # Evaluation without the train split: the checkpoint carries the exact
+        # normalisation the model was trained with, so use that, not train-split stats.
+        _ck = torch.load(os.path.expanduser(args.eval_only), map_location="cpu",
+                         weights_only=False)
+        le_mean, le_std = float(_ck["log_eta_mean"]), float(_ck["log_eta_std"])
+        del _ck
     print(f"  log eta: mean {le_mean:.4f}, std {le_std:.4f}")
 
     def to_tensors(split):
@@ -341,8 +476,8 @@ def main(argv=None):
     # both copies is the difference between fitting in memory and not.
     tr_le, te_le = tr["log_eta"], te["log_eta"]
     tr_fu, te_fu = tr["f_u"], te["f_u"]
-    tr = {"eta_mean": tr["eta_mean"], "u": tr["u"], "p": tr["p"]}
-    te = {"eta_mean": te["eta_mean"], "u": te["u"], "p": te["p"],
+    tr = {"eta_mean": tr["eta_mean"], "u": tr["u"], "p": tr["p"], "z": tr["z"]}
+    te = {"eta_mean": te["eta_mean"], "u": te["u"], "p": te["p"], "z": te["z"],
           "log_eta": te_le}          # --dump-predictions still reports the viscosity
 
     # How each input channel group behaves under the symmetry group: whether its
@@ -382,6 +517,13 @@ def main(argv=None):
         print(f"  + div(f_u) input channel -> {x_tr.shape[-1]} inputs")
     # The manufactured solutions are no-slip on both radial shells -- |u| rms there is
     # 1e-18, i.e. exactly zero -- so the boundary values are known, not learned.
+    if args.defect_z:
+        if tr["z"] is None or te["z"] is None:
+            raise SystemExit("--defect-z needs a dataset carrying the z field")
+        x_tr = torch.cat([x_tr, torch.from_numpy(tr["z"])], dim=-1)
+        x_te = torch.cat([x_te, torch.from_numpy(te["z"])], dim=-1)
+        x_spec += [(3, True, True), (1, False, True)]
+        print(f"  + defect-correction z channels -> {x_tr.shape[-1]} inputs")
     if args.bc_channel:
         def with_bc(x):
             b = torch.zeros(*x.shape[:-1], 1, dtype=x.dtype)
@@ -393,26 +535,59 @@ def main(argv=None):
         print(f"  + Dirichlet boundary marker -> {x_tr.shape[-1]} inputs")
 
     print(f"  input {tuple(x_tr.shape)} -> target {tuple(y_tr.shape)}  (3 velocity + 1 pressure)")
-    print(f"  target rms spread after rescaling: "
-          f"{float(y_tr.flatten(1).pow(2).mean(1).sqrt().max() / y_tr.flatten(1).pow(2).mean(1).sqrt().min()):.1f}x")
+    if len(y_tr):
+        print(f"  target rms spread after rescaling: "
+              f"{float(y_tr.flatten(1).pow(2).mean(1).sqrt().max() / y_tr.flatten(1).pow(2).mean(1).sqrt().min()):.1f}x")
+
+    if args.cache_device:
+        gb = sum(t.numel() * 4 for t in (x_tr, y_tr, eta_tr, fu_tr,
+                                         fp_tr)) / 1e9
+        x_tr, y_tr = x_tr.to(dev), y_tr.to(dev)
+        eta_tr, fu_tr, fp_tr = (eta_tr.to(dev), fu_tr.to(dev),
+                                fp_tr.to(dev))
+        s_tr = s_tr.to(dev)
+        print(f"  training tensors cached on {args.device} ({gb:.1f} GB)")
 
     shape = tuple(x_tr.shape[2:5])
     coords = coords_arr
     print(f"  geometry: {'normalised index coordinates' if coords is None else 'physical node positions + depth'}")
 
-    net = Model(in_channels=x_tr.shape[-1], out_channels=4, shape=shape,
+    if args.linear:
+        if coords is None:
+            raise SystemExit("--linear needs the geometry; drop --no-coords")
+        net = LinearOperator(x_tr.shape[-1], 4, shape, coords,
+                             n_hidden=args.hidden, n_blocks=args.heads,
+                             lmax=args.spherical or 16,
+                             kmax=args.radial_modes or 8,
+                             n_conv=args.linear_convs,
+                             kernel=args.linear_kernel,
+                             depth_gates=args.linear_depth_gates,
+                             radial_dense=args.linear_radial_dense,
+                             pyramid=args.linear_pyramid,
+                             eta_gates=args.eta_gates,
+                             eta_green=args.eta_green,
+                             nonlin=args.nonlin,
+                             green_mlp=args.eta_green).to(dev)
+    else:
+        net = Model(in_channels=x_tr.shape[-1], out_channels=4, shape=shape,
                 n_hidden=args.hidden, n_layers=args.layers, n_heads=args.heads,
                 coords=coords, head_mlp=args.head_mlp,
                 band_tokens=args.band_tokens, n_levels=args.n_levels,
                 attention=args.attention,
                 spherical=args.spherical, radial_modes=args.radial_modes,
                 wavelet=not args.no_wavelet,
-                per_degree=args.sph_per_degree, n_slices=args.slices,
+                per_degree=args.sph_per_degree,
+        sph_degree_mlp=args.sph_degree_mlp, n_slices=args.slices,
                 mass_slices=args.mass_slices, sph_couple=args.sph_couple,
                 sph_couple_band=args.sph_couple_band,
                 sph_couple_shared=args.sph_couple_shared,
                 gno_radius=args.gno_radius, gno_k=args.gno_k).to(dev)
     print(f"  model {sum(p.numel() for p in net.parameters())/1e6:.2f}M params on {dev}")
+    if args.init_from:
+        ck0 = torch.load(os.path.expanduser(args.init_from), map_location=dev,
+                         weights_only=False)
+        net.load_state_dict(ck0["model"])
+        print(f"  warm-started from {args.init_from}")
 
     # u = 0 on the first and last radial shell. Masking the output enforces it exactly;
     # --bc-weight only pushes towards it.
@@ -420,8 +595,25 @@ def main(argv=None):
     shell[..., 0, :] = 0.0
     shell[..., -1, :] = 0.0
 
+    curl_iJ = (stokes_residual.inverse_jacobian(coords).float().to(dev)
+               if args.curl_output else None)
+
+    def curl(A):
+        """u = curl(A) on the block grids; g[..., c, a] = dA_c/dx_a."""
+        g = stokes_residual.gradient(A, curl_iJ)
+        return torch.stack([g[..., 2, 1] - g[..., 1, 2],
+                            g[..., 0, 2] - g[..., 2, 0],
+                            g[..., 1, 0] - g[..., 0, 1]], dim=-1)
+
     def forward(xb):
-        out = net(xb)
+        if args.amp:
+            with torch.autocast(device_type=dev.type, dtype=torch.bfloat16):
+                out = net(xb)
+            out = out.float()
+        else:
+            out = net(xb)
+        if args.curl_output:
+            out = torch.cat([curl(out[..., :3]), out[..., 3:]], dim=-1)
         if args.hard_bc:
             out = torch.cat([out[..., :3] * shell, out[..., 3:]], dim=-1)
         return out
@@ -518,14 +710,17 @@ def main(argv=None):
     base_params = [p for n, p in net.named_parameters() if ".c_" not in n]
     if c_params:
         opt = torch.optim.AdamW([{"params": base_params},
-                                 {"params": c_params, "lr": args.lr * 0.1}],
+                                 {"params": c_params, "lr": args.lr * args.c_lr_scale}],
                                 lr=args.lr, weight_decay=1e-4)
-        max_lr = [args.lr, args.lr * 0.1]
+        max_lr = [args.lr, args.lr * args.c_lr_scale]
     else:
         opt = torch.optim.AdamW(net.parameters(), lr=args.lr, weight_decay=1e-4)
         max_lr = args.lr
-    sched = torch.optim.lr_scheduler.OneCycleLR(
-        opt, max_lr=max_lr, total_steps=args.epochs * ((len(x_tr) + args.batch_size - 1) // args.batch_size))
+    if not args.eval_only:
+        steps_ep = (len(x_tr) + args.batch_size - 1) // args.batch_size
+        steps_ep = (steps_ep + world - 1) // world
+        sched = torch.optim.lr_scheduler.OneCycleLR(
+            opt, max_lr=max_lr, total_steps=args.epochs * steps_ep)
 
     x_te_d, y_te_d = x_te.to(dev), y_te.to(dev)
 
@@ -596,12 +791,29 @@ def main(argv=None):
             print(f"  wrote {args.dump_predictions}")
         return 0
 
+    ddp.broadcast_params(net)
     print(f"\n{'epoch':>6} {'tr data':>11} {'tr phys':>11} {'te u':>9} {'te p':>9} "
           f"{'te mom':>9} {'te cont':>9} {'te bc':>9} {'lr':>9} {'s':>5}")
     best = float("inf")
-    for epoch in range(args.epochs):
+    start_ep = 0
+    resume_path = os.path.expanduser(args.out) + ".resume"
+    if os.path.exists(resume_path):
+        rs = torch.load(resume_path, map_location=dev, weights_only=False)
+        net.load_state_dict(rs["model"])
+        opt.load_state_dict(rs["opt"])
+        sched.load_state_dict(rs["sched"])
+        best, start_ep = rs["best"], rs["epoch"] + 1
+        if ddp.is_main():
+            print(f"  resuming from {resume_path} at epoch {start_ep} (best {best:.4f})")
+    for epoch in range(start_ep, args.epochs):
         t0 = time.time()
-        perm = torch.randperm(len(x_tr))
+        perm = torch.randperm(len(x_tr), generator=torch.Generator().manual_seed(1234 + epoch))
+        if world > 1:
+            pad = (-len(perm)) % (world * args.batch_size)
+            perm = torch.cat([perm, perm[:pad]])
+            bs = args.batch_size
+            keep = [perm[i:i + bs] for i in range(0, len(perm), bs)][rank::world]
+            perm = torch.cat(keep) if keep else perm[:0]
         running, seen = 0.0, 0
         running_data = running_phys = 0.0
         for i in range(0, len(perm), args.batch_size):
@@ -621,9 +833,29 @@ def main(argv=None):
             pb = forward(xb)
             pp, pt = ((pb[..., 3:], yb[..., 3:]) if args.mean_free_target
                       else (mean_free(pb[..., 3:]), mean_free(yb[..., 3:])))
-            data_term = relative_l2(pp, pt)
-            if not args.p_only:
-                data_term = data_term + relative_l2(pb[..., :3], yb[..., :3])
+            if args.hard_power > 0:
+                # per-sample errors, reweighted toward the worst samples: the
+                # loss then approximates a soft max over the batch rather than
+                # the mean, which is the norm preconditioning actually feels
+                r = relative_l2_ps(pp, pt)
+                if not args.p_only:
+                    r = r + relative_l2_ps(pb[..., :3], yb[..., :3])
+                w = (r.detach() / r.detach().mean().clamp_min(1e-12)) ** args.hard_power
+                w = (w / w.mean().clamp_min(1e-12)).clamp(max=100.0)
+                data_term = (w * r).mean()
+            else:
+                data_term = args.p_weight * relative_l2(pp, pt)
+                if not args.p_only:
+                    data_term = data_term + relative_l2(pb[..., :3], yb[..., :3])
+            if args.hp_weight > 0.0:
+                def _hp(t):
+                    b_, s_, hx, hy, hr, c_ = t.shape
+                    v = t.reshape(b_ * s_, hx, hy, hr, c_).permute(0, 4, 1, 2, 3)
+                    sm = F.avg_pool3d(v, 3, stride=1, padding=1,
+                                      count_include_pad=False)
+                    return (v - sm).permute(0, 2, 3, 4, 1).reshape(t.shape)
+                data_term = data_term + args.hp_weight * relative_l2(
+                    _hp(pb[..., :3]), _hp(yb[..., :3]))
             if args.mean_p_weight > 0.0:
                 dims = tuple(range(1, pp.ndim))
                 m = pp.mean(dim=dims).abs()
@@ -649,17 +881,46 @@ def main(argv=None):
             running_data += data_term.item() * len(idx)
             opt.zero_grad(set_to_none=True)
             loss.backward()
+            ddp.sync_grads(net)
             torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
             opt.step()
             sched.step()
             running += loss.item() * len(idx)
             seen += len(idx)
 
+        ddp.barrier()
+        if not ddp.is_main():
+            continue
         test_u, test_p, test_mom, test_con, test_bc = evaluate()
         test_loss = test_u
+        mc_res = float("nan")
+        if args.mc_eval_cmd:
+            import subprocess
+            ck_path = os.path.expanduser(args.out) + ".epoch"
+            torch.save({"model": net.state_dict(),
+                        "log_eta_mean": le_mean, "log_eta_std": le_std,
+                        "hidden": args.hidden, "layers": args.layers, "heads": args.heads,
+                        "shape": tuple(x_te.shape[1:5]),
+                        "attention": args.attention, "spherical": args.spherical,
+                        "radial_modes": args.radial_modes,
+                        "per_degree": args.sph_per_degree,
+                        "sph_degree_mlp": args.sph_degree_mlp,
+                        "sph_couple": args.sph_couple,
+                        "sph_couple_band": args.sph_couple_band,
+                        "sph_couple_shared": args.sph_couple_shared,
+                        "wavelet": not args.no_wavelet, "n_slices": args.slices,
+                        "linear": args.linear,
+                        "test_rel_l2": test_u, "out_channels": 4}, ck_path)
+            try:
+                rr = subprocess.run([args.mc_eval_cmd, ck_path], capture_output=True,
+                                    text=True, timeout=900)
+                mc_res = float(rr.stdout.strip().splitlines()[-1])
+            except Exception as exc:  # never let the eval kill the training
+                print(f"  mc-eval failed: {exc}", flush=True)
         print(f"{epoch:>6} {running_data/seen:>11.4f} {running_phys/seen:>11.4f} "
               f"{test_u:>9.4f} {test_p:>9.4f} {test_mom:>9.4f} {test_con:>9.4f} "
-              f"{test_bc:>9.4f} {sched.get_last_lr()[0]:>9.2e} {time.time()-t0:>5.1f}",
+              f"{test_bc:>9.4f} {sched.get_last_lr()[0]:>9.2e} {time.time()-t0:>5.1f}"
+              + (f" mc={mc_res:.4e}" if args.mc_eval_cmd else ""),
               flush=True)
 
         if test_loss < best:
@@ -673,6 +934,7 @@ def main(argv=None):
                         "radial_modes": args.radial_modes,
                         "wavelet": not args.no_wavelet,
                         "per_degree": args.sph_per_degree,
+                        "sph_degree_mlp": args.sph_degree_mlp,
                         "n_slices": args.slices,
                         "mass_slices": args.mass_slices,
                         "sph_couple": args.sph_couple,
@@ -680,7 +942,23 @@ def main(argv=None):
                         "sph_couple_shared": args.sph_couple_shared,
                         "gno_radius": args.gno_radius,
                         "gno_k": args.gno_k,
+                        "linear": args.linear,
+                        "linear_convs": args.linear_convs,
+                        "linear_kernel": args.linear_kernel,
+                        "linear_depth_gates": args.linear_depth_gates,
+                        "linear_radial_dense": args.linear_radial_dense,
+                        "linear_pyramid": args.linear_pyramid,
+                        "defect_z": args.defect_z,
+                        "linear_eta_gates": args.eta_gates,
+                        "p_only": args.p_only,
+                        "linear_eta_green": args.eta_green,
+                        "linear_nonlin": args.nonlin,
+                        "curl_output": args.curl_output,
+                        "linear_green_mlp": args.eta_green,
                         "test_rel_l2": test_loss, "out_channels": 4}, args.out)
+        torch.save({"model": net.state_dict(), "opt": opt.state_dict(),
+                    "sched": sched.state_dict(), "epoch": epoch, "best": best},
+                   resume_path)
 
     print(f"\nbest test relative L2 {best:.4f}, saved to {args.out}")
     return 0

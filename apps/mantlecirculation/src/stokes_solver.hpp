@@ -41,6 +41,9 @@
 #include "linalg/vector_q1.hpp"
 #include "linalg/vector_q1isoq2_q1.hpp"
 #include "low_prec_vcycle.hpp"
+#ifdef TERRA_ENABLE_PYTHON
+#include "ml/neural_solver.hpp"
+#endif
 #include "mpi/level_comms.hpp"
 #include "mpi/mpi.hpp"
 #include "parameters.hpp"
@@ -178,6 +181,24 @@ class StokesContext
     using BasisVectorType = linalg::VectorQ1IsoQ2Q1< Kokkos::Experimental::bhalf_t, 3 >;
     using FGMRESDouble    = linalg::solvers::FGMRES< Stokes, PrecStokes >;
     using FGMRESFloat     = linalg::solvers::FGMRESLowMem< Stokes, BasisVectorType, PrecStokes >;
+
+#ifdef TERRA_ENABLE_PYTHON
+    /// Copyable view onto a NeuralSolver so it fits FGMRES's by-value
+    /// preconditioner slot (NeuralSolver itself owns Python state and is
+    /// non-copyable).
+    struct NeuralPrecRef
+    {
+        using OperatorType = Stokes;
+        ml::NeuralSolver< Stokes >* impl = nullptr;
+        void solve_impl( OperatorType& A,
+                         typename OperatorType::SrcVectorType& x,
+                         const typename OperatorType::DstVectorType& b )
+        {
+            impl->solve_impl( A, x, b );
+        }
+    };
+    using FGMRESNeural = linalg::solvers::FGMRES< Stokes, NeuralPrecRef >;
+#endif
 
   public:
     StokesContext(
@@ -561,6 +582,24 @@ class StokesContext
                     R_.emplace_back( *domains_upper_[L] );
             }
 
+            // Zero the restricted residual on Dirichlet boundary shells so the
+            // v-cycle preserves u = 0 there exactly (otherwise restriction smears
+            // interior residual into the eliminated coarse boundary rows and the
+            // smoother/prolongation leak a solver-tolerance-sized velocity back
+            // onto the fine boundary).
+            {
+                using grid::shell::BoundaryConditionFlag;
+                using grid::shell::ShellBoundaryFlag;
+                const bool zero_cmb =
+                    grid::shell::get_boundary_condition_flag( bcs_, ShellBoundaryFlag::CMB ) ==
+                    BoundaryConditionFlag::DIRICHLET;
+                const bool zero_surface =
+                    grid::shell::get_boundary_condition_flag( bcs_, ShellBoundaryFlag::SURFACE ) ==
+                    BoundaryConditionFlag::DIRICHLET;
+                for ( auto& R : R_ )
+                    R.set_dirichlet_boundary_zeroing( zero_cmb, zero_surface );
+            }
+
             prec_11_ = std::make_unique< PrecVisc >(
                 P_,
                 R_,
@@ -713,6 +752,26 @@ class StokesContext
             stokes_fgmres_double_->set_tag( "stokes_fgmres" );
         }
 
+        if ( !prm_.stokes_solver_parameters.neural_precon.empty() )
+        {
+#ifdef TERRA_ENABLE_PYTHON
+            if ( use_float_basis_ )
+                throw std::runtime_error( "--stokes-neural-precon is not wired for the float-basis FGMRES" );
+            logroot << "Setting up neural Stokes preconditioner ('"
+                    << prm_.stokes_solver_parameters.neural_precon << "') ..." << std::endl;
+            ml::NeuralSolverOptions nopt;
+            nopt.model        = prm_.stokes_solver_parameters.neural_precon;
+            nopt.log_residual = false; // two extra matvecs per FGMRES iteration otherwise
+            neural_prec_ = std::make_unique< ml::NeuralSolver< Stokes > >(
+                nopt, *domains_[velocity_level_], *domains_[pressure_level_], triangular_prec_tmp_ );
+            stokes_fgmres_neural_ = std::make_unique< FGMRESNeural >(
+                stokes_tmp_fgmres_, stokes_fgmres_opts, table_, NeuralPrecRef{ neural_prec_.get() } );
+            stokes_fgmres_neural_->set_tag( "stokes_fgmres" );
+#else
+            throw std::runtime_error( "--stokes-neural-precon needs a build with -DTERRA_ENABLE_PYTHON=ON" );
+#endif
+        }
+
         if ( prm_.devel_parameters.extended_diagnostics )
             log_hbm( "stokes: ctor end (delta = MG hierarchy + operators + coarse + preconditioner)" );
     }
@@ -824,7 +883,12 @@ class StokesContext
 
         util::logroot << "Solving Stokes ..." << std::endl;
 
-        if ( use_float_basis_ )
+#ifdef TERRA_ENABLE_PYTHON
+        if ( stokes_fgmres_neural_ )
+            ::terra::linalg::solvers::solve( *stokes_fgmres_neural_, *K_, stok_vecs_["u"], stok_vecs_["f"] );
+        else
+#endif
+            if ( use_float_basis_ )
             ::terra::linalg::solvers::solve( *stokes_fgmres_float_, *K_, stok_vecs_["u"], stok_vecs_["f"] );
         else
             ::terra::linalg::solvers::solve( *stokes_fgmres_double_, *K_, stok_vecs_["u"], stok_vecs_["f"] );
@@ -914,6 +978,10 @@ class StokesContext
     bool                                  use_float_basis_ = false;
     std::unique_ptr< FGMRESDouble >       stokes_fgmres_double_;
     std::unique_ptr< FGMRESFloat >        stokes_fgmres_float_;
+#ifdef TERRA_ENABLE_PYTHON
+    std::unique_ptr< ml::NeuralSolver< Stokes > > neural_prec_;
+    std::unique_ptr< FGMRESNeural >               stokes_fgmres_neural_;
+#endif
 };
 
 } // namespace terra::mantlecirculation

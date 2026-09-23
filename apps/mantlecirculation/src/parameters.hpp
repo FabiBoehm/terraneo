@@ -239,6 +239,12 @@ enum class MGPrecision
 
 struct StokesSolverParameters
 {
+    /// When non-empty, replace the block-triangular MG/Schur preconditioner of the
+    /// outer Stokes FGMRES with terra::ml::NeuralSolver running the named registered
+    /// model (e.g. "cband"; the checkpoint comes from $TERRA_NEURAL_CHECKPOINT).
+    /// Needs a build with -DTERRA_ENABLE_PYTHON=ON.
+    std::string neural_precon = "";
+
     int    krylov_restart            = 10;
     int    krylov_max_iterations     = 10;
     double krylov_relative_tolerance = 1e-6;
@@ -822,6 +828,10 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
             "Low-memory mode. Use when the memory requirements of your target simulation exceed machine limits." );
     add_option_with_default( app, "--stokes-krylov-restart", parameters.stokes_solver_parameters.krylov_restart )
         ->group( "Stokes Solver" );
+    add_option_with_default( app, "--stokes-neural-precon", parameters.stokes_solver_parameters.neural_precon )
+        ->group( "Stokes Solver" )
+        ->description( "Registered terra_infer model to use as the Stokes preconditioner "
+                       "(empty = block MG/Schur preconditioner). Requires TERRA_ENABLE_PYTHON." );
     add_option_with_default(
         app, "--stokes-krylov-max-iterations", parameters.stokes_solver_parameters.krylov_max_iterations )
         ->group( "Stokes Solver" );

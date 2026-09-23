@@ -26,7 +26,7 @@ import torch.nn as nn
 __all__ = ["real_sph_harm", "build_transform", "node_quadrature", "SphericalBranch"]
 
 
-def node_quadrature(coords: np.ndarray) -> np.ndarray:
+def node_quadrature(coords: np.ndarray, normalized: bool = True) -> np.ndarray:
     """Per-node quadrature weights for the stored nodes of a mesh (S, nx, ny, nr, 3).
 
     A uniform mean over stored nodes is a Monte-Carlo estimate under the *storage*
@@ -54,7 +54,13 @@ def node_quadrature(coords: np.ndarray) -> np.ndarray:
     _, inv, cnt = np.unique(np.round(c.reshape(-1, 3), 9), axis=0,
                             return_inverse=True, return_counts=True)
     w = w.reshape(-1) / cnt[inv]
-    return (w / w.mean()).reshape(c.shape[:4])
+    # normalized=False keeps the PHYSICAL node volumes (sum ~ shell volume).
+    # That absolute scale is what converts FE load vectors to strong-form
+    # fields; the mean-1 convention silently absorbs it into an unknown
+    # constant, which is exactly the amplitude a load/strong conversion loses.
+    if normalized:
+        w = w / w.mean()
+    return w.reshape(c.shape[:4])
 
 
 def real_sph_harm(dirs: np.ndarray, lmax: int) -> np.ndarray:
@@ -97,6 +103,9 @@ def chebyshev(r: np.ndarray, kmax: int) -> np.ndarray:
     return np.stack([np.cos(k * t) for k in range(kmax + 1)], axis=1)
 
 
+_TRANSFORM_CACHE = {}
+
+
 def build_transform(coords: np.ndarray, lmax: int, kmax: int = 0):
     """Transforms for a mesh (S, nx, ny, nr, 3): lateral, and optionally radial.
 
@@ -111,6 +120,16 @@ def build_transform(coords: np.ndarray, lmax: int, kmax: int = 0):
     (n_modes x kmax+1) coefficient tensor whatever the mesh -- which is what makes the
     branch natively resolution-independent in BOTH directions.
     """
+    # Many datasets share one mesh (all the L6 sets, all the L5 sets...), and the
+    # pseudo-inverse of a 42250 x 1089 matrix is minutes of work -- memoise it so a run
+    # that mixes 13 same-level sets pays for it once.
+    _k = (coords.shape, lmax, kmax,
+          float(coords.reshape(-1)[0]), float(coords.reshape(-1)[-1]),
+          float(coords.sum()))
+    _hit = _TRANSFORM_CACHE.get(_k)
+    if _hit is not None:
+        return _hit
+
     d = coords[:, :, :, 0, :]
     d = d / np.linalg.norm(d, axis=-1, keepdims=True)
     Y = real_sph_harm(d.reshape(-1, 3), lmax)
@@ -122,7 +141,9 @@ def build_transform(coords: np.ndarray, lmax: int, kmax: int = 0):
         Yr = chebyshev(r, kmax)
         out += [torch.as_tensor(Yr, dtype=torch.float32),
                 torch.as_tensor(np.linalg.pinv(Yr), dtype=torch.float32)]
-    return tuple(out)
+    res = tuple(out)
+    _TRANSFORM_CACHE[_k] = res
+    return res
 
 
 class SphericalBranch(nn.Module):
@@ -135,7 +156,8 @@ class SphericalBranch(nn.Module):
 
     def __init__(self, dim: int, n_blocks: int = 8, factor: int = 1,
                  lmax: int = 0, per_degree: bool = False,
-                 couple: bool = False, n_radial: int = 0, couple_band: int = 0):
+                 couple: bool = False, n_radial: int = 0, couple_band: int = 0,
+                 degree_mlp: bool = False):
         super().__init__()
         if dim % n_blocks:
             raise ValueError(f"dim {dim} must be divisible by n_blocks {n_blocks}")
@@ -154,11 +176,29 @@ class SphericalBranch(nn.Module):
         # Shapes stay as they were without per_degree, so checkpoints trained with the
         # mode-shared branch keep loading.
         self.per_degree = per_degree
-        pre = (lmax + 1,) if per_degree else ()
-        self.w1 = nn.Parameter(0.02 * torch.randn(*pre, n_blocks, self.bs, h))
-        self.b1 = nn.Parameter(torch.zeros(*pre, n_blocks, h))
-        self.w2 = nn.Parameter(0.02 * torch.randn(*pre, n_blocks, h, self.bs))
-        self.b2 = nn.Parameter(torch.zeros(*pre, n_blocks, self.bs))
+        # A table indexed by l is the correct symmetry class but cannot say anything
+        # about degrees it never saw. Generating the same weights from a small MLP
+        # over l/16 keeps the class and adds smoothness in l -- so at inference the
+        # transforms can be built with a HIGHER lmax and the branch extrapolates its
+        # transfer function instead of stopping dead at the training truncation.
+        self.degree_mlp = degree_mlp and per_degree
+        self._wshapes = ((n_blocks, self.bs, h), (n_blocks, h),
+                         (n_blocks, h, self.bs), (n_blocks, self.bs))
+        if self.degree_mlp:
+            tot = sum(int(np.prod(sh)) for sh in self._wshapes)
+            self.wgen = nn.Sequential(nn.Linear(1, 64), nn.GELU(),
+                                      nn.Linear(64, 64), nn.GELU(),
+                                      nn.Linear(64, tot))
+            with torch.no_grad():  # match the 0.02*randn scale of the table init
+                self.wgen[-1].weight.mul_(0.1)
+                self.wgen[-1].bias.normal_(0.0, 0.02)
+            self.w1 = self.b1 = self.w2 = self.b2 = None
+        else:
+            pre = (lmax + 1,) if per_degree else ()
+            self.w1 = nn.Parameter(0.02 * torch.randn(*pre, n_blocks, self.bs, h))
+            self.b1 = nn.Parameter(torch.zeros(*pre, n_blocks, h))
+            self.w2 = nn.Parameter(0.02 * torch.randn(*pre, n_blocks, h, self.bs))
+            self.b2 = nn.Parameter(torch.zeros(*pre, n_blocks, self.bs))
         if per_degree:
             deg = torch.cat([torch.full((2 * l + 1,), l, dtype=torch.long)
                              for l in range(lmax + 1)])
@@ -221,8 +261,20 @@ class SphericalBranch(nn.Module):
             F = F + self.c_out(a).reshape(b, n_modes, c, nk).permute(0, 2, 1, 3)
         F = F.reshape(b, self.n_blocks, self.bs, -1, nk)
         if self.per_degree:
-            w1, b1 = self.w1[self.deg], self.b1[self.deg]      # (M, K, I, H)
-            w2, b2 = self.w2[self.deg], self.b2[self.deg]
+            if self.degree_mlp:
+                # weights for every degree present in `deg`, generated on the fly;
+                # l is normalised by the FIXED reference 16 so a longer deg vector
+                # (transforms built at higher lmax) extrapolates rather than rescales
+                ln = (self.deg.to(f.device).float() / 16.0).unsqueeze(1)
+                flat = self.wgen(ln)                              # (M, total)
+                parts, o = [], 0
+                for sh in self._wshapes:
+                    n = int(np.prod(sh))
+                    parts.append(flat[:, o:o + n].reshape(-1, *sh)); o += n
+                w1, b1, w2, b2 = parts
+            else:
+                w1, b1 = self.w1[self.deg], self.b1[self.deg]      # (M, K, I, H)
+                w2, b2 = self.w2[self.deg], self.b2[self.deg]
             o = torch.relu(torch.einsum("bkinr,nkio->bkonr", F, w1)
                            + b1.permute(1, 2, 0)[None, :, :, :, None])
             o = (torch.einsum("bkinr,nkio->bkonr", o, w2)
@@ -262,26 +314,44 @@ class RadiusAttention(nn.Module):
         self.c_ln = nn.LayerNorm(dim)
         self.c_q = nn.Linear(dim, d)
         self.c_kv = nn.Linear(dim, 2 * d)
+        # Normalising the attention output before the projection bounds the branch's
+        # activations (and thus its gradients) independently of what the values grow
+        # to during training -- without it the branch blows up mid-warmup (measured:
+        # loss 0.72 -> 5.2 at epoch 18 of the first 10k run, despite grad clipping).
+        self.c_norm = nn.LayerNorm(d)
         self.c_out = nn.Linear(d, dim)
         nn.init.zeros_(self.c_out.weight)
         nn.init.zeros_(self.c_out.bias)
 
     def forward(self, x: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
-        """``x``: (B, M, C); ``idx``: (M, K) neighbor sample -> (B, M, C)."""
+        """``x``: (B, M, C); ``idx``: (M, K) neighbor sample -> (B, M, C).
+
+        The neighbor gather materialises (B, M, K, d); at level 4+ that is tens of
+        gigabytes if done in one piece, so the nodes are processed in chunks -- each
+        node's attention is independent, so chunking changes nothing numerically.
+        """
         b, m, c = x.shape
         t = self.c_ln(x)
         q = self.c_q(t)
         k, v = self.c_kv(t).chunk(2, dim=-1)
-        kn, vn = k[:, idx], v[:, idx]                       # (B, M, K, d)
         h = self.heads
         dh = q.shape[-1] // h
-        qh = q.view(b, m, h, dh)
-        kh = kn.view(b, m, -1, h, dh)
-        vh = vn.view(b, m, -1, h, dh)
-        att = torch.einsum("bmhd,bmkhd->bmkh", qh, kh) / dh ** 0.5
-        att = att.softmax(dim=2)
-        out = torch.einsum("bmkh,bmkhd->bmhd", att, vh).reshape(b, m, -1)
-        return self.c_out(out)
+        kk = idx.shape[1]
+        # budget ~500M floats for the (B, chunk, K, d) gather and its einsum temps
+        chunk = max(1, 500_000_000 // max(1, b * kk * (q.shape[-1] // 1)))
+        outs = []
+        for o in range(0, m, chunk):
+            sl = slice(o, min(o + chunk, m))
+            kn, vn = k[:, idx[sl]], v[:, idx[sl]]        # (B, mc, K, d)
+            mc = kn.shape[1]
+            qh = q[:, sl].view(b, mc, h, dh)
+            kh = kn.view(b, mc, -1, h, dh)
+            vh = vn.view(b, mc, -1, h, dh)
+            att = torch.einsum("bmhd,bmkhd->bmkh", qh, kh) / dh ** 0.5
+            att = att.softmax(dim=2)
+            outs.append(torch.einsum("bmkh,bmkhd->bmhd", att, vh).reshape(b, mc, -1))
+        out = torch.cat(outs, dim=1)
+        return self.c_out(self.c_norm(out))
 
 
 def radius_neighbors(coords: np.ndarray, radius: float, k: int,

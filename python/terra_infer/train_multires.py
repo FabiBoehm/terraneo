@@ -27,7 +27,7 @@ import time
 import numpy as np
 import torch
 
-from . import stokes_residual, symmetry
+from . import ddp, stokes_residual, symmetry
 from .train_operator import load_split, mean_free, relative_l2
 from .operator import Model
 
@@ -95,14 +95,16 @@ def main(argv=None):
     ap.add_argument("--sph-couple-band", type=int, default=0)
     ap.add_argument("--sph-couple-shared", action="store_true")
     ap.add_argument("--no-wavelet", action="store_true")
+    ap.add_argument("--sph-degree-mlp", action="store_true")
+    ap.add_argument("--gno-radius", type=float, default=0.0)
+    ap.add_argument("--gno-k", type=int, default=32)
     ap.add_argument("--max-train", type=int, nargs="*", default=None,
                     help="per-root cap on training samples")
     ap.add_argument("--max-test", type=int, default=64)
     ap.add_argument("--device", default="cuda")
     args = ap.parse_args(argv)
 
-    dev = torch.device(args.device if torch.cuda.is_available() or args.device == "cpu"
-                       else "cpu")
+    dev, rank, world = ddp.setup(args.device)
     caps = args.max_train or []
     caps = list(caps) + [None] * (len(args.data) - len(caps))
 
@@ -130,8 +132,13 @@ def main(argv=None):
                 per_degree=args.sph_per_degree, sph_couple=args.sph_couple,
                 sph_couple_band=args.sph_couple_band,
                 sph_couple_shared=args.sph_couple_shared,
+                sph_degree_mlp=args.sph_degree_mlp,
+                gno_radius=args.gno_radius, gno_k=args.gno_k,
                 wavelet=not args.no_wavelet).to(dev)
-    print(f"  model {sum(p.numel() for p in net.parameters())/1e6:.2f}M params on {dev}")
+    ddp.broadcast_params(net)
+    if ddp.is_main():
+        print(f"  model {sum(p.numel() for p in net.parameters())/1e6:.2f}M params on {dev}"
+              + (f", data-parallel over {world} ranks" if world > 1 else ""))
     # Every mesh-dependent buffer is captured per mesh and swapped between batches:
     # the padded extents, the geometry channels, and for the spherical branch BOTH
     # transforms -- lateral (Y, A) and radial (Yr, Ar); the Chebyshev matrices move
@@ -140,15 +147,18 @@ def main(argv=None):
         net.set_mesh(b["shape"][1:], b["coords"])
         b["mesh_state"] = (net.shape_in, net.pad, net.shape, net.geom,
                            getattr(net, "sht_Y", None), getattr(net, "sht_A", None),
-                           getattr(net, "sht_Yr", None), getattr(net, "sht_Ar", None))
+                           getattr(net, "sht_Yr", None), getattr(net, "sht_Ar", None),
+                           getattr(net, "gno_idx", None))
         print(f"  mesh {b['name']:>12}: {int(np.prod(b['shape'])):,} nodes")
 
     def use(b):
-        (net.shape_in, net.pad, net.shape, net.geom, Y, A, Yr, Ar) = b["mesh_state"]
+        (net.shape_in, net.pad, net.shape, net.geom, Y, A, Yr, Ar, gi) = b["mesh_state"]
         if net.spherical:
             net.sht_Y, net.sht_A = Y, A
             if net.radial_modes:
                 net.sht_Yr, net.sht_Ar = Yr, Ar
+        if gi is not None:
+            net.gno_idx = gi
 
     x_spec = [(3, True, True), (1, False, True), (1, False, False),
               (3, True, False), (1, False, True)]
@@ -162,6 +172,7 @@ def main(argv=None):
         return torch.cat(out, dim=-1)
 
     steps = sum((len(b["x"]) + args.batch_size - 1) // args.batch_size for b in train)
+    steps = (steps + world - 1) // world  # per-rank optimizer steps per epoch
     # Same LR split as train_operator: the coupling attention diverges at the peak
     # LR the rest of the model wants, so it runs at a 10x lower peak.
     c_params = [p for n, p in net.named_parameters() if ".c_" in n]
@@ -204,14 +215,33 @@ def main(argv=None):
     hdr = "".join(f"{b['name'][-2:]+' u':>9}{b['name'][-2:]+' m':>9}" for b in test)
     print(f"\n{'epoch':>6} {'tr loss':>10}{hdr} {'lr':>9} {'s':>6}")
     best = float("inf")
-    for ep in range(args.epochs):
+    start_ep = 0
+    resume_path = args.out + ".resume"
+    if os.path.exists(resume_path):
+        # Full state -- model, optimizer moments, scheduler position, epoch, best --
+        # so a stopped run continues exactly where it left off (every rank reads it).
+        rs = torch.load(resume_path, map_location=dev, weights_only=False)
+        net.load_state_dict(rs["model"])
+        opt.load_state_dict(rs["opt"])
+        sched.load_state_dict(rs["sched"])
+        best, start_ep = rs["best"], rs["epoch"] + 1
+        if ddp.is_main():
+            print(f"  resuming from {resume_path} at epoch {start_ep} (best {best:.4f})")
+    for ep in range(start_ep, args.epochs):
         t0 = time.time()
         order = []
+        # The permutation must be IDENTICAL on every rank (the batches are then
+        # sharded), so both shuffles run under an epoch-seeded generator.
+        g_ep = torch.Generator().manual_seed(1234 + ep)
         for bi, b in enumerate(train):
-            perm = torch.randperm(len(b["x"]))
+            perm = torch.randperm(len(b["x"]), generator=g_ep)
             order += [(bi, perm[i:i + args.batch_size])
                       for i in range(0, len(perm), args.batch_size)]
-        np.random.shuffle(order)
+        np.random.default_rng(1234 + ep).shuffle(order)
+        if world > 1:
+            while len(order) % world:
+                order.append(order[len(order) % world - 1])  # pad -> equal length
+            order = order[rank::world]
         run = seen = 0.0
         for bi, idx in order:
             b = train[bi]
@@ -246,12 +276,16 @@ def main(argv=None):
                         pb[..., :3], fpb, b["inv_J"], b["mask_c"], subsample=False))
             opt.zero_grad(set_to_none=True)
             loss.backward()
+            ddp.sync_grads(net)
             torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
             opt.step()
             sched.step()
             run += loss.item() * len(idx)
             seen += len(idx)
 
+        ddp.barrier()
+        if not ddp.is_main():
+            continue
         res = evaluate()
         row = "".join(f"{u:>9.4f}{m:>9.4f}" for u, _, m in res)
         print(f"{ep:>6} {run/seen:>10.4f}{row} {sched.get_last_lr()[0]:>9.2e} "
@@ -271,8 +305,13 @@ def main(argv=None):
                         "sph_couple_band": args.sph_couple_band,
                         "sph_couple_shared": args.sph_couple_shared,
                         "wavelet": not args.no_wavelet,
+                        "sph_degree_mlp": args.sph_degree_mlp,
+                        "gno_radius": args.gno_radius, "gno_k": args.gno_k,
                         "n_slices": 0,
                         "test_rel_l2": best, "out_channels": 4}, args.out)
+        torch.save({"model": net.state_dict(), "opt": opt.state_dict(),
+                    "sched": sched.state_dict(), "epoch": ep, "best": best},
+                   resume_path)
     print(f"\nbest worst-resolution u {best:.4f}, saved to {args.out}")
     return 0
 

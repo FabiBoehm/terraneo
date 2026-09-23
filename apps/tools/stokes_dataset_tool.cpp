@@ -199,6 +199,8 @@ int main( int argc, char** argv )
 
     std::string outdir    = "stokes_dataset";
     std::string check_sample;
+    std::string apply_batch;
+    int         apply_count = 1 << 30;
     int         min_level = 2;
     int         max_level = 4;
     double      r_min = 0.5, r_max = 1.0;
@@ -215,6 +217,12 @@ int main( int argc, char** argv )
             app, "--validate", validate, "Check the discrete operator against the analytic test case." );
         add_option_with_default(
             app, "--check-sample", check_sample, "Path of a generated sample .bin to verify against the operator." );
+        add_option_with_default(
+            app, "--apply-batch", apply_batch,
+            "Directory holding e_%06d.bin error fields (float32: 3*nv velocity + np pressure); "
+            "applies the discrete Stokes operator with no-slip BCs and constant viscosity and "
+            "writes r_%06d.bin residual pairs next to them." );
+        add_option_with_default( app, "--apply-count", apply_count, "Max number of e-files to process." );
         CLI11_PARSE( app, argc, argv );
     }
 
@@ -306,6 +314,136 @@ int main( int argc, char** argv )
     }
 
     // ------------------------------------------------------------------ sample check
+    if ( !apply_batch.empty() )
+    {
+        auto dom_v = build( max_level );
+        auto dom_p = build( max_level - 1 );
+
+        auto shell_v = grid::shell::subdomain_unit_sphere_single_shell_coords< ScalarType >( dom_v );
+        auto radii_v = grid::shell::subdomain_shell_radii< ScalarType >( dom_v );
+        auto mask_v  = grid::setup_node_ownership_mask_data( dom_v );
+        auto mask_p  = grid::setup_node_ownership_mask_data( dom_p );
+        auto bmask_v = grid::shell::setup_boundary_mask_data( dom_v );
+
+        const int n_sd_v = static_cast< int >( dom_v.subdomains().size() );
+        const int nx_v   = dom_v.domain_info().subdomain_num_nodes_per_side_laterally();
+        const int nr_v   = dom_v.domain_info().subdomain_num_nodes_radially();
+        const int n_sd_p = static_cast< int >( dom_p.subdomains().size() );
+        const int nx_p   = dom_p.domain_info().subdomain_num_nodes_per_side_laterally();
+        const int nr_p   = dom_p.domain_info().subdomain_num_nodes_radially();
+
+        const std::size_t nv = static_cast< std::size_t >( n_sd_v ) * nx_v * nx_v * nr_v;
+        const std::size_t np = static_cast< std::size_t >( n_sd_p ) * nx_p * nx_p * nr_p;
+
+        VectorQ1Scalar< ScalarType >  eta( "eta", dom_v, mask_v );
+        VectorQ1IsoQ2Q1< ScalarType > e( "e", dom_v, dom_p, mask_v, mask_p );
+        VectorQ1IsoQ2Q1< ScalarType > Ke( "Ke", dom_v, dom_p, mask_v, mask_p );
+        linalg::assign( eta, ScalarType( 1 ) );
+
+        // The operator the deployed FGMRES applies: no-slip (Dirichlet) at both shells.
+        grid::shell::BoundaryConditions bcs_ns = {
+            { grid::shell::ShellBoundaryFlag::CMB, grid::shell::BoundaryConditionFlag::DIRICHLET },
+            { grid::shell::ShellBoundaryFlag::SURFACE, grid::shell::BoundaryConditionFlag::DIRICHLET } };
+        Stokes K( dom_v, dom_p, shell_v, radii_v, bmask_v, eta.grid_data(), bcs_ns, false );
+
+        std::vector< float > raw( 3 * nv + np );
+        int                  done = 0;
+        for ( int idx = 0; idx < apply_count; ++idx )
+        {
+            char name[64];
+            std::snprintf( name, sizeof( name ), "/e_%06d.bin", idx );
+            std::ifstream in( apply_batch + name, std::ios::binary );
+            if ( !in )
+                break;
+            in.read( reinterpret_cast< char* >( raw.data() ),
+                     static_cast< std::streamsize >( raw.size() * sizeof( float ) ) );
+            if ( static_cast< std::size_t >( in.gcount() ) != raw.size() * sizeof( float ) )
+            {
+                logroot << name << ": short read, stopping\n";
+                break;
+            }
+
+            {
+                auto host = grid::create_mirror( Kokkos::HostSpace{}, e.block_1().grid_data() );
+                std::size_t flat = 0;
+                for ( int s_ = 0; s_ < n_sd_v; ++s_ )
+                    for ( int i = 0; i < nx_v; ++i )
+                        for ( int j = 0; j < nx_v; ++j )
+                            for ( int k = 0; k < nr_v; ++k, ++flat )
+                                for ( int d = 0; d < 3; ++d )
+                                    host( s_, i, j, k, d ) = raw[flat * 3 + d];
+                grid::deep_copy< ScalarType, 3 >( e.block_1().grid_data(), host );
+            }
+            {
+                auto host = Kokkos::create_mirror( Kokkos::HostSpace{}, e.block_2().grid_data() );
+                std::size_t flat = 0;
+                for ( int s_ = 0; s_ < n_sd_p; ++s_ )
+                    for ( int i = 0; i < nx_p; ++i )
+                        for ( int j = 0; j < nx_p; ++j )
+                            for ( int k = 0; k < nr_p; ++k, ++flat )
+                                host( s_, i, j, k ) = raw[3 * nv + flat];
+                Kokkos::deep_copy( e.block_2().grid_data(), host );
+            }
+
+            // Optional per-sample viscosity: eta_%06d.bin (nv float32). The operator
+            // holds the eta view, so updating the field updates K -- the same
+            // mechanism the mc app's viscosity update relies on. Absent file = eta 1.
+            {
+                std::snprintf( name, sizeof( name ), "/eta_%06d.bin", idx );
+                std::ifstream ein( apply_batch + name, std::ios::binary );
+                if ( ein )
+                {
+                    std::vector< float > eraw( nv );
+                    ein.read( reinterpret_cast< char* >( eraw.data() ),
+                              static_cast< std::streamsize >( nv * sizeof( float ) ) );
+                    if ( static_cast< std::size_t >( ein.gcount() ) == nv * sizeof( float ) )
+                    {
+                        auto host = Kokkos::create_mirror( Kokkos::HostSpace{}, eta.grid_data() );
+                        std::size_t flat = 0;
+                        for ( int s_ = 0; s_ < n_sd_v; ++s_ )
+                            for ( int i = 0; i < nx_v; ++i )
+                                for ( int j = 0; j < nx_v; ++j )
+                                    for ( int k = 0; k < nr_v; ++k, ++flat )
+                                        host( s_, i, j, k ) = eraw[flat];
+                        Kokkos::deep_copy( eta.grid_data(), host );
+                    }
+                }
+            }
+
+            linalg::apply( K, e, Ke );
+
+            {
+                auto host = grid::create_mirror( Kokkos::HostSpace{}, Ke.block_1().grid_data() );
+                grid::deep_copy< ScalarType, 3 >( host, Ke.block_1().grid_data() );
+                std::size_t flat = 0;
+                for ( int s_ = 0; s_ < n_sd_v; ++s_ )
+                    for ( int i = 0; i < nx_v; ++i )
+                        for ( int j = 0; j < nx_v; ++j )
+                            for ( int k = 0; k < nr_v; ++k, ++flat )
+                                for ( int d = 0; d < 3; ++d )
+                                    raw[flat * 3 + d] = static_cast< float >( host( s_, i, j, k, d ) );
+            }
+            {
+                auto host = Kokkos::create_mirror( Kokkos::HostSpace{}, Ke.block_2().grid_data() );
+                Kokkos::deep_copy( host, Ke.block_2().grid_data() );
+                std::size_t flat = 0;
+                for ( int s_ = 0; s_ < n_sd_p; ++s_ )
+                    for ( int i = 0; i < nx_p; ++i )
+                        for ( int j = 0; j < nx_p; ++j )
+                            for ( int k = 0; k < nr_p; ++k, ++flat )
+                                raw[3 * nv + flat] = static_cast< float >( host( s_, i, j, k ) );
+            }
+            std::snprintf( name, sizeof( name ), "/r_%06d.bin", idx );
+            std::ofstream out( apply_batch + name, std::ios::binary );
+            out.write( reinterpret_cast< const char* >( raw.data() ),
+                       static_cast< std::streamsize >( raw.size() * sizeof( float ) ) );
+            ++done;
+        }
+        logroot << "applied the discrete Stokes operator to " << done << " error fields in " << apply_batch
+                << "\n";
+        return 0;
+    }
+
     if ( !check_sample.empty() )
     {
         auto dom_v = build( max_level );
