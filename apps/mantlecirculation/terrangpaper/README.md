@@ -11,8 +11,7 @@ production/           the MT1024 MMOC production run
 scaling/              strong-scaling sweep
   config_scal_A3.toml                    the sweep case, current app
   sng2_reproduction/                     SuperMUC-NG Phase 2, current app
-  lumi/                                  LUMI-G launch scripts, as they ran
-  lumi_reproduction/                     LUMI-G, current app (generate.sh + feed_lumi.sh)
+  lumi_reproduction/                     LUMI-G, current app (generate_std.sh + feed_std.sh)
   submit/                                sweep generators and collector
 ```
 
@@ -137,15 +136,30 @@ The app reports `(T, u, p)` separately. The paper's per-level DoF totals are
 
 ## Two caveats when comparing machines
 
-**The archived LUMI scripts would not write a usable timer tree on the current
-app.** 114 of the 123 pass `--output-frequency 11` alongside `--max-timesteps 10`,
-and output fires only when the step index divides evenly, so nothing lands after
-step 0. Yet the published LUMI table marks 82 of its 88 points as tree-derived
-(6 as log-derived), and a `.pre-trees` version of the same table exists, so the
-trees were obtained after the archived scripts, by a run or an app version not
-in this tree. The reproduction in `scaling/lumi_reproduction/` sidesteps the
-question by using `--output-frequency 9`, which writes exactly one
-`timer_tree_9.json` per point, the same convention as the sng2 reproduction.
+**Two different LUMI campaigns exist, and only one produced the paper.** The set
+that was archived in the paper repo passes `--output-frequency 11` alongside
+`--max-timesteps 10`, so it writes no timer tree at all, yet 82 of the 88
+published LUMI points are tree-derived. The real campaign lives on LUMI in
+`~/terraneo/apps/mantlecirculation/bench_mt/jobs`, 79 scripts (37 standard,
+42 low-memory), all at output-frequency 9, with its outputs still on scratch.
+`points_std_treeera.txt` is its standard-mode point table, extracted from those
+scripts; `generate_std.sh` rebuilds the sweep from it. The archived set has been
+removed from this tree because it is not what produced the published numbers.
+
+**The subdomain decomposition is the thing to get right.** The original sets the
+lateral and radial subdomain levels independently and they are usually unequal:
+(0,1) at 4 GCDs, (1,0) at 8, (2,0) at 32, (3,1) at 256. An earlier reproduction
+passed a single `--refinement-level-subdomains N`, which applies N to both axes.
+The result was unambiguous over 31 comparable points:
+
+| decomposition | points | median deviation from published |
+|---|---|---|
+| matches the original | 10 | -1.9 % (range -4.3 to +7.7) |
+| differs | 21 | +55.7 % (range +1.6 to +316.7) |
+
+Not one matching point was slow and not one mismatched point was fast. The
+timing trees show why: at 8 GCDs the communication share rose from 30 % to 44 %,
+at 32 GCDs from 38 % to 59 %. Always pass `--lat-sdr` and `--rad-sdr`.
 
 **The launch scripts keep their original absolute paths.** They are the record of
 what actually ran, so the LUMI ones still point into `/pfs/lustrep3/...` and the
