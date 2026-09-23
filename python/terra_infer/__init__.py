@@ -94,28 +94,6 @@ def scale_model(fields):
     return {name: 0.5 * array for name, array in fields.items()}
 
 
-@register("wavelet3d")
-def wavelet3d_operator(fields):
-    """3-D wavelet attention: SAOT's wavelet branch lifted to 3-D, Fourier
-    branch and fusion gate removed. Couples all three axes, so unlike 'saot'
-    it sees radial structure. See wavelet3d for the details."""
-    from . import operator as _w3d
-
-    return _w3d.apply(fields)
-
-
-@register("saot")
-def saot(fields):
-    """SAOT spectral-attention operator transformer, applied shell by shell.
-
-    See saot_adapter for the 3-D-to-2-D mapping and its limits. Needs
-    $TERRA_SAOT_ROOT; without $TERRA_SAOT_CHECKPOINT the weights are random.
-    """
-    from . import saot_adapter
-
-    return saot_adapter.apply(fields)
-
-
 @register("torch")
 def torch_model(fields):
     """Runs the TorchScript module named by ``$TERRA_NEURAL_CHECKPOINT``.
@@ -168,7 +146,7 @@ def cband_preconditioner(fields):
     import torch
 
     from . import stokes_residual
-    from .operator import Model, load_state
+    from .operator import load_state
 
     # Fixed-reference core ($TERRA_CBAND_REF_STRIDE = 2^(level - ref_level)):
     # restrict the incoming residual to the trained reference mesh, run the
@@ -214,24 +192,7 @@ def cband_preconditioner(fields):
         coords = np.fromfile(cpath, dtype=np.float64)
         coords = coords.reshape(shape[0], shape[1], shape[2], shape[3], 3)
         def _build_linear(ck_):
-            from .operator import LinearOperator, OctaveOperator
-
-            if ck_.get("linear_octave"):
-                rc = os.environ.get("TERRA_CBAND_REF_COORDS",
-                                    "/hppfs/scratch/0E/di35guv2/ml/stokes_10k/"
-                                    "coords_velocity.bin")
-                rcoords = np.fromfile(rc, dtype=np.float64)
-                rn = round(((rcoords.size / 30) ** (1 / 3)))
-                rcoords = rcoords.reshape(10, rn, rn, rn, 3)
-                n = OctaveOperator(5, 4, (rn, rn, rn), rcoords,
-                                   n_hidden=ck_["hidden"], n_blocks=ck_["heads"],
-                                   lmax=ck_.get("spherical", 16) or 16,
-                                   kmax=ck_.get("radial_modes", 8) or 8,
-                                   n_conv=ck_.get("linear_convs", 2),
-                                   kernel=ck_.get("linear_kernel", 5),
-                                   coords=coords, shape=shape[1:4]).to(dev).eval()
-                load_state(n, ck_["model"])
-                return n
+            from .operator import LinearOperator
 
             # with a hypernetwork Green the deployment truncation is free --
             # $TERRA_CBAND_LMAX / $TERRA_CBAND_KMAX scale it to the mesh
@@ -256,20 +217,10 @@ def cband_preconditioner(fields):
             load_state(n, ck_["model"])
             return n
 
-        if ck.get("linear"):
-            net = _build_linear(ck)
-        else:
-            net = Model(9, 4, shape[1:4], n_hidden=ck["hidden"], n_layers=ck["layers"],
-                    n_heads=ck["heads"], coords=coords, head_mlp=True,
-                    attention=ck.get("attention", "softmax"),
-                    spherical=ck.get("spherical", 0),
-                    radial_modes=ck.get("radial_modes", 0),
-                    per_degree=ck.get("per_degree", False),
-                    sph_couple=ck.get("sph_couple", False),
-                    sph_couple_band=ck.get("sph_couple_band", 0),
-                    sph_couple_shared=ck.get("sph_couple_shared", False),
-                    sph_degree_mlp=ck.get("sph_degree_mlp", False),
-                    wavelet=ck.get("wavelet", True)).to(dev).eval()
+        if not ck.get("linear"):
+            raise RuntimeError("model 'cband' only loads LinearOperator checkpoints "
+                               "(the wavelet/octave models were retired)")
+        net = _build_linear(ck)
         load_state(net, ck["model"])
         from .spherical import node_quadrature
 

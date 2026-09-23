@@ -19,8 +19,8 @@ import numpy as np
 import torch
 
 from . import stokes_residual
-from .operator import LinearOperator, OctaveOperator
-from .train_operator import load_coords, load_split, mean_free, relative_l2
+from .operator import LinearOperator
+from .data import load_coords, load_split, mean_free, relative_l2
 
 
 def rel_l2_per_sample(a, b, eps=1e-12):
@@ -201,11 +201,6 @@ def main(argv=None):
     ap.add_argument("--linear-kernel", type=int, default=5)
     ap.add_argument("--linear-depth-gates", action="store_true")
     ap.add_argument("--mean-p-weight", type=float, default=1.0)
-    ap.add_argument("--octave", action="store_true",
-                    help="train the OctaveOperator: shared per-octave stencils "
-                         "+ a spectral Green core fixed at the level-1 "
-                         "(reference) mesh -- discretisation independence by "
-                         "construction, no hypernetwork, cheap mesh swaps.")
     ap.add_argument("--batch-mix", action="store_true",
                     help="interleave the levels PER BATCH (shuffled) instead of "
                          "per epoch: removes the level seesaw the alternating "
@@ -287,7 +282,7 @@ def main(argv=None):
                     help="route log-eta into the FiLM gates (as train_operator)")
     ap.add_argument("--eta-green", action="store_true",
                     help="condition the Green hypernetwork on the sample's radial "
-                         "log-eta profile (as train_operator; level-free)")
+                         "log-eta profile (level-free)")
     ap.add_argument("--max-train", type=int, default=None)
     ap.add_argument("--max-test", type=int, default=None)
     ap.add_argument("--epoch-frac", default=None,
@@ -378,29 +373,22 @@ def main(argv=None):
         print(f"  level tensors cached on {args.device} ({gb:.1f} GB)")
 
     lv0 = levels[0]
-    if args.octave:
-        net = OctaveOperator(5, 4, lv0["shape"][1:4], lv0["coords"],
-                             n_hidden=args.hidden, n_blocks=args.heads,
-                             lmax=lv0["lmax"], kmax=lv0["kmax"],
-                             n_conv=args.linear_convs,
-                             kernel=args.linear_kernel).to(dev)
-    else:
-        net = LinearOperator(5, 4, lv0["shape"], lv0["coords"],
-                         n_hidden=args.hidden, n_blocks=args.heads,
-                         lmax=lv0["lmax"], kmax=lv0["kmax"],
-                         n_conv=args.linear_convs, kernel=args.linear_kernel,
-                         depth_gates=args.linear_depth_gates,
-                         eta_gates=args.eta_gates, eta_green=args.eta_green,
-                         nonlin=args.nonlin, dilated=args.dilated_stencils,
-                         level_cond=args.level_cond, pyramid=args.pyramid,
-                         level_pyramid=args.level_pyramid,
-                         stencil_scale=args.stencil_scale, eta_lateral=args.eta_lateral,
-                         eta_stencils=args.eta_stencils, multi_dilation=args.multi_dilation,
-                         mode_attn=args.mode_attn, bank_bottleneck=args.bank_bottleneck,
-                         sep_stencils=args.sep_stencils, channels_last=args.channels_last,
-                         seam_average=args.seam_average, eta_embed_dim=args.eta_embed_dim,
-                         eta_quant=args.eta_quant, grad_checkpoint=args.grad_checkpoint,
-                         green_mlp=True).to(dev)
+    net = LinearOperator(5, 4, lv0["shape"], lv0["coords"],
+                     n_hidden=args.hidden, n_blocks=args.heads,
+                     lmax=lv0["lmax"], kmax=lv0["kmax"],
+                     n_conv=args.linear_convs, kernel=args.linear_kernel,
+                     depth_gates=args.linear_depth_gates,
+                     eta_gates=args.eta_gates, eta_green=args.eta_green,
+                     nonlin=args.nonlin, dilated=args.dilated_stencils,
+                     level_cond=args.level_cond, pyramid=args.pyramid,
+                     level_pyramid=args.level_pyramid,
+                     stencil_scale=args.stencil_scale, eta_lateral=args.eta_lateral,
+                     eta_stencils=args.eta_stencils, multi_dilation=args.multi_dilation,
+                     mode_attn=args.mode_attn, bank_bottleneck=args.bank_bottleneck,
+                     sep_stencils=args.sep_stencils, channels_last=args.channels_last,
+                     seam_average=args.seam_average, eta_embed_dim=args.eta_embed_dim,
+                     eta_quant=args.eta_quant, grad_checkpoint=args.grad_checkpoint,
+                     green_mlp=True).to(dev)
     print(f"  model {sum(p.numel() for p in net.parameters())/1e6:.2f}M params on {dev}")
     if args.init_from:
         ck0 = torch.load(os.path.expanduser(args.init_from), map_location=dev,
@@ -425,17 +413,13 @@ def main(argv=None):
     # Per-level buffer cache: swapping meshes must not re-run the pinv.
     keys = net.mesh_buffer_names
     for lv in levels:
-        net.set_mesh(lv["shape"][1:4] if args.octave else lv["shape"],
+        net.set_mesh(lv["shape"],
                      lv["coords"], lv["lmax"], lv["kmax"])
         lv["bufs"] = {k: getattr(net, k).clone() for k in keys if hasattr(net, k)}
-        lv["depth"] = getattr(net, "depth", 0)
 
     def use(lv):
         net.shape_in = tuple(lv["shape"])
-        if args.octave:
-            net.depth = lv["depth"]
-        else:
-            net.lmax, net.kmax = lv["lmax"], lv["kmax"]
+        net.lmax, net.kmax = lv["lmax"], lv["kmax"]
         for k, v in lv["bufs"].items():
             net.register_buffer(k, v, persistent=False)
 
@@ -645,7 +629,7 @@ def main(argv=None):
                         "linear_kernel": args.linear_kernel,
                         "linear_depth_gates": args.linear_depth_gates,
                         "linear_radial_dense": False,
-                        "linear_green_mlp": not args.octave,
+                        "linear_green_mlp": True,
                         "linear_eta_gates": args.eta_gates,
                         "linear_eta_green": args.eta_green,
                         "linear_nonlin": args.nonlin,
@@ -669,7 +653,6 @@ def main(argv=None):
                         "linear_level_pyramid": args.level_pyramid,
                         "linear_dilated": args.dilated_stencils,
                         "linear_level_cond": args.level_cond,
-                        "linear_octave": args.octave,
                         "test_rel_l2": score, "out_channels": 4}, args.out)
         if _is_main():
             torch.save({"model": net.state_dict(), "opt": opt.state_dict(),

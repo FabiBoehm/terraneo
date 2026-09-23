@@ -21,9 +21,8 @@ embedded interpreter in `terra::ml::NeuralSolver`.
 
 ## The spectral operator
 
-The model lives in `terra_infer.operator` (`terra_infer.wavelet3d` and
-`terra_infer.train_wavelet3d` remain as import shims — the old name reflected the
-retired wavelet ancestry, not the architecture). It is a stack of pointwise layers
+The model lives in `terra_infer.operator` (the wavelet, SAOT, multires and octave code was removed in September 2026;
+the trainer is `terra_infer.train_linear_mr`). It is a stack of pointwise layers
 coupled by a **spectral branch**, and every
 component is either pointwise or acts on a fixed set of modes:
 
