@@ -79,7 +79,17 @@ def _assembled_cache(root, max_train, max_test, eta_power, build):
             np.save(os.path.join(tmp, n + ".npy"),
                     v.numpy() if isinstance(v, torch.Tensor) else np.asarray(v))
         np.save(os.path.join(tmp, "stats.npy"), np.asarray(stats, dtype=np.float64))
-        os.replace(tmp, d)
+        try:
+            os.replace(tmp, d)
+        except OSError:
+            # Another rank or job built the same cache first. os.replace cannot
+            # overwrite a non-empty directory, and theirs is complete (they also
+            # built into a temp dir and renamed), so discard ours and use it.
+            if os.path.isdir(d):
+                import shutil
+                shutil.rmtree(tmp, ignore_errors=True)
+            else:
+                raise
         print("  assembled cache -> %s" % os.path.basename(d), flush=True)
     st = np.load(os.path.join(d, "stats.npy"))
     # Staging. Batches are drawn by fancy-indexing random sample ids, so a memory-mapped
