@@ -169,24 +169,28 @@ every feature by a factor that depends on the viscosity and position at that nod
 
 $$v\ \leftarrow\ g_{in}(\eta)\odot\left(W_P\,f\right).$$
 
-$W_P\in\mathbb R^{d_v\times4}$ has no bias. $g_{in}$ is a two-layer MLP
-$\mathbb R^5\to\mathbb R^{d_v}$ whose five inputs are the four geometry numbers and the
-standardised $\log\eta$ at that node.
+$W_P\in\mathbb R^{d_v\times4}$ is a learned matrix with no bias. $g_{in}$ is a learned
+two-layer MLP, $\mathrm{Linear}(5\to128)$, GELU, $\mathrm{Linear}(128\to128)$, evaluated
+at each node on the four geometry numbers and the standardised $\log\eta$ there; its
+output is the vector of $d_v$ scale factors.
 
 **Step 2 — the integral term, applied once.** The global coupling; sections 1 and 2
 below define $\mathcal K(\eta)$:
 
 $$v\ \leftarrow\ v+\mathcal K(\eta)\,v.$$
 
-**Step 3 — local layers, $n_{loc}$ of them.** Each has its own weights
-$\mathcal W_t(\eta)$ (section 3) and its own gate $g_t$, an MLP of the four geometry
-numbers only:
+**Step 3 — local layers, $n_{loc}$ of them.** Each layer $t$ has its own stencil
+operator $\mathcal W_t(\eta)$ — a $5^3$ stencil whose weights depend on the local
+viscosity, defined in full in section 3 — and its own gate $g_t$, a learned MLP
+$\mathrm{Linear}(4\to128)$, GELU, $\mathrm{Linear}(128\to128)$ of the four geometry
+numbers only (position and depth, not viscosity):
 
 $$v\ \leftarrow\ v+\mathcal W_t(\eta)\left(g_t\odot v\right),\qquad t=1,\dots,n_{loc}.$$
 
-**Step 4 — project.** Rescale by an output gate of the same form as $g_{in}$, map the
-$d_v$ features back to the four components of $x=(u,p)$ with a bias-free
-$W_Q\in\mathbb R^{4\times d_v}$, and project onto the finite-element space:
+**Step 4 — project.** Rescale by an output gate $g_{out}$ of exactly the same form and
+inputs as $g_{in}$ (separate weights), map the $d_v$ features back to the four
+components of $x=(u,p)$ with a learned bias-free $W_Q\in\mathbb R^{4\times d_v}$, and
+project onto the finite-element space:
 
 $$x\ \leftarrow\ \Pi\left(W_Q\left(g_{out}(\eta)\odot v\right)\right).$$
 
@@ -259,8 +263,9 @@ numbers through an MLP $32\to64\to16$. The result $e(\eta)\in\mathbb R^{16}$ is 
 embedding. (Its last layer is initialised small, so at the start of training every
 sample gets nearly the same kernel and the dependence on $\eta$ is learned gradually.)
 
-*Generating the entries.* A network $\Gamma$ with $3+16=19$ inputs and $n_b b_s^2=2048$
-outputs is evaluated once per index triple $(\ell,k,k')$:
+*Generating the entries.* A learned network $\Gamma$ — $\mathrm{Linear}(19\to64)$, GELU,
+$\mathrm{Linear}(64\to64)$, GELU, $\mathrm{Linear}(64\to2048)$, with $3+16=19$ inputs and
+$n_b b_s^2=2048$ outputs — is evaluated once per index triple $(\ell,k,k')$:
 
 $$\left[G_\ell\right]^{(q)}_{(c,k),(c',k')}
 =\Gamma\!\left(\frac{\ell}{\ell_{\max}},\ \frac{k}{k_{\max}},\ \frac{k'}{k_{\max}}\ ;\ e(\eta)\right)^{(q)}_{cc'}.$$
@@ -279,10 +284,13 @@ exactly what makes the integral term discretisation convergent.
 *Lateral contrast.* The block-diagonal structure was derived for $\eta=\eta(r)$. When
 the viscosity varies strongly laterally, harmonics of different degree do couple. The
 two experts that serve the highest contrasts add a learned coupling across degrees: an
-attention over the $M$ harmonics whose queries and keys are built, for each $(\ell,m)$,
-from the radial profile of the $(\ell,m)$-component of $\log\eta$ (16 values) and the
-normalised $\ell$ and $m$ (2 values), giving an $M\times M$ mixing matrix that is added
-through a gate initialised at zero. Because it is built from $\eta$ alone, it is a fixed
+attention over the $M$ harmonics. For each $(\ell,m)$ an 18-vector is formed from the
+radial profile of the $(\ell,m)$-component of $\log\eta$ (16 values) and the normalised
+$\ell$ and $m$ (2 values); learned matrices $Q_a,K_a\in\mathbb R^{32\times18}$ (with
+biases) map it to a query and a key, and $A=\mathrm{softmax}(QK^{\top}/\sqrt{32})$ is an
+$M\times M$ mixing matrix applied to the coefficients of every channel group. It is added
+through a learned gate $\in\mathbb R^{n_b}$, one scalar per channel group, initialised
+at zero. Because it is built from $\eta$ alone, it is a fixed
 linear map of the coefficients for a given problem.
 
 ### 3. The local term is a short-range kernel, not a pointwise one
@@ -307,13 +315,17 @@ Reading it term by term:
 - $W_{t,\delta}\in\mathbb R^{d_v\times d_v}$ is a dense weight for each offset: a standard
   $5^3$ convolution with $128\to128$ channels, the same at every node.
 - $\Psi^{(j)}_{t,\delta}$ are $J=4$ further kernels. To keep them affordable they act
-  through a *bottleneck*: the features are projected $128\to32$ by a $1\times1\times1$
-  convolution, each $\Psi^{(j)}$ is a $5^3$ kernel with $32\to32$ channels, and the
-  mixed result is projected $32\to128$. This is what the expert table calls "bank
-  width".
-- $\lambda_j(\eta;x_i)$ are the mixing weights: a softmax over $j$ output by a two-layer
-  MLP whose three inputs are $\log\eta$ at $x_i$ and the mean and standard deviation of
-  $\log\eta$ over the same $5^3$ window. The mean says how stiff the neighbourhood is,
+  through a *bottleneck*: the features are projected $128\to32$ by a learned matrix
+  $B_{in}\in\mathbb R^{32\times128}$ (a $1\times1\times1$ convolution, no bias), each
+  $\Psi^{(j)}_t$ is a $5^3$ kernel with $32\to32$ channels, and the mixed result is
+  projected back by $B_{out}\in\mathbb R^{128\times32}$. $B_{in}$ and $B_{out}$ are
+  shared by all local layers; the kernels are per layer. In the formula above,
+  $\Psi^{(j)}_{t,\delta}$ stands for the composite $B_{out}\Psi^{(j)}_{t,\delta}B_{in}$.
+  The bottleneck width 32 is what the expert table calls "bank width".
+- $\lambda_j(\eta;x_i)$ are the mixing weights: a softmax over $j$ output by a learned
+  two-layer MLP, $\mathrm{Linear}(3\to32)$, GELU, $\mathrm{Linear}(32\to J)$, one per
+  local layer, whose three inputs are $\log\eta$ at $x_i$ and the mean and standard
+  deviation of $\log\eta$ over the same $5^3$ window. The mean says how stiff the neighbourhood is,
   the deviation says whether an interface runs through it.
 
 So every node has its own effective stencil, chosen by the viscosity around it. This term
@@ -349,6 +361,75 @@ learning that small loads behave like large ones, cannot produce spurious flow f
 forcing, and cannot drift out of the class during training. The `--nonlin` flag inserts
 a GELU after the integral and local terms and gives all of this up; it is off in every
 deployed expert.
+
+### Every learned parameter
+
+The table lists every learned object in the model, where it acts, its exact form, and
+its parameter count. "Bias" means the layer has an additive bias; every layer on the
+path the forcing takes has none, and every layer with a bias acts only on viscosity and
+geometry — that split is what section 4 relies on.
+
+| symbol | acts in | exact form | parameters |
+|---|---|---|---|
+| $W_P$ | step 1 | $\mathrm{Linear}(4\to128)$, no bias | 512 |
+| $g_{in}$ | step 1 | $\mathrm{Linear}(5\to128)$+bias, GELU, $\mathrm{Linear}(128\to128)$+bias | 17 280 |
+| $e(\eta)$ | section 2 | $\mathrm{Linear}(32\to64)$+bias, GELU, $\mathrm{Linear}(64\to16)$+bias | 3 152 |
+| $\Gamma$ | section 2 | $\mathrm{Linear}(19\to64)$+bias, GELU, $\mathrm{Linear}(64\to64)$+bias, GELU, $\mathrm{Linear}(64\to2048)$+bias | 138 560 |
+| $Q_a$, $K_a$, gate | section 2, high/top experts only | $\mathrm{Linear}(18\to32)$+bias, twice; gate $\in\mathbb R^{8}$ | 608 + 608 + 8 |
+| $g_t$ | step 3, per local layer | $\mathrm{Linear}(4\to128)$+bias, GELU, $\mathrm{Linear}(128\to128)$+bias | 17 152 per layer |
+| $W_{t,\delta}$ | section 3, per local layer | $5^3$ convolution, $128\to128$ channels, no bias: $128\cdot128\cdot125$ | 2 048 000 per layer |
+| $B_{in}$, $B_{out}$ | section 3, shared by all local layers | $1^3$ convolutions $128\to32$ and $32\to128$, no bias | 4 096 each |
+| $\Psi^{(j)}_t$ | section 3, per local layer | $J=4$ kernels, $5^3$, $32\to32$, no bias: $4\cdot32\cdot32\cdot125$ | 512 000 per layer |
+| $\lambda$-MLP | section 3, per local layer | $\mathrm{Linear}(3\to32)$+bias, GELU, $\mathrm{Linear}(32\to4)$+bias | 260 per layer |
+| $g_{out}$ | step 4 | as $g_{in}$, separate weights | 17 280 |
+| $W_Q$ | step 4 | $\mathrm{Linear}(128\to4)$, no bias | 512 |
+| $\gamma$ | defect correction, optional | one scalar, initial value 0.25 | 1 |
+
+The transform matrices $Y$, $Y_r$ and their pseudo-inverses are *not* learned: they are
+computed from the node positions of each level and stored as buffers. Nor are the
+geometry features.
+
+The four deployed experts are exactly these pieces in different combinations, and the
+counts add up to the checkpoint sizes:
+
+| | generalist | mid | high | top |
+|---|---|---|---|---|
+| $n_{loc}$ | 4 | 4 | 4 | 8 |
+| $W_{t,\delta}$, all layers | 8 192 000 | 8 192 000 | 8 192 000 | 16 384 000 |
+| $\Psi$ banks, all layers | – | 32 768 000 (full width, $128\to128$) | 2 048 000 | 4 096 000 |
+| $B_{in}+B_{out}$ | – | – (no bottleneck) | 8 192 | 8 192 |
+| $\lambda$-MLPs | – | 1 040 | 1 040 | 2 080 |
+| $g_t$, all layers | 68 608 | 68 608 | 68 608 | 137 216 |
+| $\Gamma$ + $e(\eta)$ | 141 712 | 141 712 | 141 712 | 141 712 |
+| degree attention | – | – | 1 224 | 1 224 |
+| $W_P$, $W_Q$, $g_{in}$, $g_{out}$ | 35 584 | 35 584 | 35 584 | 35 584 |
+| **total** | **8 437 904** | **41 206 944** | **10 496 360** | **20 806 008** |
+
+Two readings of this table. The integral term — everything that makes the model a
+neural operator in the FNO sense — is 0.14 M parameters, under 2% of the smallest
+expert; the local stencils are the rest. And the mid expert is four times the size of
+the others only because its banks act at full width, which the bottleneck later made
+unnecessary.
+
+### Experimental: attention between viscosity patches
+
+Not part of any deployed expert; under test (`--phys-attn 32`). It adds long-range
+coupling that neither the truncated harmonics nor the stencils can express, in the
+spirit of Transolver's physics attention (Wu et al., ICML 2024) but keyed on the
+viscosity so that linearity in $f$ survives. Every node $i$ is assigned softly to
+$M_p=32$ patches by weights $w_{im}$, a softmax over $m$ of a learned MLP
+$\mathrm{Linear}(7\to64)$, GELU, $\mathrm{Linear}(64\to32)$ of seven viscosity and
+geometry numbers ($\log\eta$, its $5^3$ mean and spread, and the four geometry
+features). The features are averaged into one token per patch,
+$s_m=\sum_i w_{im}v_i/\sum_i w_{im}$, and the same weights average the seven inputs into
+a descriptor $c_m$ of what each patch physically is. Learned
+$Q_p,K_p\in\mathbb R^{32\times7}$ (with biases) turn descriptors into queries and keys,
+$A=\mathrm{softmax}(QK^{\top}/\sqrt{32})$ lets the patches attend to each other, and the
+result is scattered back through a gate $\in\mathbb R^{128}$ initialised at zero:
+$v_i\leftarrow v_i+\mathrm{gate}\odot\sum_m w_{im}(As)_m$. Since $w$, $A$ and the gate
+depend on $\eta$ and geometry only, the module is a linear map of $v$; 3 232 parameters;
+cost $O(P\,M_p\,d_v)$, about 0.1% of the local branch at level 6. It sits between the
+last local layer and step 4.
 
 ### Projection, defect correction, experts
 
