@@ -368,6 +368,47 @@ $$\widehat{(\mathcal Kv)}^{(q)}\ \leftarrow\ \widehat{(\mathcal Kv)}^{(q)}+\text
 Because $A$ is built from $\eta$ alone, this remains a fixed linear map of the
 coefficients for a given problem.
 
+### What if the viscosity is not layered?
+
+Section 1 derived the block-diagonal form for $\eta=\eta(r)$. A slab or a plume is a
+lateral variation, and for $\eta=\eta(r,\theta,\varphi)$ the inverse is *not*
+block-diagonal: a load in one harmonic drives flow in every harmonic, with a dense
+coupling that depends on the shape of $\eta$. This is the central difficulty of the
+problem, and the architecture is organised around the way the exact operator decomposes.
+
+Split the viscosity into its radial mean and the lateral anomaly,
+$\eta=\eta_0(r)+\delta\eta(x)$, so that $K_\eta=K_0+\delta K$ with $K_0$ the layered
+operator and $\delta K=-\nabla\cdot\left(2\,\delta\eta\,\varepsilon(\cdot)\right)$, which
+is *local*: it only differentiates and multiplies by $\delta\eta$. Then
+
+$$K_\eta^{-1}=K_0^{-1}-K_0^{-1}\,\delta K\,K_0^{-1}+K_0^{-1}\,\delta K\,K_0^{-1}\,\delta K\,K_0^{-1}-\cdots$$
+
+The exact inverse for laterally varying viscosity alternates the layered *global*
+operator with *local* corrections weighted by the anomaly. The model mirrors this term
+by term:
+
+- **$K_0^{-1}$ is the integral term.** $G_\ell$ is generated from the radial mean and
+  spread of $\log\eta$, so it is the layered inverse for this sample's profile — exact
+  for the first term of the series and blind to everything after it.
+- **$\delta K$ is the local term.** A stencil whose weights are chosen at each node by
+  the local $\log\eta$, its mean and its spread is a learned local operator weighted by
+  the anomaly: a more capable $\delta K$, free to absorb what the truncation of $K_0^{-1}$
+  missed as well. This is where lateral structure is handled, which is why the local term
+  holds 98% of the parameters and why removing it leaves 0.8 error at every level.
+- **The second $K_0^{-1}$ is the gap.** The series' second term ends with a *global*
+  operator applied after the local correction. The model applies the integral term once,
+  before the local layers, and not again: it is global → local where the true operator
+  is global → local → global → … . Three mechanisms partially fill this: the degree
+  attention of section 2 (a low-rank stand-in for the off-diagonal coupling, inside the
+  spectral step), the defect correction below (a second pass of the whole network through
+  the residual, which contains exactly the missing $\mathcal G\,K_\eta\,\mathcal G$
+  structure), and the experimental patch attention (a global coupling placed after the
+  local layers).
+
+The series converges only for $\|K_0^{-1}\delta K\|<1$, roughly modest contrast. At
+$\chi=10^4$ it does not; the interfaces dominate and want different stencils from the
+near-layered regime, which is the reason for the contrast-routed experts.
+
 ### 3. The local term is a short-range kernel, not a pointwise one
 
 In FNO, $\mathcal W_t$ is pointwise and all spatial coupling is in $\mathcal K_t$. That is
