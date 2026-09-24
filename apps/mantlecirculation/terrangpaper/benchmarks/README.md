@@ -1,6 +1,7 @@
 # Verification benchmarks
 
-Produces `mc_validation_profiles.pdf` and the steady-state Nusselt table.
+Produces Fig. 4 of the preprint, the steady-state radial temperature profiles
+and isosurfaces, and Table 2, the Nusselt numbers.
 
 Ten cases of the Zhong et al. (2008) spherical-shell suite. MMOC at Courant 2.7,
 MT256, free slip at both boundaries, isothermal Dirichlet temperatures.

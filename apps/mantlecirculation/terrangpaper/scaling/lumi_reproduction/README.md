@@ -1,6 +1,6 @@
 # LUMI-G strong-scaling sweep
 
-Produces the LUMI-G line of `cross_vendor_strong_scaling.png`.
+Produces the LUMI-G line of Fig. 5 of the preprint.
 
 37 standard-mode points, MT32 on 1 GCD to MT2048 on 4096 GCDs, 8 ranks per node
 on AMD MI250X. Named `std_MT<level>_g<gcds>_std.sh`.

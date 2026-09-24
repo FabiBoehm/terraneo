@@ -1,6 +1,7 @@
 # Production run
 
-Produces `e2e_diag2x2.pdf`, `e2e_crosscut.png` and `e2e_iso_tdev400.png`.
+Produces Fig. 6 of the preprint: the radial-mean diagnostics, the
+temperature-deviation isosurface and the equatorial cross-cut of the MT1024 run.
 
 `config_MT1024_C5dim_Raeff1e7_mmoc.toml` is the MT1024 end-to-end
 mantle-circulation model: TALA-compressible with MMOC, Frank-Kamenetskii

@@ -1,6 +1,6 @@
 # Hourglass control
 
-Produces `hourglass_stab_convergence.pdf`: stand-alone multigrid residual per
+Produces Fig. 2 of the preprint: stand-alone multigrid residual per
 V-cycle on MT256 (left) and the L2 velocity discretization error over MT32 to
 MT512 (right).
 

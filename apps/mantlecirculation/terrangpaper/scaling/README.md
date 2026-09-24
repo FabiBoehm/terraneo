@@ -1,6 +1,6 @@
 # Strong-scaling sweep
 
-Produces `cross_vendor_strong_scaling.png`: time per timestep against device
+Produces Fig. 5 of the preprint: time per timestep against device
 count, one line per MT resolution.
 
 `config_scal_A3.toml` is the case every point runs: A3 physics, incompressible,

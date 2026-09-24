@@ -1,6 +1,6 @@
 # SuperMUC-NG Phase 2 strong-scaling sweep
 
-Produces the SuperMUC-NG line of `cross_vendor_strong_scaling.png`.
+Produces the SuperMUC-NG line of Fig. 5 of the preprint.
 
 34 standard-mode points, MT32 on 1 device to MT1024 on 512 devices, 8 ranks per
 node on Intel PVC. Named `run_MT<level>_g<devices>_A3_oe.sh`.

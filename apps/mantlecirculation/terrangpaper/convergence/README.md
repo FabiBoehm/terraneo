@@ -1,6 +1,6 @@
 # Stokes convergence on published viscosity profiles
 
-Produces the two tables printed beside `visc_profiles.png`: preconditioned
+Produces the two tables of Fig. 3 of the preprint: preconditioned
 FGMRES iterations to a relative residual of 1e-6, and the relative residual
 reached after a fixed budget of 10 iterations.
 
