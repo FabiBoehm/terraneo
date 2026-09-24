@@ -212,22 +212,64 @@ Compared with the template, three things are different, all on purpose.
 FNO makes the integral cheap by assuming a translation-invariant kernel
 $\kappa(x,y)=\kappa(x-y)$ on a periodic box: the integral is then a convolution, the
 FFT diagonalises it, and the model learns one weight matrix per Fourier mode up to a
-truncation. A spherical shell has no translations, but it has rotations, and the
-corresponding basis is spherical harmonics laterally and, for the radial direction,
-Chebyshev polynomials. Every channel of $v$ is expanded as
+truncation. A spherical shell has no translations, but it has rotations about its
+centre, and the basis adapted to those is spherical harmonics laterally and Chebyshev
+polynomials radially. This subsection defines that expansion; the next two say what the
+model does with it.
 
-$$v(x)=\sum_{\ell=0}^{\ell_{\max}}\ \sum_{m=-\ell}^{\ell}\ \sum_{k=0}^{k_{\max}}
-\hat v_{\ell mk}\ Y_\ell^m(\theta,\varphi)\ T_k(r).$$
+*Coordinates.* Write a point as $x=(r,\theta,\varphi)$: radius $r\in[r_{\min},r_{\max}]$,
+colatitude $\theta\in[0,\pi]$, longitude $\varphi\in[0,2\pi)$. The radius is mapped to
+the Chebyshev interval by
 
-*How the coefficients are computed.* Let $Y$ be the $\left(10n^2\times M\right)$ matrix
-of the $M=(\ell_{\max}+1)^2$ harmonics evaluated at the lateral node positions, and $Y_r$
-the $(n\times k_1)$ matrix of Chebyshev polynomials at the radial node positions.
-Synthesis (coefficients to node values) is multiplication by $Y$ and $Y_r$. Analysis
-(node values to coefficients) uses their pseudo-inverses $Y^{+}$ and $Y_r^{+}$ rather
-than a quadrature rule — because of the storage layout: seam nodes appear more than
-once, and a quadrature would count them more than once. The pseudo-inverse is the
-least-squares fit, which is insensitive to duplicates. Both matrices depend only on the
-mesh and are built once per level.
+$$\hat r=\frac{2r-r_{\min}-r_{\max}}{r_{\max}-r_{\min}}\in[-1,1].$$
+
+*The basis functions.* $Y_\ell^m(\theta,\varphi)$ are the real spherical harmonics: the
+eigenfunctions of the Laplacian on the unit sphere, indexed by degree $\ell=0,1,2,\dots$
+and order $m=-\ell,\dots,\ell$. Degree sets the lateral scale — $Y_\ell^m$ oscillates
+roughly $\ell$ times around a great circle, so $\ell_{\max}=32$ resolves nothing finer
+than about $1/32$ of the circumference — and the $2\ell+1$ orders of one degree are
+rotated copies of each other, which is the property section 2 exploits. Radially,
+$T_k(\hat r)=\cos(k\arccos\hat r)$ is the Chebyshev polynomial of degree $k$; $T_0=1$,
+$T_1=\hat r$, $T_2=2\hat r^2-1$, and $T_k$ oscillates $k$ times across the shell's
+thickness.
+
+*The expansion.* The feature field $v$ has $d_v$ channels; each channel is a scalar
+field on the shell and is expanded on its own. For one channel,
+
+$$v(r,\theta,\varphi)\ \approx\ \sum_{\ell=0}^{\ell_{\max}}\ \sum_{m=-\ell}^{\ell}\ \sum_{k=0}^{k_{\max}}
+\hat v_{\ell mk}\ \,Y_\ell^m(\theta,\varphi)\ T_k(\hat r),$$
+
+a sum of $M\cdot k_1$ terms, with $M=(\ell_{\max}+1)^2$ lateral functions (all pairs
+$(\ell,m)$ up to $\ell_{\max}$) and $k_1=k_{\max}+1$ radial ones. The coefficients
+$\hat v_{\ell mk}$ are the field's representation in this basis; there is one such set
+of $M k_1$ numbers per channel. Because $Mk_1$ is far smaller than the number of nodes
+— $1089\times17\approx18{,}500$ against $2.75$ million at level 6 — the expansion is a
+*truncation*: it can represent exactly only fields that are smooth at the scale of
+$\ell_{\max}$ and $k_{\max}$, and for any other field the coefficients are chosen as the
+best fit in the least-squares sense. That is why the symbol is $\approx$, and it is the
+reason section 3 exists.
+
+*How the coefficients are computed.* The mesh is a product: every diamond has the same
+$n$ radial layers, so the $10n^3$ stored nodes are $10n^2$ lateral positions
+$(\theta_a,\varphi_a)$ times $n$ radii $\hat r_b$. That lets the transform separate into
+a lateral and a radial factor. Define two fixed matrices from the node positions,
+
+$$Y_{a,(\ell m)}=Y_\ell^m(\theta_a,\varphi_a)\quad(10n^2\times M),\qquad
+(Y_r)_{b,k}=T_k(\hat r_b)\quad(n\times k_1).$$
+
+Arrange one channel of $v$ as a matrix $V$ of size $10n^2\times n$ (lateral node by
+radial node) and its coefficients as $\hat V$ of size $M\times k_1$ (harmonic by radial
+mode). Then
+
+$$\text{synthesis:}\quad V=Y\,\hat V\,Y_r^{\top},\qquad\qquad
+\text{analysis:}\quad \hat V=Y^{+}\,V\,(Y_r^{+})^{\top},$$
+
+where $Y^{+}$ and $Y_r^{+}$ are the Moore–Penrose pseudo-inverses, i.e. the
+least-squares fit. A quadrature rule (weighting each node by the area it represents)
+would be the textbook choice for analysis, but it is wrong for this storage layout: seam
+nodes appear in two or more diamonds and would be counted two or more times. The
+least-squares fit is unaffected by duplicated rows. Both matrices depend only on the
+mesh and are built once per level; they are not learned.
 
 *What the operator does to the coefficients.* If a kernel is invariant under rotations
 of the sphere, it cannot couple a harmonic $(\ell,m)$ to any $(\ell',m')$ with
