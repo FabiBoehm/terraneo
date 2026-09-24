@@ -61,6 +61,3 @@ a CSV is given:
 ```
 python3 lumi_reproduction/collect_lumi.py <outroot> [published.csv]
 ```
-
-The subdomain levels and the environment in each script are the ones the
-published points were run with. Keep them as they are.
