@@ -1,16 +1,21 @@
 # TERRA-NG model description paper: inputs
 
-Configurations and run scripts for the figures and tables of the TERRA-NG
-model description paper. Each subdirectory has its own README naming the
-figure it produces and the command that runs it.
+Configurations and run scripts behind the figures of
 
-| directory | produces |
+> Böhm, Kohl, Ilangovan, Robl, Rezaei, Mohr, Schuberth, Köstler, Bunge, Rüde:
+> *TERRA-NG v1.0: Extreme-Scale, GPU-accelerated Mantle Convection*,
+> preprint, [arXiv:2609.21633](https://arxiv.org/abs/2609.21633) (2026).
+
+Each subdirectory has its own README naming the driver, the command that runs
+it and what comes out.
+
+| directory | reproduces |
 |---|---|
-| `benchmarks/` | `mc_validation_profiles.pdf` and the steady-state Nusselt table: ten cases of the Zhong et al. (2008) spherical-shell suite |
-| `convergence/` | the two FGMRES iteration and residual tables for the Lin (2022) and Stotz (2017) viscosity profiles |
-| `hourglass/` | `hourglass_stab_convergence.pdf`: multigrid residual and discretization error with and without hourglass control |
-| `production/` | `e2e_diag2x2.pdf`, `e2e_crosscut.png` and `e2e_iso_tdev400.png`: the MT1024 end-to-end run |
-| `scaling/` | `cross_vendor_strong_scaling.png`: the strong-scaling sweep on SuperMUC-NG Phase 2 and LUMI-G |
+| `hourglass/` | **Fig. 2** — stand-alone multigrid residual per V-cycle on MT256 and the L² velocity error over MT32–MT512, for one-point quadrature with and without hourglass control and for the two-radial-point rule |
+| `convergence/` | **Fig. 3** — the two tables beside the Lin and Stotz viscosity profiles: full-Stokes FGMRES iterations to a 10⁻⁶ relative residual and the residual after ten iterations, MT32–MT2048 |
+| `benchmarks/` | **Fig. 4** and **Table 2** — steady-state radial temperature profiles and T = 0.5 isosurfaces of ten Zhong et al. (2008) benchmark cases, with their Nusselt numbers |
+| `scaling/` | **Fig. 5** — strong scaling of the coupled Stokes–energy timestep, time per step against device count with one line per MT resolution, on SuperMUC-NG Phase 2 and LUMI-G |
+| `production/` | **Fig. 6** — the end-to-end MT1024 run: radial-mean diagnostics, the temperature-deviation isosurface and the equatorial cross-cut |
 
 `benchmarks/`, `production/` and `scaling/` drive the `mantlecirculation` app
 and are configured through TOML files plus command-line refinement levels.
