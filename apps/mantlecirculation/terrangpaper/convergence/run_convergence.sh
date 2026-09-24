@@ -23,9 +23,13 @@ PROFILE="${TERRANG_PROFILE:-lin}"          # lin | stotz
 MAX_CYCLES="${TERRANG_MAX_CYCLES:-100}"    # 100 -> iteration count, 10 -> residual after 10 iters
 OUT="${TERRANG_OUT:-./conv_MT${MT}_${PROFILE}}"
 
-# The viscosity CSVs ship with the repository; point at them explicitly when the
-# run directory is not next to the source tree.
+# The viscosity CSVs ship with the repository in data/radialprofiles. The default
+# assumes the job was submitted from this directory; otherwise set TERRANG_PROFILE_DIR.
 export TERRANG_PROFILE_DIR="${TERRANG_PROFILE_DIR:-$HERE/../../../../data/radialprofiles}"
+if [ ! -f "$TERRANG_PROFILE_DIR/ViscosityProfile_Lin_et_al_2022.csv" ]; then
+  echo "no viscosity profiles under $TERRANG_PROFILE_DIR; set TERRANG_PROFILE_DIR to <repo>/data/radialprofiles" >&2
+  exit 1
+fi
 
 case "$MT" in
   32) LEVEL=5;; 64) LEVEL=6;; 128) LEVEL=7;; 256) LEVEL=8;;

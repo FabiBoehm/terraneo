@@ -19,8 +19,9 @@ boundaries; the coarsest level is 2.
 
 Both are read from `data/radialprofiles/ViscosityProfile_*.csv` in this
 repository, columns `radius_normalized_1p22_2p22` and
-`viscosity_scaled_by_min`. The driver looks for them relative to the working
-directory; `TERRANG_PROFILE_DIR` overrides the location.
+`viscosity_scaled_by_min`. The script finds them when submitted from this
+directory; from anywhere else set `TERRANG_PROFILE_DIR` to
+`<repo>/data/radialprofiles`.
 
 ## Running
 
@@ -40,6 +41,7 @@ TERRANG_MT=256 TERRANG_PROFILE=lin TERRANG_ACCOUNT=<project> \
 `TERRANG_MAX_CYCLES=100` (the default) gives the left table, the iteration
 count in the `cycles` column of the final summary. `TERRANG_MAX_CYCLES=10`
 gives the right table, `final_rel_res` in the same summary.
+`collect_convergence.py <dir>` gathers both from the job outputs.
 
 | MT | level | ranks | sbatch |
 |---|---|---|---|
