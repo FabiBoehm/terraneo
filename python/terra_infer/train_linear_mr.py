@@ -228,6 +228,10 @@ def main(argv=None):
                          "mesh inverse Jacobian): penalises fine-scale error the L2 term under-weights")
     ap.add_argument("--target-eta-power", type=float, default=0.0,
                     help="train on u * eta^a * mean(eta)^(1-a) (a=1: locally contrast-free target)")
+    ap.add_argument("--phys-attn", type=int, default=0,
+                    help="patches for viscosity-patch attention (0 = off)")
+    ap.add_argument("--phys-attn-dim", type=int, default=32,
+                    help="query/key width of the patch attention")
     ap.add_argument("--mode-attn", type=int, default=0,
                     help="d > 0: eta-keyed cross-degree attention (dim d) in the spectral core")
     ap.add_argument("--bank-bottleneck", type=int, default=0,
@@ -376,6 +380,7 @@ def main(argv=None):
     net = LinearOperator(5, 4, lv0["shape"], lv0["coords"],
                      n_hidden=args.hidden, n_blocks=args.heads,
                      lmax=lv0["lmax"], kmax=lv0["kmax"],
+                     phys_attn=args.phys_attn, phys_attn_dim=args.phys_attn_dim,
                      n_conv=args.linear_convs, kernel=args.linear_kernel,
                      depth_gates=args.linear_depth_gates,
                      eta_gates=args.eta_gates, eta_green=args.eta_green,
@@ -645,6 +650,8 @@ def main(argv=None):
                         "linear_eta_stencils": args.eta_stencils,
                         "linear_multi_dilation": args.multi_dilation,
                         "linear_mode_attn": args.mode_attn,
+                        "linear_phys_attn": args.phys_attn,
+                        "linear_phys_attn_dim": args.phys_attn_dim,
                         "linear_bank_bottleneck": args.bank_bottleneck,
                         "linear_sep_stencils": args.sep_stencils,
                         "linear_channels_last": args.channels_last,

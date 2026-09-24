@@ -57,6 +57,53 @@ def _physical(coords, pad):
     return feats.reshape(1, s_dom, -1, 4)
 
 
+
+class ViscosityPatchAttention(nn.Module):
+    """Attention between physics patches, in the spirit of Transolver's
+    Physics-Attention, with the patches defined by the viscosity field.
+
+    Every node is softly assigned to one of ``n_patch`` patches by an MLP of
+    viscosity features (log eta, its mean and standard deviation over the 5^3
+    window around the node, and geometry). Nodes in the same physical state --
+    the interior of a stiff slab, the weak channel beside it -- land in the same
+    patch wherever they are on the shell. The features are averaged into one
+    token per patch, the tokens attend to each other, and the result is scattered
+    back with the same weights.
+
+    The difference from Transolver: there the slice weights are computed from the
+    full feature vector, which carries the forcing. Here the assignment AND the
+    attention are functions of eta alone, so the module is a linear map of the
+    features for a fixed viscosity -- the operator stays exactly linear in f.
+
+    Cost is O(P n_patch C) for a mesh of P nodes, against O(P^2) for attention
+    between nodes: 44 GFLOP at level 6 with 32 patches, i.e. 0.1% of the local
+    branch. It supplies the long-range, viscosity-aware coupling that the
+    spherical-harmonic truncation cannot represent.
+    """
+
+    def __init__(self, ch, n_patch, feat_dim, d_attn=32, hidden=64):
+        super().__init__()
+        self.n_patch = int(n_patch)
+        self.d_attn = int(d_attn)
+        self.to_w = nn.Sequential(nn.Linear(feat_dim, hidden), nn.GELU(),
+                                  nn.Linear(hidden, self.n_patch))
+        self.q = nn.Linear(feat_dim, self.d_attn)
+        self.k = nn.Linear(feat_dim, self.d_attn)
+        # zero-init: the module is the identity at initialisation, so a warm
+        # start from a checkpoint without it reproduces that model exactly.
+        self.gate = nn.Parameter(torch.zeros(ch))
+
+    def forward(self, v, ef):
+        """v: (b, P, C) features, linear in f.  ef: (b, P, F) viscosity features."""
+        w = torch.softmax(self.to_w(ef), dim=-1)                  # (b, P, M)
+        denom = w.sum(1).clamp_min(1e-6)                          # (b, M)
+        tok = torch.einsum("bpm,bpc->bmc", w, v) / denom[..., None]
+        desc = torch.einsum("bpm,bpf->bmf", w, ef) / denom[..., None]
+        att = torch.softmax(self.q(desc) @ self.k(desc).transpose(1, 2)
+                            / float(self.d_attn) ** 0.5, -1)      # (b, M, M)
+        mixed = torch.einsum("bmn,bnc->bmc", att, tok)
+        return v + self.gate.to(v.dtype) * torch.einsum("bpm,bmc->bpc", w, mixed)
+
 class LinearOperator(nn.Module):
     """A learned preconditioner that is exactly LINEAR in its input field.
 
@@ -99,7 +146,8 @@ class LinearOperator(nn.Module):
                  level_pyramid=False, stencil_scale=False, eta_lateral=0,
                  eta_stencils=0, multi_dilation=False, mode_attn=0,
                  bank_bottleneck=0, sep_stencils=False, channels_last=False,
-                 seam_average=False, eta_embed_dim=16, eta_quant=0, grad_checkpoint=False):
+                 seam_average=False, eta_embed_dim=16, eta_quant=0, grad_checkpoint=False,
+                 phys_attn=0, phys_attn_dim=32):
         super().__init__()
         self.nonlin = nonlin
         # dilated: the local stencils keep a FIXED PHYSICAL footprint across
@@ -148,6 +196,12 @@ class LinearOperator(nn.Module):
         # lateral viscosity structure can scatter energy between degrees --
         # the coupling a per-degree (block-diagonal) Green core cannot express.
         # The residual gate starts at 0: warm starts are function-preserving.
+        # viscosity-patch attention: patches defined by eta, attention between
+        # their tokens. feat_dim = (log eta, 5^3 mean, 5^3 std) + geometry(4).
+        self.phys_attn = int(phys_attn)
+        self.phys = (ViscosityPatchAttention(n_hidden, self.phys_attn, 7,
+                                             d_attn=int(phys_attn_dim))
+                     if self.phys_attn > 0 else None)
         self.mode_attn = int(mode_attn)
         if self.mode_attn > 0:
             self.attn_q = nn.Linear(18, self.mode_attn)
@@ -542,6 +596,19 @@ class LinearOperator(nn.Module):
                                     align_corners=True)
             vol = vol + cur
         h = vol.permute(0, 2, 3, 4, 1).reshape(b, s_dom, -1, c)
+
+        if self.phys is not None and self.eta_gates:
+            # viscosity features per node: value, local mean, local spread, geometry
+            lev = eta_ch.reshape(b * s_dom, 1, nx, ny, nr).float()
+            mup = F.avg_pool3d(lev, 5, stride=1, padding=2, count_include_pad=False)
+            sdp = (F.avg_pool3d(lev ** 2, 5, stride=1, padding=2,
+                                count_include_pad=False)
+                   - mup ** 2).clamp_min(0).sqrt()
+            ef = torch.cat([lev, mup, sdp], 1).reshape(b, s_dom, 3, -1)
+            ef = ef.permute(0, 1, 3, 2).reshape(b, -1, 3).to(h.dtype)
+            gm = self.geom.to(h.dtype).expand(b, -1, -1, -1).reshape(b, -1, 4)
+            ef = torch.cat([ef, gm], -1)                     # (b, P, 7)
+            h = self.phys(h.reshape(b, -1, c), ef).reshape(b, s_dom, -1, c)
 
         y = self.head(h * go).reshape(b, s_dom, nx, ny, nr, -1)
         if self.seam_average:
