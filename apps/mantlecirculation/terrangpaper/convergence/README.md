@@ -56,26 +56,4 @@ gives the right table, `final_rel_res` in the same summary.
 The rank counts are memory-driven: with the 100-iteration budget the outer
 FGMRES holds 104 block vectors of the velocity-pressure system (restart 50),
 270 GB each at MT1024, 2 TB each at MT2048, which would need more than 5000
-devices. The 10-iteration runs hold 24 and fit on a quarter of the ranks. Only
-rank counts that divide the subdomain count are legal, since the grid holds
-10 * 4^lat_sdr * 2^rad_sdr subdomains, and the script rejects anything else. A
-refinement above the coarsest level raises `--min-level` accordingly, which
-the driver reports.
-
-## Reproduction
-
-Rerun on LUMI-G (MI250X) against the data the paper was built from (H100,
-June 2026), FGMRES iterations to 1e-6:
-
-| MT | Lin rerun | Lin published | Stotz rerun | Stotz published |
-|---|---|---|---|---|
-| MT8   | 14 | 14 | 14 | 14 |
-| MT16  | 39 | 39 | 32 | 32 |
-| MT32  | 41 | 41 | 74 | 74 |
-| MT64  | 32 | 32 | 45 | 45 |
-| MT128 | 29 | 29 | 37 | 37 |
-
-The match requires three pre- and three post-smoothing steps. The paper text
-says two, which gives counts about four higher at every size. The paper's
-table also prints 49 for MT32 Stotz where its own data file, and every rerun,
-give 74.
+devices.
