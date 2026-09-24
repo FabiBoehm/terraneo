@@ -1,8 +1,6 @@
 #!/bin/bash -l
 #SBATCH --job-name=oe_MT32_g8_A3_oe
-#SBATCH --output=${TERRANG_LOGDIR:-.}/MT32_g8_A3_oe.o%j
-#SBATCH --error=${TERRANG_LOGDIR:-.}/MT32_g8_A3_oe.e%j
-#SBATCH --account=${TERRANG_ACCOUNT:-CHANGEME}
+#SBATCH --output=%x_%j.out
 #SBATCH --partition=test
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=8

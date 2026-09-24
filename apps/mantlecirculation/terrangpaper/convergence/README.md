@@ -27,15 +27,15 @@ directory. From anywhere else set `TERRANG_PROFILE_DIR` to
 
 `run_convergence.sh` takes `TERRANG_BIN` (required), `TERRANG_MT`
 (32 ... 2048) and `TERRANG_PROFILE` (`lin` or `stotz`), plus the optional
-`TERRANG_MAX_CYCLES`, `TERRANG_OUT`, `TERRANG_PROFILE_DIR` and
-`TERRANG_ACCOUNT`. `TERRANG_MT` selects the fine level (MT32 is level 5,
+`TERRANG_MAX_CYCLES`, `TERRANG_OUT` and `TERRANG_PROFILE_DIR`.
+`TERRANG_MT` selects the fine level (MT32 is level 5,
 MT2048 is level 11). The subdomain refinement follows from the rank count, so
 node and task counts go on the `sbatch` line:
 
 ```
 TERRANG_BIN=<build>/tests/test_epsilon_divdiv_ablock_mg_gca \
-TERRANG_MT=256 TERRANG_PROFILE=lin TERRANG_ACCOUNT=<project> \
-  sbatch --nodes=1 --ntasks-per-node=8 run_convergence.sh
+TERRANG_MT=256 TERRANG_PROFILE=lin \
+  sbatch --account=<project> --nodes=1 --ntasks-per-node=8 run_convergence.sh
 ```
 
 `TERRANG_MAX_CYCLES=100` (the default) gives the left table, the iteration

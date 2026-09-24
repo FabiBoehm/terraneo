@@ -9,12 +9,11 @@ node on Intel PVC. Named `run_MT<level>_g<devices>_A3_oe.sh`.
 
 ```
 TERRANG_BIN=<path-to>/mantlecirculation \
-TERRANG_ACCOUNT=<your-account> \
-  sbatch run_MT256_g64_A3_oe.sh
+  sbatch --account=<your-account> run_MT256_g64_A3_oe.sh
 ```
 
 `TERRANG_CFG` defaults to `../config_scal_A3.toml`, `TERRANG_OUT` to a directory
-named after the point, `TERRANG_LOGDIR` to where the Slurm logs go.
+named after the point. The Slurm log lands next to the script.
 
 Per-step time comes from `<out>/timer_trees/timer_tree_9.json`, node `timestep`,
 `root_time / count`.

@@ -9,12 +9,11 @@ on AMD MI250X. Named `std_MT<level>_g<gcds>_std.sh`.
 
 ```
 TERRANG_BIN=<path-to>/mantlecirculation \
-TERRANG_ACCOUNT=<your-project> \
-  sbatch std_MT256_g64_std.sh
+  sbatch --account=<your-project> std_MT256_g64_std.sh
 ```
 
-`TERRANG_CFG` defaults to `../config_scal_A3.toml`; `TERRANG_OUT` defaults to a
-directory named after the point. `TERRANG_LOGDIR` sets where the Slurm logs go.
+`TERRANG_CFG` defaults to `../config_scal_A3.toml` and `TERRANG_OUT` to a
+directory named after the point. The Slurm log lands next to the script.
 
 To read the results:
 

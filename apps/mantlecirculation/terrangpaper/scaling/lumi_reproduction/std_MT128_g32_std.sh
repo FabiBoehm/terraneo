@@ -1,9 +1,7 @@
 #!/bin/bash -l
 #SBATCH --job-name=ls_MT128_g32_std
-#SBATCH --output=${TERRANG_LOGDIR:-.}/MT128_g32_std.o%j
-#SBATCH --error=${TERRANG_LOGDIR:-.}/MT128_g32_std.e%j
+#SBATCH --output=%x_%j.out
 #SBATCH --partition=standard-g
-#SBATCH --account=${TERRANG_ACCOUNT:-CHANGEME}
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=8
 #SBATCH --gpus-per-node=8

@@ -2,7 +2,6 @@
 #SBATCH --job-name=terrang_hourglass
 #SBATCH --output=%x_%j.out
 #SBATCH --partition=standard-g
-#SBATCH --account=${TERRANG_ACCOUNT:-CHANGEME}
 # Node and task counts are not fixed here; pass them to sbatch, see README.md.
 #SBATCH --gpus-per-node=8
 #SBATCH --time=01:00:00

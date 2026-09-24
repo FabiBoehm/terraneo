@@ -23,12 +23,12 @@ error>,<dofs>` row, which is what the plot script reads.
 ## Running
 
 `run_hourglass.sh` takes `TERRANG_BIN` (required), `TERRANG_MT` (32 ... 512)
-and the optional `TERRANG_OUT` and `TERRANG_ACCOUNT`. It runs all three series
+and the optional `TERRANG_OUT`. It runs all three series
 for one model size and concatenates them into `iter_MT<MT>.csv`. Concatenate
 those files over MT to get the full data set.
 
 ```
 TERRANG_BIN=<build>/tests/test_epsilon_divdiv_quadrature_matrix \
-TERRANG_MT=256 TERRANG_ACCOUNT=<project> \
-  sbatch --nodes=1 --ntasks-per-node=1 run_hourglass.sh
+TERRANG_MT=256 \
+  sbatch --account=<project> --nodes=1 --ntasks-per-node=1 run_hourglass.sh
 ```

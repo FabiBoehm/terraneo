@@ -26,17 +26,16 @@ smoothing steps.
 ## Running
 
 One script per point, one `sbatch` per script. Every script takes `TERRANG_BIN`
-(required) and `TERRANG_ACCOUNT`, and optionally `TERRANG_CFG` (defaults to
-`config_scal_A3.toml` next to this file), `TERRANG_OUT` (defaults to a directory
-named after the point) and `TERRANG_LOGDIR` (where the Slurm logs go).
+(required) and optionally `TERRANG_CFG` (defaults to `config_scal_A3.toml` next
+to this file) and `TERRANG_OUT` (defaults to a directory named after the
+point). The Slurm log lands next to the script as `<jobname>_<jobid>.out`.
 
 SuperMUC-NG Phase 2:
 
 ```
 cd sng2_reproduction
 TERRANG_BIN=<build>/apps/mantlecirculation/mantlecirculation \
-TERRANG_ACCOUNT=<project> \
-  sbatch run_MT256_g64_A3_oe.sh
+  sbatch --account=<project> run_MT256_g64_A3_oe.sh
 ```
 
 LUMI-G:
@@ -44,15 +43,14 @@ LUMI-G:
 ```
 cd lumi_reproduction
 TERRANG_BIN=<build>/apps/mantlecirculation/mantlecirculation \
-TERRANG_ACCOUNT=<project> \
-  sbatch std_MT256_g64_std.sh
+  sbatch --account=<project> std_MT256_g64_std.sh
 ```
 
 The whole sweep on either machine:
 
 ```
-for s in run_MT*_A3_oe.sh; do sbatch "$s"; done      # sng2_reproduction
-for s in std_MT*_std.sh;   do sbatch "$s"; done      # lumi_reproduction
+for s in run_MT*_A3_oe.sh; do sbatch --account=<project> "$s"; done   # sng2_reproduction
+for s in std_MT*_std.sh;   do sbatch --account=<project> "$s"; done   # lumi_reproduction
 ```
 
 Then collect the per-step times, and compare against the published numbers if

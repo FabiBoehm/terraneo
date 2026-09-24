@@ -2,7 +2,6 @@
 #SBATCH --job-name=terrang_conv
 #SBATCH --output=%x_%j.out
 #SBATCH --partition=standard-g
-#SBATCH --account=${TERRANG_ACCOUNT:-CHANGEME}
 #SBATCH --gpus-per-node=8
 #SBATCH --time=01:00:00
 #

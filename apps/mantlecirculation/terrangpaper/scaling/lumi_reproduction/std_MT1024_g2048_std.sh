@@ -1,9 +1,7 @@
 #!/bin/bash -l
 #SBATCH --job-name=ls_MT1024_g2048_std
-#SBATCH --output=${TERRANG_LOGDIR:-.}/MT1024_g2048_std.o%j
-#SBATCH --error=${TERRANG_LOGDIR:-.}/MT1024_g2048_std.e%j
+#SBATCH --output=%x_%j.out
 #SBATCH --partition=standard-g
-#SBATCH --account=${TERRANG_ACCOUNT:-CHANGEME}
 #SBATCH --nodes=256
 #SBATCH --ntasks-per-node=8
 #SBATCH --gpus-per-node=8

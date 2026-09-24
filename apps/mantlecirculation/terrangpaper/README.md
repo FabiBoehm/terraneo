@@ -22,5 +22,5 @@ and are configured through TOML files plus command-line refinement levels.
 `convergence/` and `hourglass/` drive stand-alone solver tests from `tests/`.
 
 All scripts take their paths from the environment: `TERRANG_BIN` points at the
-binary, `TERRANG_ACCOUNT` at the batch account, and `TERRANG_OUT` at the run
-directory. Nothing is hard-coded to a machine.
+binary and `TERRANG_OUT` at the run directory. The batch account goes on the
+`sbatch` line. Nothing is hard-coded to a machine.
