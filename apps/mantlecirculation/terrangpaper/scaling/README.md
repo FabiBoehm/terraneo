@@ -23,20 +23,44 @@ Solver settings are fixed so every point does identical work: Stokes 10 FGMRES
 iterations with restart 10, energy 50, all tolerances pinned to 0, two pre/post
 smoothing steps.
 
-## Two things that decide whether the numbers come out right
-
-Pass the subdomain levels **per axis**, `--lat-sdr` and `--rad-sdr`. They are
-usually unequal: (0,1) at 4 devices, (1,0) at 8, (2,0) at 32, (3,1) at 256. A
-single `--refinement-level-subdomains N` applies N to both axes and inflates the
-step time by up to a factor of four.
-
-Keep each script's environment exactly as it is. On SuperMUC the sweep sets
-`PSM3_GPUDIRECT=0` and deliberately sets neither `I_MPI_OFFLOAD_IPC` nor the
-MR-cache variables. Substituting the production environment costs 13-79 % per
-timestep.
-
 ## Running
 
-Every script takes `TERRANG_BIN` (required), and optionally `TERRANG_CFG`
-(defaults to the config next to this file), `TERRANG_OUT`, `TERRANG_LOGDIR` and
-`TERRANG_ACCOUNT`. See each subdirectory's README.
+One script per point, one `sbatch` per script. Every script takes `TERRANG_BIN`
+(required) and `TERRANG_ACCOUNT`, and optionally `TERRANG_CFG` (defaults to
+`config_scal_A3.toml` next to this file), `TERRANG_OUT` (defaults to a directory
+named after the point) and `TERRANG_LOGDIR` (where the Slurm logs go).
+
+SuperMUC-NG Phase 2:
+
+```
+cd sng2_reproduction
+TERRANG_BIN=<build>/apps/mantlecirculation/mantlecirculation \
+TERRANG_ACCOUNT=<project> \
+  sbatch run_MT256_g64_A3_oe.sh
+```
+
+LUMI-G:
+
+```
+cd lumi_reproduction
+TERRANG_BIN=<build>/apps/mantlecirculation/mantlecirculation \
+TERRANG_ACCOUNT=<project> \
+  sbatch std_MT256_g64_std.sh
+```
+
+The whole sweep on either machine:
+
+```
+for s in run_MT*_A3_oe.sh; do sbatch "$s"; done      # sng2_reproduction
+for s in std_MT*_std.sh;   do sbatch "$s"; done      # lumi_reproduction
+```
+
+Then collect the per-step times, and compare against the published numbers if
+a CSV is given:
+
+```
+python3 lumi_reproduction/collect_lumi.py <outroot> [published.csv]
+```
+
+The subdomain levels and the environment in each script are the ones the
+published points were run with. Keep them as they are.
