@@ -21,7 +21,7 @@
 # Overrides: TERRANG_BIN, TERRANG_CFG, TERRANG_OUT.
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 P="$HERE/points_std_treeera.txt"
-OUTROOT=${TERRANG_OUTROOT:-/scratch/project_465002367/bohmfabi/scal_a3_lumi_std}
+OUTROOT=${TERRANG_OUTROOT:-$PWD/out}
 n=0
 while read -r MT G MODE NODES TPN MN MX LAT RAD RX TMIN; do
   [ -z "$MT" ] && continue
@@ -38,7 +38,7 @@ while read -r MT G MODE NODES TPN MN MX LAT RAD RX TMIN; do
 #SBATCH --output=${OUTROOT}/logs/${NAME}.o%j
 #SBATCH --error=${OUTROOT}/logs/${NAME}.e%j
 #SBATCH --partition=standard-g
-#SBATCH --account=project_465002367
+#SBATCH --account=\${TERRANG_ACCOUNT:-CHANGEME}
 #SBATCH --nodes=${NODES}
 #SBATCH --ntasks-per-node=${TPN}
 #SBATCH --gpus-per-node=8
@@ -54,7 +54,7 @@ export FI_CXI_RX_MATCH_MODE=software
 ulimit -c 0
 
 HERE="\${SLURM_SUBMIT_DIR:-\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)}"
-BIN="\${TERRANG_BIN:-/users/bohmfabi/terraneo-mergewt-build/apps/mantlecirculation/mantlecirculation}"
+BIN="\${TERRANG_BIN:-${TERRANG_BIN:?set TERRANG_BIN to the mantlecirculation binary}}"
 CFG="\${TERRANG_CFG:-\$HERE/../config_scal_A3.toml}"
 OUT="\${TERRANG_OUT:-${OUTROOT}/${NAME}}"
 mkdir -p "\$OUT" ${OUTROOT}/logs

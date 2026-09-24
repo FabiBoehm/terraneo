@@ -1,9 +1,9 @@
 #!/bin/bash -l
 #SBATCH --job-name=ls_MT1024_g4096_std
-#SBATCH --output=/scratch/project_465002367/bohmfabi/scal_a3_lumi_std/logs/MT1024_g4096_std.o%j
-#SBATCH --error=/scratch/project_465002367/bohmfabi/scal_a3_lumi_std/logs/MT1024_g4096_std.e%j
+#SBATCH --output=${TERRANG_LOGDIR:-.}/MT1024_g4096_std.o%j
+#SBATCH --error=${TERRANG_LOGDIR:-.}/MT1024_g4096_std.e%j
 #SBATCH --partition=standard-g
-#SBATCH --account=project_465002367
+#SBATCH --account=${TERRANG_ACCOUNT:-CHANGEME}
 #SBATCH --nodes=512
 #SBATCH --ntasks-per-node=8
 #SBATCH --gpus-per-node=8
@@ -19,10 +19,10 @@ export FI_CXI_RX_MATCH_MODE=software
 ulimit -c 0
 
 HERE="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
-BIN="${TERRANG_BIN:-/users/bohmfabi/terraneo-mergewt-build/apps/mantlecirculation/mantlecirculation}"
+BIN="${TERRANG_BIN:?set TERRANG_BIN to the mantlecirculation binary}"
 CFG="${TERRANG_CFG:-$HERE/../config_scal_A3.toml}"
-OUT="${TERRANG_OUT:-/scratch/project_465002367/bohmfabi/scal_a3_lumi_std/MT1024_g4096_std}"
-mkdir -p "$OUT" /scratch/project_465002367/bohmfabi/scal_a3_lumi_std/logs
+OUT="${TERRANG_OUT:-./MT1024_g4096_std}"
+mkdir -p "$OUT"
 
 SELECT_GPU=${SLURM_SUBMIT_DIR}/select_gpu_${SLURM_JOB_ID}.sh
 cat > ${SELECT_GPU} << 'INNER'

@@ -74,7 +74,7 @@ BINARY      = Path(os.environ.get(
 # Override the root with $BENCH_MT_SCRATCH.
 SCRATCH_ROOT = Path(os.environ.get(
     "BENCH_MT_SCRATCH",
-    "/p/scratch/walberlamovinggeo/boehm2/mantlecirculation/bench_mt"))
+    "/p<set via TERRANG_ROOT>"))
 JOB_DIR     = SCRATCH_ROOT / "jobs_juwels"
 OUTPUT_ROOT = SCRATCH_ROOT / "outputs_juwels"
 

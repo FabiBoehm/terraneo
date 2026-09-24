@@ -53,7 +53,7 @@ APP_DIR     = BENCH_DIR.parent
 # mantlecirculation binary (LUMI PFS build). Override with $TERRANEO_BIN.
 BINARY      = Path(os.environ.get(
     "TERRANEO_BIN",
-    "/pfs/lustrep3/users/bohmfabi/terraneo-build/apps/mantlecirculation/mantlecirculation"))
+    os.environ.get("TERRANG_BIN","<path-to>/mantlecirculation")))
 JOB_DIR     = BENCH_DIR / "jobs"
 OUTPUT_ROOT = BENCH_DIR / "outputs"
 

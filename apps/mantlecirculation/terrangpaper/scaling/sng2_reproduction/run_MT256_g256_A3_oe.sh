@@ -1,8 +1,8 @@
 #!/bin/bash -l
 #SBATCH --job-name=oe_MT256_g256_A3_oe
-#SBATCH --output=/hppfs/scratch/0E/di35guv2/mc_runs/scal_jobs_origenv/MT256_g256_A3_oe.o%j
-#SBATCH --error=/hppfs/scratch/0E/di35guv2/mc_runs/scal_jobs_origenv/MT256_g256_A3_oe.e%j
-#SBATCH --account=pn39jo
+#SBATCH --output=${TERRANG_LOGDIR:-.}/MT256_g256_A3_oe.o%j
+#SBATCH --error=${TERRANG_LOGDIR:-.}/MT256_g256_A3_oe.e%j
+#SBATCH --account=${TERRANG_ACCOUNT:-CHANGEME}
 #SBATCH --partition=general
 #SBATCH --nodes=32
 #SBATCH --ntasks-per-node=8
@@ -21,16 +21,16 @@ export OMP_NUM_THREADS=8
 export ZE_FLAT_DEVICE_HIERARCHY=FLAT
 export ONEAPI_DEVICE_SELECTOR=level_zero:gpu
 ulimit -c 0
-export TMPDIR=/hppfs/scratch/0E/di35guv2/tmp
+export TMPDIR=${TMPDIR:-/tmp}
 # Paths. Override any of these to run from a checkout instead of the
 # original scratch tree:
 #   TERRANG_BIN  the mantlecirculation binary
 #   TERRANG_CFG  config_scal_A3.toml (defaults to the copy next to this tree)
 #   TERRANG_OUT  output directory for this point
 HERE="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
-BIN="${TERRANG_BIN:-/hppfs/scratch/0E/di35guv2/terraneo-merged-build/apps/mantlecirculation/mantlecirculation}"
+BIN="${TERRANG_BIN:?set TERRANG_BIN to the mantlecirculation binary}"
 CFG="${TERRANG_CFG:-$HERE/../config_scal_A3.toml}"
-OUT="${TERRANG_OUT:-/hppfs/scratch/0E/di35guv2/scal_a3_origenv/MT256_g256_A3_oe}"
+OUT="${TERRANG_OUT:-./MT256_g256_A3_oe}"
 
 mkdir -p "$TMPDIR" "$OUT"
 cd "$OUT"
