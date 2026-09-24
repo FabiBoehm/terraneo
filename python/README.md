@@ -271,69 +271,102 @@ nodes appear in two or more diamonds and would be counted two or more times. The
 least-squares fit is unaffected by duplicated rows. Both matrices depend only on the
 mesh and are built once per level; they are not learned.
 
-*What the operator does to the coefficients.* If a kernel is invariant under rotations
-of the sphere, it cannot couple a harmonic $(\ell,m)$ to any $(\ell',m')$ with
-$\ell'\ne\ell$, and it must act identically on all $2\ell+1$ orders $m$ of a given
-degree. The Stokes inverse has this property whenever $\eta$ depends on $r$ only.
-Under it the integral term collapses to one dense matrix per degree acting on the radial
-coefficients:
+*What the operator does to the coefficients.* A kernel that is invariant under rotations
+of the sphere cannot couple a harmonic $(\ell,m)$ to any $(\ell',m')$ with
+$\ell'\ne\ell$, and must act identically on all $2\ell+1$ orders $m$ of one degree — this
+is the spherical analogue of "a convolution is diagonal in Fourier space". The Stokes
+inverse has this invariance whenever $\eta$ depends on $r$ only. For a single channel,
+the integral term then reduces to one small dense matrix per degree, acting on the
+$k_1$ radial coefficients of every harmonic of that degree:
 
-$$\widehat{(\mathcal K v)}_{\ell mk}=\sum_{k'}\left[G_\ell\right]_{kk'}\,\hat v_{\ell mk'}.$$
+$$\widehat{(\mathcal K v)}_{\ell mk}=\sum_{k'=0}^{k_{\max}}\left[G_\ell\right]_{kk'}\,\hat v_{\ell mk'},
+\qquad G_\ell\in\mathbb R^{k_1\times k_1}\ \text{(single-channel form)}.$$
 
-The matrices $G_\ell$ are the exact counterpart of FNO's per-mode weights, with the
-spherical-harmonic transform standing in for the FFT — the same substitution the
-spherical FNO makes for weather models. Sharing across $m$ is a symmetry of the true
-operator, not an approximation.
+Note what the indices say: the output at $(\ell,m,k)$ depends only on inputs at the
+same $(\ell,m)$, and $G_\ell$ carries no $m$. These matrices are the exact counterpart
+of FNO's per-mode weights, with the spherical-harmonic transform standing in for the
+FFT — the same substitution the spherical FNO makes for weather models. Sharing across
+$m$ is a symmetry of the true operator, not an approximation.
 
-*Channels.* The channels are not treated independently. The $d_v$ channels are split
-into $n_b=8$ groups of $b_s=16$, and within a group $G_\ell$ mixes channels and radial
-modes together: for each degree $\ell$ and each group there is one matrix of size
-$(b_s k_1)\times(b_s k_1)$ acting on the group's stacked (channel, radial-mode)
-coefficients. The block size $b_s k_1$ is called `tok` in the code.
+*Channels.* The channels are not treated independently, because the $d_v$ features are
+not physical components but learned ones, and mixing them is where the operator's
+expressiveness lives. The $d_v$ channels are split into $n_b=8$ groups of $b_s=16$, and
+within a group the matrix mixes channels and radial modes together. Writing
+$\hat v^{(q)}_{c,\ell mk}$ for the coefficient of channel $c$ of group $q$, the form
+actually used is
+
+$$\widehat{(\mathcal K v)}^{(q)}_{c,\ell mk}
+=\sum_{c'=1}^{b_s}\ \sum_{k'=0}^{k_{\max}}
+\left[G_\ell\right]^{(q)}_{(c,k),(c',k')}\,\hat v^{(q)}_{c',\ell mk'},
+\qquad G^{(q)}_\ell\in\mathbb R^{(b_sk_1)\times(b_sk_1)},$$
+
+so for each degree $\ell$ there are $n_b$ matrices, one per group, each acting on the
+group's stacked (channel, radial-mode) vector of length $b_sk_1$ — 144 at level 3, 272
+from level 4 on. That block size is called `tok` in the code. Groups do not exchange
+information inside $\mathcal K$; they do in the local layers, whose $W_{t,\delta}$ mix
+all 128 channels.
 
 ### 2. The kernel is generated from the viscosity, not stored
 
 The template allows the kernel to depend on the parameter, $\kappa(x,y,a(x),a(y))$. If
-we let every $G_\ell$ be a free matrix, the model would learn one Green's function for
-the *average* viscosity of the training set, and could not respond to the viscosity of
+every $G_\ell^{(q)}$ were a free matrix, the model would learn one Green's function for
+the *average* viscosity of the training set and could not respond to the viscosity of
 the problem in front of it. So the matrices are *generated* from $\eta$ by a small
-network.
+network, once per sample.
 
-*Summarising the viscosity.* Take the radial profiles of the mean and standard deviation
-of $\log\eta$ over each spherical surface, resample each to 16 radii, and pass the 32
-numbers through an MLP $32\to64\to16$. The result $e(\eta)\in\mathbb R^{16}$ is the
-embedding. (Its last layer is initialised small, so at the start of training every
-sample gets nearly the same kernel and the dependence on $\eta$ is learned gradually.)
+*Summarising the viscosity.* For each of the $n$ radial layers, take the mean and the
+standard deviation of $\log\eta$ over that spherical surface (all $10n^2$ lateral nodes
+of the layer). That gives two profiles of length $n$; each is resampled to 16 radii by
+linear interpolation, so that the summary has the same size at every level. The 32
+numbers pass through a learned MLP, $\mathrm{Linear}(32\to64)$, GELU,
+$\mathrm{Linear}(64\to16)$, giving the embedding $e(\eta)\in\mathbb R^{16}$. Its last
+layer is initialised with small weights, so at the start of training every sample gets
+nearly the same kernel and the dependence on $\eta$ is learned gradually rather than
+imposed by a random initialisation.
 
 *Generating the entries.* A learned network $\Gamma$ — $\mathrm{Linear}(19\to64)$, GELU,
-$\mathrm{Linear}(64\to64)$, GELU, $\mathrm{Linear}(64\to2048)$, with $3+16=19$ inputs and
-$n_b b_s^2=2048$ outputs — is evaluated once per index triple $(\ell,k,k')$:
+$\mathrm{Linear}(64\to64)$, GELU, $\mathrm{Linear}(64\to2048)$ — takes $3+16=19$ inputs:
+three normalised indices and the embedding. It is evaluated for every index triple
+$(\ell,k,k')$ with $0\le\ell\le\ell_{\max}$ and $0\le k,k'\le k_{\max}$, i.e.
+$(\ell_{\max}+1)\,k_1^2$ times per sample, and each evaluation returns
+$n_bb_s^2=8\cdot16^2=2048$ numbers, which are read as one $b_s\times b_s$
+channel-mixing block per group:
 
 $$\left[G_\ell\right]^{(q)}_{(c,k),(c',k')}
 =\Gamma\!\left(\frac{\ell}{\ell_{\max}},\ \frac{k}{k_{\max}},\ \frac{k'}{k_{\max}}\ ;\ e(\eta)\right)^{(q)}_{cc'}.$$
 
-The three arguments before the semicolon are the normalised indices; the argument after
-it is the conditioning. $q=1,\dots,n_b$ selects the channel group and $c,c'$ are channels
-within it, so the 2048 outputs are one $b_s\times b_s$ channel-mixing matrix for each of
-the $n_b$ groups. Evaluating $\Gamma$ on the whole index grid fills every $G_\ell$.
+The three arguments before the semicolon are the indices, normalised to $[0,1]$ so that
+the same network serves every level; the argument after it is the conditioning; the
+superscript and subscripts on the right pick one of the 2048 outputs. Assembling the
+outputs over all $(k,k')$ for a fixed $\ell$ and $q$ fills the $(b_sk_1)\times(b_sk_1)$
+matrix $G^{(q)}_\ell$ of section 1. Everything the integral term learns is in $\Gamma$
+and $e$: 138 560 + 3 152 parameters, against 8.2 M in the local term of the smallest
+expert.
 
 Two consequences follow. Every sample gets its own Green's function, conditioned on its
 own viscosity profile. And the learned object is a smooth function of *continuous*
-indices rather than a table with one entry per grid point, so a finer mesh — which means
-a larger $\ell_{\max}$ and $k_{\max}$ — simply evaluates $\Gamma$ at more points. This is
-exactly what makes the integral term discretisation convergent.
+indices rather than a table with one entry per grid point, so a finer mesh — which
+allows a larger $\ell_{\max}$ and $k_{\max}$ — simply evaluates $\Gamma$ at more points.
+This is exactly what makes the integral term discretisation convergent.
 
 *Lateral contrast.* The block-diagonal structure was derived for $\eta=\eta(r)$. When
-the viscosity varies strongly laterally, harmonics of different degree do couple. The
-two experts that serve the highest contrasts add a learned coupling across degrees: an
-attention over the $M$ harmonics. For each $(\ell,m)$ an 18-vector is formed from the
-radial profile of the $(\ell,m)$-component of $\log\eta$ (16 values) and the normalised
-$\ell$ and $m$ (2 values); learned matrices $Q_a,K_a\in\mathbb R^{32\times18}$ (with
-biases) map it to a query and a key, and $A=\mathrm{softmax}(QK^{\top}/\sqrt{32})$ is an
-$M\times M$ mixing matrix applied to the coefficients of every channel group. It is added
-through a learned gate $\in\mathbb R^{n_b}$, one scalar per channel group, initialised
-at zero. Because it is built from $\eta$ alone, it is a fixed
-linear map of the coefficients for a given problem.
+the viscosity varies strongly laterally, harmonics of different degree do couple, and
+$\mathcal K$ as defined so far cannot express that. The two experts that serve the
+highest contrasts add a learned coupling across degrees, acting on the *output* of the
+block multiplication above, before synthesis. For each harmonic $(\ell,m)$ an
+18-vector is formed: the radial profile of that harmonic's own coefficient of $\log\eta$
+— obtained by applying $Y^{+}$ to $\log\eta$ and resampling the resulting $n$ values to
+16 — together with $\ell/\ell_{\max}$ and $(m+\ell)/2\ell$, the order's position within
+its degree. Learned matrices $Q_a,K_a\in\mathbb R^{32\times18}$ (with biases) map the
+18-vector to a query and a key; $A=\mathrm{softmax}(QK^{\top}/\sqrt{32})$ is then an
+$M\times M$ row-stochastic matrix saying how much each harmonic draws from every other.
+It is applied to the block-multiplied coefficients of every group and added through a
+learned gate $\in\mathbb R^{n_b}$, one scalar per group, initialised at zero:
+
+$$\widehat{(\mathcal Kv)}^{(q)}\ \leftarrow\ \widehat{(\mathcal Kv)}^{(q)}+\text{gate}_q\ A\,\widehat{(\mathcal Kv)}^{(q)}.$$
+
+Because $A$ is built from $\eta$ alone, this remains a fixed linear map of the
+coefficients for a given problem.
 
 ### 3. The local term is a short-range kernel, not a pointwise one
 
