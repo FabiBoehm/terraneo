@@ -10,9 +10,7 @@ shell with the same preconditioner as the app: a matrix-free geometric
 multigrid V-cycle on the velocity block, three pre- and three post-smoothing
 steps of a degree-2 Chebyshev smoother, and the inverse lumped diagonal of the
 1/eta-weighted pressure mass matrix as the Schur approximation. No-slip at both
-boundaries; the coarsest level is 2. These settings reproduce the published
-iteration counts exactly; the paper text says two smoothing steps, which gives
-counts about four higher.
+boundaries; the coarsest level is 2.
 
 | profile | flag | viscosity range |
 |---|---|---|
@@ -63,3 +61,21 @@ rank counts that divide the subdomain count are legal, since the grid holds
 10 * 4^lat_sdr * 2^rad_sdr subdomains; the script rejects anything else. A
 refinement above the coarsest level raises `--min-level` accordingly, which
 the driver reports.
+
+## Reproduction
+
+Rerun on LUMI-G (MI250X) against the data the paper was built from (H100,
+June 2026), FGMRES iterations to 1e-6:
+
+| MT | Lin rerun | Lin published | Stotz rerun | Stotz published |
+|---|---|---|---|---|
+| MT8   | 14 | 14 | 14 | 14 |
+| MT16  | 39 | 39 | 32 | 32 |
+| MT32  | 41 | 41 | 74 | 74 |
+| MT64  | 32 | 32 | 45 | 45 |
+| MT128 | 29 | 29 | 37 | 37 |
+
+The match requires three pre- and three post-smoothing steps; the paper text
+says two, which gives counts about four higher at every size. The paper's
+table also prints 49 for MT32 Stotz where its own data file, and every rerun,
+give 74.
