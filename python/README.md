@@ -64,13 +64,13 @@ solver time (10% turns out to be very valuable).
 We learn the solution operator of variable-viscosity Stokes flow on the spherical shell
 $\Omega=\{x\in\mathbb R^3:\ r_{\min}\le|x|\le r_{\max}\}$,
 
-$$-\nabla\cdot\bigl(2\eta\,\varepsilon(u)\bigr)+\nabla p=f_u,\qquad \nabla\cdot u=f_p,
-\qquad \varepsilon(u)=\tfrac12\bigl(\nabla u+\nabla u^{\top}\bigr),$$
+$$-\nabla\cdot(2\eta \varepsilon(u))+\nabla p=f_u,\qquad \nabla\cdot u=f_p,
+\qquad \varepsilon(u)=\frac12(\nabla u+\nabla u^{\top}),$$
 
 with $u=0$ on both bounding spheres. Discretised on the mesh this is a square linear
-system $K_\eta\,x=f$ with $x=(u,p)$ and $f=(f_u,f_p)$, and the object we approximate is
+system $K_\eta x=f$ with $x=(u,p)$ and $f=(f_u,f_p)$, and the object we approximate is
 
-$$\mathcal G^{\dagger}:\ (f,\eta)\ \longmapsto\ x \;=\; K_\eta^{-1}f .$$
+$$\mathcal G^{\dagger}:\ (f,\eta)\ \longmapsto\ x \ =\  K_\eta^{-1}f .$$
 
 Two structural facts drive every decision below.
 
@@ -83,13 +83,13 @@ Two structural facts drive every decision below.
 
 | symbol | meaning | value here |
 |---|---|---|
-| $n$ | nodes along one edge of a diamond; $h\approx(r_{\max}-r_{\min})/n$ is the node spacing | 9, 17, 33, 65 at L3–L6 |
+| $n$ | nodes along one edge of a diamond; $h \approx (r_{\max}-r_{\min})/n$ is the node spacing | 9, 17, 33, 65 at L3–L6 |
 | $d_v$ | feature channels inside the operator | 128 |
-| $\ell,m$ | spherical-harmonic degree and order, $\lvert m\rvert\le\ell\le\ell_{\max}$ | $\ell_{\max}=12,24,32,32$ |
-| $k$ | Chebyshev radial index, $0\le k\le k_{\max}$; $k_1=k_{\max}+1$ | $k_{\max}=8,16,16,16$ |
-| $Y_\ell^m,\;T_k$ | real spherical harmonic, Chebyshev polynomial | — |
-| $n_b,\;b_s$ | channel groups and channels per group, $d_v=n_b b_s$ | 8, 16 |
-| $n_{\mathrm{loc}}$ | number of local layers | 4 (8 in the top expert) |
+| $\ell,m$ | spherical-harmonic degree and order, $| m|\le\ell\le\ell_{\max}$ | $\ell_{\max}=12,24,32,32$ |
+| $k$ | Chebyshev radial index, $0 \le k \le k_{\max}$; $k_1 = k_{\max}+1$ | $k_{\max}=8,16,16,16$ |
+| $Y_\ell^m,\ T_k$ | real spherical harmonic, Chebyshev polynomial | — |
+| $n_b,\ b_s$ | channel groups and channels per group, $d_v=n_b b_s$ | 8, 16 |
+| $n_{loc}$ | number of local layers | 4 (8 in the top expert) |
 | $J$ | learned stencil kernels per local layer | 4 |
 | $\chi$ | viscosity contrast $\max\eta/\min\eta$, used for routing | — |
 | $\Pi$ | projection onto the finite-element space (mean over shared-node copies) | — |
@@ -101,45 +101,68 @@ the kernel-integral term of the network.
 ### The template
 
 A neural operator in the sense of Kovachki et al. is a lifting $\mathcal P$, a stack of
-layers each combining a non-local integral term $\mathcal K_t$ with a local term
-$\mathcal W_t$ and a bias $b_t$, and a projection $\mathcal Q$:
+$T$ layers, and a projection $\mathcal Q$:
 
-$$\mathcal G_\theta=\mathcal Q\circ\bigl(\sigma\circ(\mathcal W_{T-1}+\mathcal K_{T-1}+b_{T-1})\bigr)\circ\cdots\circ\bigl(\sigma\circ(\mathcal W_{0}+\mathcal K_{0}+b_{0})\bigr)\circ\mathcal P,$$
+$$\mathcal G = \mathcal Q \circ \mathcal L_{T-1} \circ \cdots \circ \mathcal L_0 \circ \mathcal P$$
 
-$$(\mathcal K_t v)(x)=\int_{\Omega}\kappa_t\bigl(x,y,a(x),a(y)\bigr)\,v(y)\,\mathrm dy ,$$
+Each layer adds a non-local term to a local one and applies a nonlinearity $\sigma$:
 
-over $T$ layers, where $a$ is the PDE's parameter function and $\sigma$ a nonlinearity.
-Here $a=\log\eta$, the operator input is the forcing $f$, and our instance reads
+$$\mathcal L_t(v) = \sigma\left( \mathcal W_t v + \mathcal K_t v + b_t \right)$$
 
-$$
-\begin{aligned}
-v_0&=g_{\mathrm{in}}(\eta)\odot W_{\!P}\,f
-  &&\text{lifting }\mathcal P,\quad W_{\!P}\in\mathbb R^{d_v\times4}\\[2pt]
-v_1&=v_0+\mathcal K(\eta)\,v_0
-  &&\text{a single kernel-integral layer}\\[2pt]
-v_{t+1}&=v_t+\mathcal W_t(\eta)\bigl[g_t\odot v_t\bigr],\quad t=1,\dots,n_{\mathrm{loc}}
-  &&\text{local layers}\\[2pt]
-x&=\Pi\bigl[W_{\!Q}\,\bigl(g_{\mathrm{out}}(\eta)\odot v_{n_{\mathrm{loc}}+1}\bigr)\bigr]
-  &&\text{projection }\mathcal Q,\quad W_{\!Q}\in\mathbb R^{4\times d_v}
-\end{aligned}
-$$
+$\mathcal W_t$ is local (pointwise in FNO), $b_t$ is a bias, and $\mathcal K_t$ is the
+non-local part — an integral against a learned kernel, which may depend on the PDE's
+parameter function $a$:
 
-$W_{\!P}$ and $W_{\!Q}$ are bias-free matrices applied at every node. The gates
-$g_{\mathrm{in}},g_{\mathrm{out}}:\mathbb R^{5}\to\mathbb R^{d_v}$ are small MLPs of
-(Cartesian position, normalised depth, $\log\eta$) evaluated at each node; $g_t$ is the
-same construction per local layer, on geometry alone. Every gate multiplies, never adds.
+$$(\mathcal K_t v)(x) = \int_\Omega \kappa_t(x, y, a(x), a(y)) \  v(y) \  dy$$
 
-One departure is structural and easy to miss in the formulas above: **the two terms are
-not interleaved**. The template alternates $\mathcal K_t$ and $\mathcal W_t$ in every
-one of its $T$ layers, whereas we apply $\mathcal K$ exactly once and then stack
-$n_{\mathrm{loc}}$ local layers. A single application of $\mathcal K$ already couples
-every radial mode with every other at each degree, so depth there buys little; depth in
-the local term is what grows its spatial reach, and reach is the thing in short supply.
+In our case $a = \log \eta$ is the viscosity field and the operator input is the forcing
+$f$. Write $v$ for the feature field the network carries: a function on the shell with
+$d_v = 128$ numbers at every node. Our instance is then four steps.
 
-The four remaining specialisations — the basis $\mathcal K$ acts in, the fact that its
-kernel is generated from $\eta$ rather than stored, the widening of $\mathcal W_t$ from
-pointwise to a stencil, and the removal of $\sigma$ together with every $b_t$ — are the
-subject of the next four sections.
+**1. Lift.** Turn the 4 forcing components at each node into $d_v$ features, and scale
+them by the viscosity:
+
+$$v \leftarrow g_{in}(\eta) \odot (W_P f)$$
+
+**2. Integral term, applied once.** This is the global step, and the subject of
+sections 1 and 2 below:
+
+$$v \leftarrow v + \mathcal K(\eta)   v$$
+
+**3. Local layers, repeated $n_{loc}$ times.** Layer $t$ has its own weights and its own
+gate  this is the subject of section 3:
+
+$$v \leftarrow v + \mathcal W_t(\eta)   (g_t \odot v)$$
+
+**4. Project.** Turn the $d_v$ features back into the 4 components of $x = (u, p)$, then
+project onto the finite-element space:
+
+$$x \leftarrow \Pi \left( W_Q   (g_{out}(\eta) \odot v) \right)$$
+
+The pieces, in order of appearance:
+
+| symbol | what it is |
+|---|---|
+| $W_P$ | a $d_v \times 4$ matrix, no bias, applied to the 4 forcing values at each node |
+| $g_{in}, g_{out}$ | gates: small MLPs $\mathbb R^5 \to \mathbb R^{d_v}$ of (Cartesian position, normalised depth, $\log\eta$), evaluated at each node |
+| $\odot$ | multiply channel by channel at each node — so a gate rescales features, never shifts them |
+| $\mathcal K(\eta)$ | the integral term, one dense block per harmonic degree, generated from $\eta$ |
+| $\mathcal W_t(\eta)$ | the local term of layer $t$: a $5^3$ stencil whose weights depend on the local $\eta$ |
+| $g_t$ | the same gate construction per local layer, but on geometry only |
+| $W_Q$ | a $4 \times d_v$ matrix, no bias |
+| $\Pi$ | replaces each copy of a node shared between diamonds by the mean of its copies |
+
+Two things to notice, because they are choices rather than accidents.
+
+**The two terms are not interleaved.** The template alternates $\mathcal K_t$ and
+$\mathcal W_t$ in every one of its $T$ layers. We apply $\mathcal K$ exactly once, then
+stack $n_{loc}$ local layers. One application of $\mathcal K$ already couples every
+radial mode with every other at each degree, so depth there buys little  depth in the
+local term is what grows its spatial reach, and reach is what is in short supply.
+
+**There is no $\sigma$ and no $b_t$.** Every layer above is an addition of linear maps of
+$v$, with the viscosity entering only through the multiplicative gates and through the
+weights themselves. Section 4 explains why, and what it guarantees.
 
 ### 1. The integral term acts in the shell's own basis
 
@@ -151,13 +174,13 @@ every channel laterally in real spherical harmonics and radially in Chebyshev
 polynomials,
 
 $$v(x)=\sum_{\ell=0}^{\ell_{\max}}\ \sum_{m=-\ell}^{\ell}\ \sum_{k=0}^{k_{\max}}
-\hat v_{\ell m k}\;Y_{\ell}^{m}(\theta,\varphi)\,T_k(r).$$
+\hat v_{\ell m k}\ Y_{\ell}^{m}(\theta,\varphi) T_k(r).$$
 
 If the kernel is invariant under rotation — which $K_\eta^{-1}$ is whenever the
 viscosity is radially layered — it cannot couple different $(\ell,m)$, and its action
 collapses to one dense matrix per degree, identical for that degree's $2\ell+1$ orders:
 
-$$\widehat{(\mathcal K v)}_{\ell m k}=\sum_{k'}\bigl[G_{\ell}\bigr]_{kk'}\,\hat v_{\ell m k'} .$$
+$$\widehat{(\mathcal K v)}_{\ell m k}=\sum_{k'}[G_{\ell}]_{kk'} \hat v_{\ell m k'} .$$
 
 These $G_\ell$ are the exact analogue of FNO's per-mode weights, and replacing the FFT
 with the spherical harmonic transform is the same substitution the spherical FNO makes
@@ -174,13 +197,12 @@ and *generate* the blocks. Let $e(\eta)\in\mathbb R^{16}$ embed the radial mean 
 standard deviation of $\log\eta$, each resampled to 16 radii. A small network $\Gamma$
 writes every entry from the normalised indices:
 
-$$\bigl[G_{\ell}\bigr]^{(q)}_{(c,k),(c',k')}
-=\Gamma\Bigl(\tfrac{\ell}{\ell_{\max}},\ \tfrac{k}{k_{\max}},\ \tfrac{k'}{k_{\max}};\ e(\eta)\Bigr)^{(q)}_{cc'},$$
+$$[G_{\ell}]^{(q)}_{(c,k),(c',k')} = \Gamma\left( \frac{\ell}{\ell_{\max}}, \ \frac{k}{k_{\max}}, \ \frac{k'}{k_{\max}} \ ; \ e(\eta) \right)^{(q)}_{cc'}$$
 
-with $q=1,\dots,n_b$ the channel group and $c,c'$ channels within it (not to be confused
-with the template's bias $b_t$, which we set to zero, or the group size $b_s$). So $\Gamma$ takes
-$3+16=19$ inputs and emits $n_b b_s^2$ numbers per index triple — one $b_s\times b_s$
-channel-mixing matrix per group.
+The semicolon separates what $\Gamma$ is indexed by (left) from what it is conditioned on
+(right). Here $q=1,\dots,n_b$ is the channel group and $c,c'$ are channels within it. So
+$\Gamma$ takes $3+16=19$ inputs and emits $n_b b_s^2$ numbers for each index triple —
+one $b_s \times b_s$ channel-mixing matrix per group.
 
 Two consequences. Every sample gets its own Green's function, conditioned on its own
 viscosity profile. And the learned object is a function of the *continuous* indices
@@ -202,39 +224,39 @@ slab, and at four orders of magnitude of viscosity contrast that edge is where t
 solution lives. So $\mathcal W_t$ becomes a short-range kernel — a stencil of half-width
 2 in each index direction — whose weights vary with the local viscosity:
 
-$$(\mathcal W_t v)(x_i)=\sum_{\lVert\delta\rVert_\infty\le2}
-\Bigl[\,W_{t,\delta}+\sum_{j=1}^{J}\lambda_j(\eta;x_i)\,\Psi^{(j)}_{t,\delta}\Bigr]\,
-v\bigl(x_{i+d\delta}\bigr).$$
+$$(\mathcal W_t v)(x_i)=\sum_{\|\delta\|_\infty\le2}
+[ W_{t,\delta}+\sum_{j=1}^{J}\lambda_j(\eta x_i) \Psi^{(j)}_{t,\delta}] 
+v(x_{i+d\delta}).$$
 
-Here $x_i$ is a node of the mesh, $\delta$ runs over the $5^3$ neighbour offsets; $W_{t,\delta}\in\mathbb R^{d_v\times d_v}$
-are dense weights; $\Psi^{(j)}_t$ are $J$ learned kernels acting through a 32-channel
-bottleneck (so they cost far less than $J$ dense kernels would); the mixing weights
-$\lambda_j$ are a softmax over $j$ produced by an MLP from three numbers — $\log\eta$ at
-$x_i$ and its mean and standard deviation over the same $5^3$ window; and $d$ is a
-dilation, $d=1$ unless `--dilated-stencils` is set. The effective stencil therefore
+Here $x_i$ is a node of the mesh and $\delta$ runs over the $5^3$ neighbour offsets.
+$W_{t,\delta} \in \mathbb R^{d_v \times d_v}$ are dense weights. The $\Psi^{(j)}_t$ are
+$J$ learned kernels acting through a 32-channel bottleneck, so they cost far less than
+$J$ dense kernels would. The mixing weights $\lambda_j$ are a softmax over $j$ produced
+by an MLP from three numbers: $\log\eta$ at $x_i$, and its mean and standard deviation
+over the same $5^3$ window. Finally $d$ is a dilation, equal to 1 unless
+`--dilated-stencils` is set. The effective stencil therefore
 differs at every node according to the viscosity around it.
 
 This term is what makes the model work — without it the error is about $0.8$ at every
 level — and it is the one component defined on the grid rather than on the continuum.
-With $n_{\mathrm{loc}}$ layers its reach is $2n_{\mathrm{loc}}d$ nodes, hence a physical
-footprint
+With $n_{loc}$ layers its reach is $2 n_{loc} d$ nodes, hence a physical footprint
 
-$$\rho=2\,n_{\mathrm{loc}}\,d\,h .$$
+$$\rho = 2 \, n_{loc} \, d \, h$$
 
 Holding $d=1$ while refining shrinks $\rho$ in proportion to $h$; choosing
-$d\propto 1/h$ holds it fixed. *Discretisation convergence* below returns to this with
+$d \propto 1/h$ holds it fixed. *Discretisation convergence* below returns to this with
 measurements.
 
 ### 4. No activation and no bias on the forcing path
 
 A generic neural operator applies $\sigma$ after every layer, which is what buys
 universal approximation. We omit it, and every bias, wherever the forcing flows. The
-viscosity enters only multiplicatively — through the gates $g_{\mathrm{in}},g_t,
-g_{\mathrm{out}}$, through the generator $\Gamma$, and through the mixing weights
+viscosity enters only multiplicatively — through the gates $g_{in}$, $g_t$,
+$g_{out}$, through the generator $\Gamma$, and through the mixing weights
 $\lambda_j$ — so the composed map satisfies, exactly and at any resolution,
 
 $$\mathcal G_\theta(\alpha f_1+\beta f_2,\ \eta)
-=\alpha\,\mathcal G_\theta(f_1,\eta)+\beta\,\mathcal G_\theta(f_2,\eta),
+=\alpha \mathcal G_\theta(f_1,\eta)+\beta \mathcal G_\theta(f_2,\eta),
 \qquad\text{in particular }\ \mathcal G_\theta(0,\eta)=0 .$$
 
 This is a strictly smaller hypothesis class than the universal one, chosen because it is
@@ -253,11 +275,11 @@ in its own space, so any part of the prediction outside the finite-element space
 error the solver cannot touch: before adding $\Pi$ the solver plateaued at 6% error
 regardless of budget. The caller then zeroes velocity on the two Dirichlet shells.
 
-**Defect correction.** One pass leaves a residual $r=f-K_\eta\,\mathcal G_\theta f$.
+**Defect correction.** One pass leaves a residual $r=f-K_\eta \mathcal G_\theta f$.
 Applying the same operator to it and adding the result back,
 
-$$x=\mathcal G_\theta f+\gamma\,\mathcal G_\theta\bigl(f-K_\eta\,\mathcal G_\theta f\bigr)
-=\bigl[(1+\gamma)\,\mathcal G_\theta-\gamma\,\mathcal G_\theta K_\eta\mathcal G_\theta\bigr]f,$$
+$$x=\mathcal G_\theta f+\gamma \mathcal G_\theta(f-K_\eta \mathcal G_\theta f)
+=[(1+\gamma) \mathcal G_\theta-\gamma \mathcal G_\theta K_\eta\mathcal G_\theta]f,$$
 
 is classical iterative refinement through the same weights, with one learned scalar
 $\gamma$. The right-hand form shows it remains exactly linear in $f$. It doubles the
@@ -284,31 +306,31 @@ $G_\ell$ block.
 
 Reading the pipeline of the previous section off the tensors:
 
-- **Lift and gate** ($W_{\!P}$, $g_{\mathrm{in}}$). $(f_u,f_p)$ → bias-free
+- **Lift and gate** ($W_{P}$, $g_{in}$). $(f_u,f_p)$ → bias-free
   `Linear(4 -> 128)`, multiplied node by node by a `5 -> 128 -> 128` MLP of (Cartesian
   position, normalised depth, $\log\eta$).
 - **Integral term** ($\mathcal K$, kept in fp32 under bf16 autocast). Reshape to
-  `(B, d_v, S n^2, n)`;
+  `(B, d_v, S n^2, n)` 
 let $Y$ (shape `(S n^2, M)`) hold the harmonics $Y_\ell^m$ sampled at the lateral nodes
   and $Y_r$ (shape `(n, k_1)`) the Chebyshev polynomials $T_k$ sampled at the radii.
   Analysis uses the *pseudo-inverses* $A=Y^{+}$ and $A_r=Y_r^{+}$ rather than a
   quadrature, because nodes shared between diamonds are stored once per diamond and a
-  quadrature would double-count the seams; regroup to `(B, n_b, M, tok)`; apply one
+  quadrature would double-count the seams  regroup to `(B, n_b, M, tok)`  apply one
   `tok x tok` matrix per degree and block, emitted by
   `ggen: 19 -> 64 -> 64 -> 2048` from the three normalised indices and the 16-dimensional
-  $\eta$ embedding ($2048=n_b b_s^2$); synthesise with $Y_r$ then $Y$; add as a residual.
+  $\eta$ embedding ($2048=n_b b_s^2$)  synthesise with $Y_r$ then $Y$  add as a residual.
   The cross-degree mixing of section 2 is an attention whose `18`-dimensional features
   (16 radial values + normalised degree and order) go through `18 -> 32` queries and
   keys to a dense `(B, M, M)` map, gated and keyed on $\eta$ alone.
-- **Local layers** ($\mathcal W_t$, $g_t$). Reshape to `(S B, d_v, n, n, n)`;
-  $n_{\mathrm{loc}}$ residual layers, each gating by geometry and then applying a
+- **Local layers** ($\mathcal W_t$, $g_t$). Reshape to `(S B, d_v, n, n, n)` 
+  $n_{loc}$ residual layers, each gating by geometry and then applying a
   bias-free `5^3` convolution `128 -> 128` ($W_{t,\delta}$) plus the bank: `1^3` down to
   32 channels, $J=4$ kernels of shape `(32, 32, 5, 5, 5)` ($\Psi^{(j)}_t$), softmax
   weights $\lambda_j$ from a `3 -> 32 -> 4` MLP, `1^3` back to 128. Added as a residual
   with no activation. This term holds 98% of the parameters and costs 45 TFLOP per
   forward at L6, against 0.001 for the integral term.
-- **Head** ($g_{\mathrm{out}}$, $W_{\!Q}$, $\Pi$). Gate as at the input, bias-free
-  `Linear(128 -> 4)`, then the seam-mean projection; the caller zeroes velocity on the
+- **Head** ($g_{out}$, $W_{Q}$, $\Pi$). Gate as at the input, bias-free
+  `Linear(128 -> 4)`, then the seam-mean projection  the caller zeroes velocity on the
   two Dirichlet shells.
 
 The four deployed experts:
@@ -320,9 +342,9 @@ The four deployed experts:
 | high | 10^2 – 10^3 | 4 | 32 | yes | 10.50 M |
 | top | > 10^3 | 4 | 32 | yes | 20.81 M |
 
-"Bank width" is the bottleneck the $\Psi^{(j)}$ act through; the generalist has no bank
+"Bank width" is the bottleneck the $\Psi^{(j)}$ act through  the generalist has no bank
 at all, so its local layers are the dense $W_{t,\delta}$ alone. The top expert is the
-exception to $n_{\mathrm{loc}}=4$: it uses eight local layers (`--linear-convs 8`, hence
+exception to $n_{loc}=4$: it uses eight local layers (`--linear-convs 8`, hence
 its name `c8ckpt`), doubling its reach to 16 nodes. 80.96 M parameters in total.
 
 ### Discretisation convergence: what holds and what does not
@@ -337,7 +359,7 @@ function on the continuum rather than a table tied to nodes. Refining the mesh r
 only the fixed transform matrices $Y,Y_r$ and queries $\Gamma$ at more modes.
 
 **The local term does not.** Its offsets $\delta$ are counted in nodes, so its physical
-reach is $\rho=2\,n_{\mathrm{loc}}\,d\,h$ as in section 3, and refining the mesh shrinks
+reach is $\rho=2 n_{loc} d h$ as in section 3, and refining the mesh shrinks
 $h$. Holding $d=1$ while $n$ grows therefore sends $\rho\to0$: the term degenerates towards the
 pointwise $\mathcal W_t$ of the generic template, which is a *different* operator from
 the one trained at the coarse level. In numbers, four layers reach 8 nodes — the whole
