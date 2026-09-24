@@ -40,19 +40,18 @@ told nothing about the previous solutions, the structure of `eta`, or what Stoke
 solutions on a shell look like.
 
 A **neural operator** (Kovachki et al., *Neural Operator: Learning Maps Between Function
-Spaces*, arXiv:2108.08481) is a network that learns a map between *function spaces*
-rather than between vectors of fixed length: here the map from the pair (forcing,
-viscosity field) to the solution field. It is trained once on many solved problems and then, given a
-new `f` and `eta`, produces an approximate solution in a single forward pass — no
-iteration. The important distinction from an ordinary image-to-image network is that
-the learned object should be the *operator* `K_eta^-1`, not a lookup on one grid: one
-set of weights should act on *any* discretisation of the input and, as the mesh is
-refined, converge to a single continuum operator — what that paper calls
-discretisation convergence. The output should also respond to `f` and `eta` the way the
-true solution operator does. Our target is a
-network that is (i) exactly linear in the forcing, like the true inverse, (ii) as
-mesh-independent as we can make it, and (iii) accurate enough that the solver, when it
-starts from the network's output instead of from zero, needs far fewer iterations.
+Spaces*, arXiv:2108.08481) learns a map between *function spaces* rather than between
+vectors of fixed length: here, from the pair (forcing, viscosity field) to the solution
+field. It is trained once on many solved problems and then, given a new $f$ and $\eta$,
+produces an approximate solution in one forward pass, with no iteration.
+
+The distinction from an ordinary image-to-image network is that the learned object
+should be the *operator* $K_\eta^{-1}$ and not a lookup on one grid. Concretely, one set
+of weights should act on any discretisation of the input and, as the mesh is refined,
+converge to a single continuum operator — what that paper calls **discretisation
+convergence**. Our three targets, then: exact linearity in the forcing, discretisation
+convergence as far as we can achieve it, and enough accuracy that the solver started
+from the prediction needs far fewer iterations than from zero.
 
 What we do **not** try to do is replace the solver. The prediction is used as the
 initial guess of the production multigrid-preconditioned FGMRES solver; the solver
@@ -60,108 +59,158 @@ still produces and certifies the answer. A poor prediction costs iterations, nev
 correctness, and the required accuracy of the network is whatever saves the most
 solver time (10% turns out to be very valuable).
 
-## The operator, in simple terms
+## The operator
 
-The network takes five fields on the shell mesh — the three components of `f_u`,
-`f_p`, and `log eta` — and returns four — `u` and `p`. It is built from three ideas.
+We learn the solution operator of variable-viscosity Stokes flow on the spherical shell
+$\Omega=\{x\in\mathbb R^3:\ r_{\min}\le|x|\le r_{\max}\}$,
 
-**1. Keep the linearity of the true inverse.** For fixed viscosity the discrete
-system is linear in `f`, and all the difficulty is in how `K_eta^-1` depends on `eta`.
-The network has the same structure: the forcing passes only through bias-free linear
-layers, and the viscosity acts on them from the side — it scales features, it selects
-which stencil is used at each node, and it decides the entries of the spectral
-matrices — but is never added as a channel. Doubling `f` exactly doubles the output,
-and `f = 0` gives exactly zero, at any resolution. This removes a whole family of
-things the network would otherwise have to learn and lets the same weights transfer
-across meshes, because linear maps are what the transforms below preserve.
+$$-\nabla\cdot\bigl(2\eta\,\varepsilon(u)\bigr)+\nabla p=f_u,\qquad \nabla\cdot u=f_p,
+\qquad \varepsilon(u)=\tfrac12\bigl(\nabla u+\nabla u^{\top}\bigr),$$
 
-**2. A global part in spectral space.** The inverse of Stokes is a *global* operator:
-a load anywhere moves fluid everywhere. Writing the fields in spherical harmonics on
-the sphere and Chebyshev polynomials in radius turns the shell into a small set of
-modes (a few hundred to a thousand), and for radially layered viscosity the true
-inverse is exactly a matrix per harmonic degree acting on the radial modes — a
-Green's function. The network has such a matrix for every degree, but instead of
-storing them it *generates* them with a small network fed with the degree, the radial
-mode indices and a short summary of the viscosity profile. This is what makes the
-global part mesh-independent: a finer mesh only means more modes are asked of the
-generator, and what it learned about the operator carries over. It is also what
-makes it a neural operator in the FNO sense, with the Fourier basis replaced by the
-natural basis of the shell.
+with $u=0$ on both bounding spheres. Discretised on the mesh this is a square linear
+system $K_\eta\,x=f$ with $x=(u,p)$ and $f=(f_u,f_p)$, and the object we approximate is
 
-**3. A local part on the mesh.** Sharp viscosity contrasts are local — a slab, a
-channel, a plume boundary — and the spectral truncation cannot resolve them. Four
-convolutional layers on the mesh's `n x n x n` diamond grids handle this, with one
-twist: the stencil used at a node is a viscosity-dependent mixture of a few learned
-stencils, chosen from `eta` at that node and its neighbourhood. This branch holds most
-of the weights and almost all of the compute, and it is the reason the network is
-not yet fully mesh-independent (next section).
+$$\mathcal G^{\dagger}:\ (f,\eta)\ \longmapsto\ x \;=\; K_\eta^{-1}f .$$
 
-Around this: a projection of the output onto the finite-element space (nodes shared
-between diamonds get the mean of their copies — essential, because the solver cannot
-correct any error that lies outside its own space); a learned *defect correction*
-step, which applies the network a second time to the residual of its own answer;
-and a **router** that picks one of four expert copies by the viscosity contrast of the
-problem, since problems with contrast 2 and contrast 10,000 want different stencils.
+Two structural facts drive every decision below.
 
-### The same, in the neural-operator framework
+1. **$\mathcal G^{\dagger}$ is linear in $f$** and nonlinear only in $\eta$. For a fixed
+   viscosity field, doubling the load doubles the flow.
+2. **$\mathcal G^{\dagger}$ is non-local.** $K_\eta^{-1}$ has a dense Green's function:
+   a load anywhere moves fluid everywhere, with an influence that decays slowly.
 
-Kovachki et al. write a neural operator as a lifting, a stack of kernel integral
-layers, and a projection,
+### The template
 
-    G = Q o (W_{T-1} + K_{T-1} + b_{T-1}) o ... o (W_0 + K_0 + b_0) o P,
-    (K_t v)(x) = ∫ k(x, y, a(x), a(y)) v(y) dy,
+A neural operator in the sense of Kovachki et al. is a lifting, a stack of layers each
+combining a non-local integral term with a local term, and a projection:
 
-where `a` is the PDE's parameter function, `K_t` is the non-local kernel integral term,
-`W_t` a local (in FNO, pointwise) term, `b_t` a bias, and a nonlinearity is applied
-after each layer. Our model is that template with four deliberate specialisations:
+$$\mathcal G_\theta \;=\; \mathcal Q\circ\bigl(\sigma\circ(\mathcal W_{T-1}+\mathcal K_{T-1}+b_{T-1})\bigr)\circ\cdots\circ\bigl(\sigma\circ(\mathcal W_{0}+\mathcal K_{0}+b_{0})\bigr)\circ\mathcal P,$$
 
-| framework | here |
-|---|---|
-| parameter function `a` | `log eta` — the viscosity field |
-| operator input | the forcing `(f_u, f_p)`, kept **exactly linear** |
-| lifting `P` | bias-free `Linear(4 -> 128)`, gated by `a` |
-| kernel term `K_t` | spectral Green core, kernel generated from `a` |
-| local term `W_t` | `5^3` stencil bank mixed by `a` (not pointwise) |
-| bias `b_t`, nonlinearity | **omitted on the forcing path** |
-| projection `Q` | `Linear(128 -> 4)` + projection onto the FE space |
+$$(\mathcal K_t v)(x)\;=\;\int_{\Omega}\kappa_t\bigl(x,y,a(x),a(y)\bigr)\,v(y)\,\mathrm dy ,$$
 
-**The kernel term is a Green's function in the shell's own basis.** FNO makes `K_t` a
-convolution by assuming a translation-invariant kernel `k(x-y)` on a torus, which the
-FFT diagonalises, and learns one weight matrix per Fourier mode up to a truncation.
-A spherical shell is not a torus, so we use its natural basis instead: spherical
-harmonics laterally and Chebyshev polynomials radially. A kernel that is invariant
-under rotation — which the Stokes inverse is, for radially layered viscosity — is
-block-diagonal in that basis, one dense block per harmonic degree `l`, shared across
-its `2l+1` orders. Those blocks are the direct analogue of FNO's per-mode weights, and
-substituting the spherical harmonic transform for the FFT is the same move the
-spherical FNO makes for weather models on the sphere.
+where $a$ is the PDE's parameter function, $\mathcal K_t$ carries the non-locality,
+$\mathcal W_t$ is a local term (pointwise in FNO), $b_t$ is a bias and $\sigma$ a
+nonlinearity. Here $a=\log\eta$, the operator input is $f$, and our model is this
+template with four deliberate specialisations:
 
-**The kernel is conditioned on the parameter.** The framework explicitly allows
-`k(x, y, a(x), a(y))`. Rather than feed `a` pointwise, we summarise it (radial mean and
-standard deviation of `log eta`, resampled to 16 points), embed that in 16 dimensions,
-and *generate* every block with a hypernetwork over the normalised indices
-`(l, k, k')`. Two consequences follow. Every sample gets its own Green operator, and
-the weights are not tied to any mesh: refining the mesh asks the generator for more
-modes, which is precisely why this part is discretisation convergent.
+$$v_0=\mathcal Pf=g_{\mathrm{in}}(\eta)\odot A f,\qquad
+v_{t+1}=v_t+\mathcal K(\eta)\,v_t+\mathcal W(\eta)\,v_t,\qquad
+x=\Pi\bigl[g_{\mathrm{out}}(\eta)\odot B\,v_T\bigr],$$
 
-**The local term is generalised, and it is the compromise.** In FNO `W_t` is pointwise,
-a `1x1` convolution, and all non-locality lives in `K_t`. That is not enough here: a
-truncation at `l_max = 32` cannot represent the edge of a stiff slab, and at high
-viscosity contrast that edge is where the solution lives. So `W_t` becomes a short-range
-kernel — a `5^3` stencil whose weights are a viscosity-dependent mixture of `K = 4`
-learned kernels. It buys the missing detail (without it the error is ~0.8 at every
-level) and it is the one component defined on the grid rather than on the continuum.
+with $A\in\mathbb R^{C\times4}$ and $B\in\mathbb R^{4\times C}$ bias-free, $C=128$
+channels, $\odot$ a channel-wise product, and $\Pi$ the projection onto the
+finite-element space. Note what is absent: no bias, and no $\sigma$ on the path the
+forcing takes.
 
-**Nonlinearity is spent on `a`, not on `f`.** A generic neural operator applies an
-activation after every layer, which is what gives it universal approximation. We drop
-the activation and the bias from the forcing path entirely, because the operator we are
-approximating is *linear in `f`* and only nonlinear in `eta`. All the nonlinear capacity
-goes into how `a` shapes the operator: the gates that scale features, the hypernetwork
-that writes the kernel, and the softmax that mixes the stencils. The result is an
-input-linear, parametrically-nonlinear neural operator — a smaller hypothesis class
-than the general one, chosen to match the structure of `K_eta^-1` exactly.
+### 1. The integral term acts in the shell's own basis
 
-### The same in shapes
+FNO evaluates $\mathcal K$ by assuming a translation-invariant kernel
+$\kappa(x,y)=\kappa(x-y)$ on a torus, so that the convolution theorem turns the
+integral into a diagonal multiplication in Fourier space, with one learned weight
+matrix per mode up to a truncation. A spherical shell is not a torus, so we use its
+natural basis: expand every channel in real spherical harmonics laterally and
+Chebyshev polynomials radially,
+
+$$v(x)\;=\;\sum_{\ell=0}^{\ell_{\max}}\sum_{m=-\ell}^{\ell}\sum_{k=0}^{k_{\max}}
+\hat v_{\ell m k}\;Y_{\ell}^{m}(\theta,\varphi)\,T_k(r).$$
+
+If the kernel is invariant under rotation — which $K_\eta^{-1}$ is whenever the
+viscosity is radially layered — then it cannot couple different $(\ell,m)$, and its
+action reduces to one dense matrix per degree, shared across that degree's $2\ell+1$
+orders:
+
+$$\widehat{(\mathcal K v)}_{\ell m k}\;=\;\sum_{k'}\;\bigl[G_{\ell}\bigr]_{kk'}\;\hat v_{\ell m k'} .$$
+
+These blocks $G_\ell$ are the exact analogue of FNO's per-mode weights, and replacing
+the FFT with the spherical harmonic transform is the same substitution the spherical
+FNO makes for weather models. Sharing across $m$ is a symmetry of the operator, not an
+approximation. In our implementation the $C$ channels are split into $n_b=8$ groups of
+$b_s=16$, and $G_\ell$ acts on the stacked (channel, radial-mode) coefficients of each
+group, so one block has size $b_s(k_{\max}+1)\times b_s(k_{\max}+1)$.
+
+### 2. The kernel is generated from the viscosity, not stored
+
+The template permits the kernel to depend on the parameter, $\kappa(x,y,a(x),a(y))$.
+Feeding $\eta$ pointwise would tie the weights to grid points, so instead we summarise
+it and *generate* the blocks. Let $e(\eta)\in\mathbb R^{16}$ be an embedding of the
+radial mean and standard deviation of $\log\eta$ resampled to 16 radii. A small network
+$\Gamma$ then writes every block entry from the normalised indices,
+
+$$\bigl[G_{\ell}\bigr]^{(b)}_{(c,k),(c',k')}\;=\;\Gamma\Bigl(\tfrac{\ell}{\ell_{\max}},\tfrac{k}{k_{\max}},\tfrac{k'}{k_{\max}};\,e(\eta)\Bigr)^{(b)}_{cc'} .$$
+
+Two things follow. Every sample gets its own Green's function, conditioned on its own
+viscosity profile. And the learned object is a function of the *continuous* indices
+$(\ell,k,k')$ rather than a table indexed by grid points, so a finer mesh simply
+evaluates $\Gamma$ at more modes — which is why this term is discretisation convergent.
+The two high-contrast experts add a learned mixing across degrees, keyed on $\eta$
+alone, for the cases where strong lateral contrast breaks the rotational symmetry that
+makes $G_\ell$ block-diagonal in the first place.
+
+### 3. The local term is a short-range kernel, not a pointwise one
+
+In FNO, $\mathcal W_t$ is pointwise and all non-locality sits in $\mathcal K_t$. That is
+not sufficient here. Truncating at $\ell_{\max}=32$ cannot represent the edge of a stiff
+slab, and at four orders of magnitude of viscosity contrast that edge is exactly where
+the solution lives. So we widen $\mathcal W_t$ into a short-range kernel — a stencil of
+half-width 2 in each index direction — whose weights vary with the local viscosity:
+
+$$(\mathcal W v)(x_i)\;=\;\sum_{\|\delta\|_\infty\le2}\Bigl[\,W_\delta\;+\;\sum_{j=1}^{K}c_j\bigl(\eta;x_i\bigr)\,B^{(j)}_{\delta}\Bigr]\,v\bigl(x_{i+d\,\delta}\bigr),$$
+
+where $\delta$ runs over the $5^3$ neighbour offsets, $W_\delta\in\mathbb R^{C\times C}$
+are dense weights, $B^{(j)}$ are $K=4$ learned kernels acting through a 32-channel
+bottleneck, the mixing weights $c_j$ are a softmax of $\log\eta$ at $x_i$ together with
+its mean and standard deviation over the same $5^3$ window, and $d$ is a dilation. The
+effective stencil therefore differs at every node according to the viscosity around it.
+
+This term is what makes the model work — without it the error is roughly $0.8$ at every
+level — and it is also the one component defined on the grid rather than on the
+continuum. With $T$ layers its reach is $2Td$ nodes, so its *physical* footprint is
+$2Td\,h$ where $h$ is the node spacing. Holding $d=1$ while refining the mesh shrinks
+that footprint in proportion to $h$; choosing $d\propto1/h$ holds it fixed. Section
+*Discretisation convergence* below returns to this with measurements.
+
+### 4. No activation and no bias on the forcing path
+
+A generic neural operator applies $\sigma$ after every layer, which is what buys
+universal approximation. We omit it, together with every bias, wherever the forcing
+flows. The viscosity enters only multiplicatively — through the gates
+$g_{\mathrm{in}},g_{\mathrm{out}}$, through the generator $\Gamma$, and through the
+mixing weights $c_j$ — so the composed map satisfies, exactly and at any resolution,
+
+$$\mathcal G_\theta(\alpha f_1+\beta f_2,\ \eta)\;=\;\alpha\,\mathcal G_\theta(f_1,\eta)+\beta\,\mathcal G_\theta(f_2,\eta).$$
+
+In particular $\mathcal G_\theta(0,\eta)=0$. This is a strictly smaller hypothesis class
+than the universal one, chosen because it is the structure $K_\eta^{-1}$ actually has:
+the network cannot waste capacity learning that small loads behave like large ones, and
+it cannot drift out of that class during training. All the nonlinear capacity is spent
+where the true difficulty is, on how $\eta$ shapes the operator.
+
+### Projection, defect correction, experts
+
+**Projection onto the finite-element space.** The mesh stores nodes shared between
+diamonds once per diamond; $\Pi$ replaces every copy of a shared node by the mean of its
+copies. This is not cosmetic. A Krylov method can only remove error components that lie
+in its own space, so any part of the prediction outside the finite-element space is
+error the solver cannot touch: before adding $\Pi$ the solver plateaued at 6% error
+regardless of budget. The caller then zeroes velocity on the two Dirichlet shells.
+
+**Defect correction.** One forward pass leaves a residual $r=f-K_\eta\mathcal G_\theta f$.
+Applying the same operator to it and adding the result back,
+
+$$x\;=\;\mathcal G_\theta f+\gamma\,\mathcal G_\theta\bigl(f-K_\eta\,\mathcal G_\theta f\bigr)
+\;=\;\bigl[(1+\gamma)\,\mathcal G_\theta-\gamma\,\mathcal G_\theta K_\eta\mathcal G_\theta\bigr]f,$$
+
+is classical iterative refinement through the same weights, with one learned scalar
+$\gamma$. The right-hand form shows it stays exactly linear in $f$. It doubles the
+forward cost, adds no parameters, and is worth about 10% of the error.
+
+**Experts.** Four copies of the operator, selected deterministically by the contrast
+$c=\max\eta/\min\eta$ against thresholds $10,10^2,10^3$. Since $c$ depends on $\eta$
+only, routing preserves linearity in $f$. Problems at $c=2$ and $c=10^4$ want genuinely
+different stencils, and one shared weight set is measurably worse than four specialised
+ones (mean error 0.20–0.31 against 0.084–0.189).
+
+### In shapes, as implemented
 
 `B` batch, `S = 10` diamonds, `N = n^3` nodes per diamond, `C = 128` channels,
 `M = (l_max+1)^2` harmonics, `k_1 = k_max+1` radial modes, `n_b = 8` blocks of
@@ -174,28 +223,33 @@ than the general one, chosen to match the structure of `K_eta^-1` exactly.
 | L5 | 33 | 359,370 | 32 | 1089 | 17 | 272 |
 | L6 | 65 | 2,746,250 | 32 | 1089 | 17 | 272 |
 
-- *Lift and gate.* `(f_u, f_p)` → bias-free `Linear(4 -> 128)`; multiplied node by node
-  by `gate_in(geometry ⊕ log eta)`, a `5 -> 128 -> 128` MLP.
-- *Spectral Green core* (fp32). Reshape to `(B, C, S n^2, n)`; harmonic analysis
-  `A (M x S n^2)` (pseudo-inverse of the basis, so seam nodes are not double-counted),
-  Chebyshev analysis `A_r^T (k_1 x n)`; regroup to `(B, n_b, M, tok)`. Per degree `l`
-  and block one `tok x tok` matrix, shared across the `2l+1` orders (rotational
-  symmetry), generated by `ggen: (l, k, k') ⊕ eta-embedding(16) = 19 -> 64 -> 64 -> 2048`.
-  The two high-contrast experts add a cross-degree attention keyed on `eta`. Synthesis
-  with `Y_r`, `Y`; residual add.
-- *Local branch.* Reshape to `(S B, C, n, n, n)`; four residual layers (eight in the
-  top expert) of a bias-free
-  `5^3` conv `128 -> 128` plus a bank: `1^3` `128 -> 32`, `K = 4` kernels
-  `(32, 32, 5, 5, 5)` mixed by a `3 -> 32 -> K` softmax of `(log eta, local mean,
-  local std)`, `1^3` back to `128`; added as a residual with **no** activation (the
-  `--nonlin` flag would insert a GELU here and is off in every deployed expert, since it
-  would destroy linearity in `f`). 98% of the parameters, 45 TFLOP per forward at L6
-  (the spectral core: 0.001).
-- *Head.* `gate_out` (as `gate_in`) then `Linear(128 -> 4)`; seam-mean projection;
-  the caller zeroes velocity on the Dirichlet shells.
-- *Defect correction.* `x = N(f) + gamma N(f - K_eta N(f))`, one learned scalar,
-  still exactly linear in `f`; doubles the cost, ~10% less error.
-- *Experts.* Routed on `max eta / min eta` at thresholds `10, 10^2, 10^3`:
+Reading the pipeline of the previous section off the tensors:
+
+- **Lift and gate.** $(f_u,f_p)$ → bias-free `Linear(4 -> 128)`, multiplied node by node
+  by `gate_in`, a `5 -> 128 -> 128` MLP of (Cartesian position, normalised depth,
+  $\log\eta$).
+- **Integral term** (kept in fp32 under bf16 autocast). Reshape to `(B, C, S n^2, n)`;
+  harmonic analysis by $A$ of shape `(M, S n^2)` — the *pseudo-inverse* of the basis
+  rather than a quadrature, because nodes shared between diamonds are stored once per
+  diamond and a quadrature would double-count the seams; Chebyshev analysis by
+  $A_r^{\top}$, shape `(k_1, n)`; regroup to `(B, n_b, M, tok)`; apply one
+  `tok x tok` matrix per degree and block, emitted by
+  `ggen: 19 -> 64 -> 64 -> 2048` from the three normalised indices and the 16-dimensional
+  $\eta$ embedding; synthesise with $Y_r$ then $Y$; add as a residual. The optional
+  cross-degree mixing is an attention with `18 -> 32` queries and keys, giving a dense
+  `(B, M, M)` map, gated and keyed on $\eta$ alone.
+- **Local term.** Reshape to `(S B, C, n, n, n)`; four residual layers (eight in the top
+  expert), each a bias-free `5^3` convolution `128 -> 128` plus the bank: `1^3` down to
+  32 channels, `K = 4` kernels of shape `(32, 32, 5, 5, 5)`, softmax weights from a
+  `3 -> 32 -> K` MLP, `1^3` back to 128. Added as a residual with **no** activation —
+  the `--nonlin` flag would insert a GELU and is off in every deployed expert, since it
+  would destroy linearity in $f$. This term holds 98% of the parameters and costs
+  45 TFLOP per forward at L6, against 0.001 for the integral term.
+- **Head.** `gate_out` (same inputs as `gate_in`) then bias-free `Linear(128 -> 4)`,
+  followed by the seam-mean projection $\Pi$; the caller zeroes velocity on the two
+  Dirichlet shells.
+
+The four deployed experts:
 
 | expert | contrast band | stencil banks | bank width | attention | params |
 |---|---|---|---|---|---|
@@ -210,33 +264,43 @@ nodes. 80.96 M parameters in the four experts together.
 
 ### Discretisation convergence: what holds and what does not
 
-A model is discretisation convergent, in the sense of arXiv:2108.08481, when one set of
-weights acts on any discretisation and the outputs converge to a single continuum
-operator as the mesh is refined. Our two terms behave oppositely, and the split is the
-central honest caveat of this work.
+A model is discretisation convergent when one set of weights acts on any discretisation
+and the outputs converge to a single continuum operator as the mesh is refined. Our two
+terms behave oppositely, and the split is the central caveat of this work.
 
-The kernel term is mesh-independent by construction: its weights are indexed by
-channel, degree and radial mode, its matrices come from a generator over normalised
-indices, and refining the mesh only rebuilds the fixed transform matrices
-(`set_mesh`). The two experts that serve contrasts below `10^2` were trained on L3–L5
-only and have never seen an L6 field; two thirds of the L6 test set is handled by them,
-so the L6 column below is predominantly a zero-shot result.
+**The integral term converges.** Its weights are indexed by channel, degree and radial
+mode, and they are produced by $\Gamma$ from normalised indices, so they are values of a
+function on the continuum rather than a table tied to nodes. Refining the mesh rebuilds
+only the fixed transform matrices $Y,Y_r$ and queries $\Gamma$ at more modes.
 
-The **local term is not**, and it fails in a specific way: its stencils live in index
-space, so refining the mesh shrinks their physical footprint, and in the limit
-`h -> 0` the branch degenerates towards the pointwise `W_t` of the generic framework —
-a different operator from the one trained at L3. Concretely: four layers of
-`5^3` reach eight nodes (16 in the eight-layer top expert), which is the whole shell at
-L3 and an eighth of it at L6. And
-the truncation is held at `l_max = 32` above L4 while the mesh grows, so the harmonics
-represent 21% of the lateral degrees of freedom at L3–L4, 10% at L5 and 2.6% at L6. Both
-point the same way as the measured error growth with level. The trainer exposes
-`--dilated-stencils` (dilation `2^(L-3)`, fixed physical footprint, no new weights) and
-`--sep-stencils` (depthwise + `1^3`, ~9x cheaper stencil); neither is in the deployed
-experts. Measured, `--dilated-stencils` does restore convergence: held-out error ratio
-L6/L3 falls from 1.9 with index-space stencils to 1.0 with dilated ones, with the two
-crossing at L6 (see *Results*). Separability is orthogonal to this — it is a compute
-saving that costs accuracy and does nothing for convergence.
+**The local term does not.** Its offsets $\delta$ are counted in nodes, so with $T$
+layers of half-width 2 and dilation $d$ its physical reach is
+
+$$\rho \;=\; 2\,T\,d\,h,\qquad h \;\sim\; \frac{L}{n},$$
+
+and holding $d=1$ while $n$ grows sends $\rho\to0$: the term degenerates towards the
+pointwise $\mathcal W_t$ of the generic template, which is a *different* operator from
+the one trained at the coarse level. In numbers, four layers reach 8 nodes — the whole
+shell at L3, an eighth of it at L6 (the eight-layer top expert reaches 16, so a quarter).
+Choosing $d\propto1/h$ — the `--dilated-stencils` option, $d=2^{L-3}$ — holds $\rho$
+fixed and costs no extra weights.
+
+A second, milder violation: the truncation is held at $\ell_{\max}=32$ above L4 while
+the mesh keeps growing, so the harmonics span 21% of the lateral degrees of freedom at
+L3–L4, 10% at L5 and 2.6% at L6. Both effects point the same way as the measured error
+growth with level.
+
+Measurements confirm the diagnosis. Against index-space stencils, dilated ones cut the
+held-out error ratio between L6 and L3 from **1.9 to 1.0** — error that no longer grows
+with refinement — with the two curves crossing at L6 (see *Results*). Separability
+(`--sep-stencils`, depthwise plus `1^3`, about 9x cheaper) is orthogonal: it saves
+compute, costs accuracy, and does nothing for convergence. Neither option is in the
+deployed experts yet.
+
+Finally, an accident of training history that the results below inherit: the two experts
+serving contrasts below $10^2$ were trained on L3–L5 only and have never seen an L6
+field, and they handle two thirds of the L6 test set — so the L6 column is largely a
+zero-shot result.
 
 ## Pipeline
 
