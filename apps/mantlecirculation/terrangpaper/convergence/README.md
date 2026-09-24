@@ -50,12 +50,14 @@ gives the right table, `final_rel_res` in the same summary.
 | MT128  | 7  | 10  | `--nodes=2 --ntasks-per-node=5` |
 | MT256  | 8  | 10  | `--nodes=2 --ntasks-per-node=5` |
 | MT512  | 9  | 80  | `--nodes=10 --ntasks-per-node=8` |
-| MT1024 | 10 | 320 | `--nodes=40 --ntasks-per-node=8` |
-| MT2048 | 11 | 1280 | `--nodes=160 --ntasks-per-node=8` |
+| MT1024 | 10 | 640 | `--nodes=80 --ntasks-per-node=8` |
+| MT2048 | 11 | not rerun | |
 
-The rank counts are memory-driven: the outer FGMRES keeps up to 50 Krylov
-vectors of the full velocity-pressure system, 2 TB each at MT2048. Only rank
-counts that divide the subdomain count are legal, since the grid holds
+The rank counts are memory-driven: with the 100-iteration budget the outer
+FGMRES holds 104 block vectors of the velocity-pressure system (restart 50),
+270 GB each at MT1024, 2 TB each at MT2048, which would need more than 5000
+devices. The 10-iteration runs hold 24 and fit on a quarter of the ranks. Only
+rank counts that divide the subdomain count are legal, since the grid holds
 10 * 4^lat_sdr * 2^rad_sdr subdomains; the script rejects anything else. A
 refinement above the coarsest level raises `--min-level` accordingly, which
 the driver reports.

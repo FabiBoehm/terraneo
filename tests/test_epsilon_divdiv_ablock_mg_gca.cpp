@@ -586,7 +586,9 @@ RunResult run_ablock_mg( int    min_level,
         "tri_tmp", domains[velocity_level], domains[pressure_level], mask_data[velocity_level], mask_data[pressure_level] );
     PrecStokes prec_stokes( K_op.block_11(), pmass, K_op.block_12(), tri_tmp, mg, prec_schur );
 
-    constexpr int outer_restart = 50;
+    // A run capped below the restart length never restarts, so size the Krylov
+    // basis (2 * restart + 4 block vectors) by the cap instead.
+    const int outer_restart = std::min( 50, max_cycles );
     linalg::solvers::FGMRESOptions< ScalarType > outer_opts;
     outer_opts.restart                     = outer_restart;
     outer_opts.max_iterations              = max_cycles;  // reuse --max-cycles as outer iteration cap

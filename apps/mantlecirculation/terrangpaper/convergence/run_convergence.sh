@@ -52,7 +52,7 @@ case "$NTASKS" in
   80)        LAT_SDR=1; RAD_SDR=1;;
   160)       LAT_SDR=2; RAD_SDR=0;;
   320)       LAT_SDR=2; RAD_SDR=1;;
-  640)       LAT_SDR=3; RAD_SDR=0;;
+  640)       LAT_SDR=2; RAD_SDR=2;;
   1280)      LAT_SDR=3; RAD_SDR=1;;
   *) echo "no subdomain refinement defined for $NTASKS ranks" >&2; exit 1;;
 esac
