@@ -32,7 +32,3 @@ TERRANG_BIN=<build>/tests/test_epsilon_divdiv_quadrature_matrix \
 TERRANG_MT=256 TERRANG_ACCOUNT=<project> \
   sbatch --nodes=1 --ntasks-per-node=1 run_hourglass.sh
 ```
-
-MT32 to MT256 fit on a single device. MT512 needs 80 devices, which is also
-the maximum: the hierarchy starts at level 1, so the subdomain refinement
-cannot exceed 1 and the grid never holds more than 80 subdomains.
