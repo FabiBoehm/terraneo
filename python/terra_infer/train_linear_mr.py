@@ -438,6 +438,12 @@ def main(argv=None):
         steps = sum((len(levels[e % len(levels)]["x_tr"])
                      + bsz[e % len(levels)] - 1) // bsz[e % len(levels)]
                     for e in range(args.epochs))
+    # Under data parallelism each rank walks only its own shard (batches[RANK::WORLD]),
+    # so it calls sched.step() WORLD times less often than the full-dataset count above.
+    # Without this the run traverses just 1/WORLD of the one-cycle curve and never
+    # reaches the decay phase -- the loss climbs for the whole job.
+    if WORLD > 1:
+        steps = max(1, (steps + WORLD - 1) // WORLD)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=args.lr,
                                                 total_steps=steps)
 
