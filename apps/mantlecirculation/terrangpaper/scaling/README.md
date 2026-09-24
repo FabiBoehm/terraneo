@@ -9,7 +9,7 @@ count, one line per MT resolution.
 | directory | contents |
 |---|---|
 | `sng2_reproduction/` | 34 scripts, SuperMUC-NG Phase 2 (Intel PVC) |
-| `lumi_reproduction/` | 37 scripts + generator + feeder, LUMI-G (AMD MI250X) |
+| `lumi_reproduction/` | 37 scripts, LUMI-G (AMD MI250X) |
 | `submit/` | sweep generators for other machines, and the result collector |
 
 ## How a point is measured

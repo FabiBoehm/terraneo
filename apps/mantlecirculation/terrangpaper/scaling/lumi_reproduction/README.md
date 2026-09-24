@@ -5,13 +5,6 @@ Produces the LUMI-G line of `cross_vendor_strong_scaling.png`.
 37 standard-mode points, MT32 on 1 GCD to MT2048 on 4096 GCDs, 8 ranks per node
 on AMD MI250X. Named `std_MT<level>_g<gcds>_std.sh`.
 
-| file | purpose |
-|---|---|
-| `points_std_treeera.txt` | point table: MT, GCDs, mode, nodes, ranks/node, mesh min/max, lat_sdr, rad_sdr, radial-extra-levels, walltime |
-| `generate_std.sh` | rebuild all 37 scripts from that table |
-| `feed_std.sh` | submit in ascending node count; idempotent |
-| `collect_lumi.py` | read the timer trees and compare against a published CSV |
-
 ## Running
 
 ```
@@ -20,15 +13,18 @@ TERRANG_ACCOUNT=<your-project> \
   sbatch std_MT256_g64_std.sh
 ```
 
-or the whole sweep:
+`TERRANG_CFG` defaults to `../config_scal_A3.toml`; `TERRANG_OUT` defaults to a
+directory named after the point; `TERRANG_LOGDIR` sets where the Slurm logs go.
+
+To read the results:
 
 ```
-TERRANG_BIN=... TERRANG_ACCOUNT=... MAX_NODES=1024 ./feed_std.sh
 python3 collect_lumi.py <outroot> [published.csv]
 ```
 
-`TERRANG_CFG` defaults to `../config_scal_A3.toml`; `TERRANG_OUTROOT`,
-`TERRANG_OUT` and `TERRANG_LOGDIR` set where results and logs go.
+It extracts the per-step time from each point's
+`timer_trees/timer_tree_9.json` and, given a published CSV, prints the
+comparison.
 
 ## Building on LUMI
 
