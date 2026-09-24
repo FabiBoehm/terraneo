@@ -228,6 +228,8 @@ def main(argv=None):
                          "mesh inverse Jacobian): penalises fine-scale error the L2 term under-weights")
     ap.add_argument("--target-eta-power", type=float, default=0.0,
                     help="train on u * eta^a * mean(eta)^(1-a) (a=1: locally contrast-free target)")
+    ap.add_argument("--no-spectral", action="store_true",
+                    help="remove the spectral term entirely (ablation)")
     ap.add_argument("--phys-attn", type=int, default=0,
                     help="patches for viscosity-patch attention (0 = off)")
     ap.add_argument("--phys-attn-dim", type=int, default=32,
@@ -381,6 +383,7 @@ def main(argv=None):
                      n_hidden=args.hidden, n_blocks=args.heads,
                      lmax=lv0["lmax"], kmax=lv0["kmax"],
                      phys_attn=args.phys_attn, phys_attn_dim=args.phys_attn_dim,
+                     spectral=not args.no_spectral,
                      n_conv=args.linear_convs, kernel=args.linear_kernel,
                      depth_gates=args.linear_depth_gates,
                      eta_gates=args.eta_gates, eta_green=args.eta_green,
@@ -650,6 +653,7 @@ def main(argv=None):
                         "linear_eta_stencils": args.eta_stencils,
                         "linear_multi_dilation": args.multi_dilation,
                         "linear_mode_attn": args.mode_attn,
+                        "linear_spectral": not args.no_spectral,
                         "linear_phys_attn": args.phys_attn,
                         "linear_phys_attn_dim": args.phys_attn_dim,
                         "linear_bank_bottleneck": args.bank_bottleneck,
