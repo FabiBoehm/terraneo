@@ -1,32 +1,12 @@
-## MT1024 production run: "C5" case in dimensional mode with variable viscosity,
-## effective Ra = 1e7. TALA-compressible, Frank-Kamenetskii rmu = 100 applied to
-## the Lin et al. 2022 radial profile, free slip at both boundaries, broadband
-## initial condition over spherical-harmonic degrees 8..96.
+## MT1024 production run: "C5" case, dimensional, variable viscosity, effective
+## Ra = 1e7. TALA-compressible, Frank-Kamenetskii rmu = 100 on the Lin et al.
+## 2022 radial profile, free slip at both boundaries, broadband initial condition
+## over spherical-harmonic degrees 8..96.
 ##
-## This is the configuration of the last MT1024 run (MT1024_C5dim_Raeff1e7_mmoc,
-## continued as *_cont), ported from the pre-merge app. Keys that no longer bind
-## were translated:
-##   set-nondimensional-numbers   -> dropped (dimensional is the default path)
-##   rho-weighted-tala            -> dropped (removed during the merge)
-##   diffusivity                  -> dropped (unbound)
-##   viscosity-law "frank-kamenetskii" -> "fk-type2" (FK tied to a radial profile)
-##   initial-temperature-sph-epsilon   -> perturbation-amplitude
-##   viscosity-radial-profile{,-csv-filename} -> viscosity-profile-csv-path
+## The profile loader wants the DIMENSIONAL CSV columns; a missing column yields
+## a profile of zeros with no error, so leave the two profile keys alone.
 ##
-## IMPORTANT: the profile loader now wants the DIMENSIONAL columns of the CSV.
-## The old config asked for radius_normalized_1p22_2p22 / viscosity_scaled_by_min,
-## which the current loader does not find -- and a missing column yields a profile
-## of ZEROS with no error. Keep the two keys below as they are.
-##
-## Two numbers worth knowing. The original run printed a NOMINAL Rayleigh number
-## of 4.49e8, computed from the reference viscosity alone; the "Raeff1e7" in the
-## run name is the EFFECTIVE value once the Lin profile raises the mean viscosity.
-## And because the profile is now read in dimensional units rather than the
-## pre-normalised column, the effective value has NOT been re-verified on the
-## current app. Check the printed Rayleigh number on the first run before
-## treating this as a continuation of the old one.
-##
-## Mesh and subdomain levels came from the job script:
+## Mesh and subdomain levels come from the command line:
 ##   --refinement-level-mesh-min 4 --refinement-level-mesh-max 10
 ##   --radial-extra-levels -1 --lat-sdr 4 --rad-sdr 0
 

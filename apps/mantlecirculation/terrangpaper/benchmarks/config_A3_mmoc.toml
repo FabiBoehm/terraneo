@@ -3,10 +3,8 @@
 ## Free slip at both boundaries, isothermal Dirichlet temperatures, MT256.
 ## Energy equation: MMOC semi-Lagrangian transport at Courant number 2.7.
 ##
-## Dimensional inputs, because the nondimensional keys (radius-min/max,
-## diffusivity, rayleigh-number) no longer bind. The shell 1.22..2.22 comes from
-## the two radii and the Rayleigh number from the reference viscosity, which is
-## 1.721988e24 at Ra = 1e5 and scales inversely with Ra.
+## The shell 1.22..2.22 comes from the two radii and the Rayleigh number from the
+## reference viscosity, which is 1.721988e24 at Ra = 1e5 and scales inversely.
 ## Mesh and subdomain refinement levels are passed on the command line.
 
 radius-cmb=3527020

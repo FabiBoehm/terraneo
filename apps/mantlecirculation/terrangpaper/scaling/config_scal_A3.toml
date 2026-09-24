@@ -1,14 +1,7 @@
 ## Paper-A strong-scaling sweep: A3 physics, incompressible, 10 timesteps.
-## Translated from the original config_fscmb_nsurf_lvl6_10steps.toml used for the
-## Aug-2026 sng2 sweep. Three keys of the original no longer bind on the merged
-## binary and were replaced:
-##   viscosity-law "frank-kamenetskii" -> "fk-benchmark" (same eta = rmu^(0.5-T))
-##   initial-temperature-sph-epsilon   -> perturbation-amplitude
-##   radius-min/max, diffusivity, rayleigh-number (lowercase) are UNBOUND on the
-##     merged binary and are supplied dimensionally on the CLI instead, using the
-##     values that reproduce A3 bit-identically (eta_ref 2.459983e25 -> Ra 7e3,
-##     radii 3527020/6418020 -> shell 1.22..2.22, T 0..3500 K).
-## Mesh/subdomain levels, iteration counts and tolerances come from the CLI.
+## Ra 7e3 from reference viscosity 2.459983e25, shell 1.22..2.22 from radii
+## 3527020/6418020, T in 0..3500 K -- all passed on the command line.
+## Mesh/subdomain levels, iteration counts and tolerances also come from the CLI.
 
 viscosity-law="fk-benchmark"
 viscosity-rmu=20
