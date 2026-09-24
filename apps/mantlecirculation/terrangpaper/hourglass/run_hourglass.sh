@@ -20,6 +20,8 @@ ulimit -c 0
 BIN="${TERRANG_BIN:?set TERRANG_BIN to the test_epsilon_divdiv_quadrature_matrix binary}"
 MT="${TERRANG_MT:?set TERRANG_MT to one of 32 64 128 256 512}"
 OUT="${TERRANG_OUT:-./hourglass_MT${MT}}"
+# A relative run directory is taken relative to the submit directory.
+case "$OUT" in /*) ;; *) OUT="${SLURM_SUBMIT_DIR:-$PWD}/$OUT";; esac
 
 case "$MT" in
   32) LEVEL=5;; 64) LEVEL=6;; 128) LEVEL=7;; 256) LEVEL=8;; 512) LEVEL=9;;
@@ -60,9 +62,9 @@ chmod +x ${SELECT_GPU}
 # series "1pt"  : one quadrature point, no stabilisation
 # series "1ptK" : one quadrature point plus hourglass control, C = 0.3
 # series "2ptK" : two radial quadrature points
-RUN_SCALE=$LEVEL                                srun --cpu-bind=${CPU_BIND} ${SELECT_GPU} "$BIN" | grep -E '^(ITER|DISC),'  > iter_MT${MT}_1pt.csv
-RUN_SCALE=$LEVEL STAB_C_KERNGEN=0.3             srun --cpu-bind=${CPU_BIND} ${SELECT_GPU} "$BIN" | grep -E '^(ITER|DISC),'  > iter_MT${MT}_1ptK.csv
-RUN_SCALE=$LEVEL STAB_C_KERNGEN=0.3 RUN_QP=2    srun --cpu-bind=${CPU_BIND} ${SELECT_GPU} "$BIN" | grep -E '^(ITER|DISC),'  > iter_MT${MT}_2ptK.csv
+RUN_SCALE=$LEVEL                                srun --cpu-bind=${CPU_BIND} ${SELECT_GPU} "$BIN" | grep -E '^(ITER|DISC),' | awk '!seen[$0]++' > iter_MT${MT}_1pt.csv
+RUN_SCALE=$LEVEL STAB_C_KERNGEN=0.3             srun --cpu-bind=${CPU_BIND} ${SELECT_GPU} "$BIN" | grep -E '^(ITER|DISC),' | awk '!seen[$0]++' > iter_MT${MT}_1ptK.csv
+RUN_SCALE=$LEVEL STAB_C_KERNGEN=0.3 RUN_QP=2    srun --cpu-bind=${CPU_BIND} ${SELECT_GPU} "$BIN" | grep -E '^(ITER|DISC),' | awk '!seen[$0]++' > iter_MT${MT}_2ptK.csv
 
 cat iter_MT${MT}_1pt.csv iter_MT${MT}_1ptK.csv iter_MT${MT}_2ptK.csv > iter_MT${MT}.csv
 echo "wrote $OUT/iter_MT${MT}.csv"

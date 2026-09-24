@@ -22,6 +22,8 @@ MT="${TERRANG_MT:?set TERRANG_MT to one of 32 64 128 256 512 1024 2048}"
 PROFILE="${TERRANG_PROFILE:-lin}"          # lin | stotz
 MAX_CYCLES="${TERRANG_MAX_CYCLES:-100}"    # 100 -> iteration count, 10 -> residual after 10 iters
 OUT="${TERRANG_OUT:-./conv_MT${MT}_${PROFILE}}"
+# A relative run directory is taken relative to the submit directory.
+case "$OUT" in /*) ;; *) OUT="${SLURM_SUBMIT_DIR:-$PWD}/$OUT";; esac
 
 # The viscosity CSVs ship with the repository in data/radialprofiles. The default
 # assumes the job was submitted from this directory; otherwise set TERRANG_PROFILE_DIR.

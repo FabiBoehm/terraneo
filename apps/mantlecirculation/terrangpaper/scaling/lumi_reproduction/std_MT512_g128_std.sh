@@ -22,6 +22,8 @@ HERE="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 BIN="${TERRANG_BIN:?set TERRANG_BIN to the mantlecirculation binary}"
 CFG="${TERRANG_CFG:-$HERE/../config_scal_A3.toml}"
 OUT="${TERRANG_OUT:-./MT512_g128_std}"
+# A relative run directory is taken relative to the submit directory.
+case "$OUT" in /*) ;; *) OUT="${SLURM_SUBMIT_DIR:-$PWD}/$OUT";; esac
 mkdir -p "$OUT"
 
 SELECT_GPU=${SLURM_SUBMIT_DIR}/select_gpu_${SLURM_JOB_ID}.sh

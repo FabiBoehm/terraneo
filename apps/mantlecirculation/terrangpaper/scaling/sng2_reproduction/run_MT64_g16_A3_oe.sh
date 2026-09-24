@@ -31,6 +31,8 @@ HERE="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 BIN="${TERRANG_BIN:?set TERRANG_BIN to the mantlecirculation binary}"
 CFG="${TERRANG_CFG:-$HERE/../config_scal_A3.toml}"
 OUT="${TERRANG_OUT:-./MT64_g16_A3_oe}"
+# A relative run directory is taken relative to the submit directory.
+case "$OUT" in /*) ;; *) OUT="${SLURM_SUBMIT_DIR:-$PWD}/$OUT";; esac
 
 mkdir -p "$TMPDIR" "$OUT"
 cd "$OUT"
