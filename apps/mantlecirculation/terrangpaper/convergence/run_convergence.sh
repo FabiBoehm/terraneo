@@ -85,5 +85,5 @@ srun --cpu-bind=${CPU_BIND} ${SELECT_GPU} "$BIN" \
   --solve stokes --visc-profile ${PROFILE} --gca 0 \
   --min-level 2 --max-level ${LEVEL} \
   --lat-sdr ${LAT_SDR} --rad-sdr ${RAD_SDR} \
-  --bc dirichlet --cheby-order 2 --cheby-prepost 2 --coarse-tol 1e-6 \
+  --bc dirichlet --cheby-order 2 --cheby-prepost 3 --coarse-tol 1e-6 \
   --max-cycles ${MAX_CYCLES}

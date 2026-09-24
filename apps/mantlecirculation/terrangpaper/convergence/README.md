@@ -7,10 +7,12 @@ reached after a fixed budget of 10 iterations.
 The driver is `tests/test_epsilon_divdiv_ablock_mg_gca.cpp`, built as
 `test_epsilon_divdiv_ablock_mg_gca`. It solves the Stokes saddle point on the
 shell with the same preconditioner as the app: a matrix-free geometric
-multigrid V-cycle on the velocity block, two pre- and two post-smoothing steps
-of a degree-2 Chebyshev smoother, and the inverse lumped diagonal of the
+multigrid V-cycle on the velocity block, three pre- and three post-smoothing
+steps of a degree-2 Chebyshev smoother, and the inverse lumped diagonal of the
 1/eta-weighted pressure mass matrix as the Schur approximation. No-slip at both
-boundaries; the coarsest level is 2.
+boundaries; the coarsest level is 2. These settings reproduce the published
+iteration counts exactly; the paper text says two smoothing steps, which gives
+counts about four higher.
 
 | profile | flag | viscosity range |
 |---|---|---|
