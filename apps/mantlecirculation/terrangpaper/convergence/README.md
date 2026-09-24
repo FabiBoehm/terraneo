@@ -7,14 +7,15 @@ reached after a fixed budget of 10 iterations.
 The driver is `tests/test_epsilon_divdiv_ablock_mg_gca.cpp`, built as
 `test_epsilon_divdiv_ablock_mg_gca`. It solves the Stokes saddle point on the
 shell with the same preconditioner as the app: a matrix-free geometric
-multigrid V-cycle with Chebyshev smoothing on the velocity block, and the
-inverse lumped diagonal of the 1/eta-weighted pressure mass matrix as the Schur
-approximation.
+multigrid V-cycle on the velocity block, two pre- and two post-smoothing steps
+of a degree-2 Chebyshev smoother, and the inverse lumped diagonal of the
+1/eta-weighted pressure mass matrix as the Schur approximation. No-slip at both
+boundaries; the coarsest level is 2.
 
 | profile | flag | viscosity range |
 |---|---|---|
-| Lin et al. (2022)   | `--visc-profile 3` | 4.7e20 - 5e23 Pa s |
-| Stotz et al. (2017) | `--visc-profile 2` | 5.8e19 - 7e23 Pa s |
+| Lin et al. (2022)   | `--visc-profile lin`   | 4.7e20 - 5e23 Pa s |
+| Stotz et al. (2017) | `--visc-profile stotz` | 5.8e19 - 7e23 Pa s |
 
 Both are read from `data/radialprofiles/ViscosityProfile_*.csv` in this
 repository, columns `radius_normalized_1p22_2p22` and
@@ -40,17 +41,19 @@ TERRANG_MT=256 TERRANG_PROFILE=lin TERRANG_ACCOUNT=<project> \
 count in the `cycles` column of the final summary. `TERRANG_MAX_CYCLES=10`
 gives the right table, `final_rel_res` in the same summary.
 
-| MT | level | ranks |
-|---|---|---|
-| MT32   | 5  | 1 |
-| MT64   | 6  | 1 |
-| MT128  | 7  | 10 |
-| MT256  | 8  | 10 |
-| MT512  | 9  | 40 |
-| MT1024 | 10 | 160 |
-| MT2048 | 11 | 160 |
+| MT | level | ranks | sbatch |
+|---|---|---|---|
+| MT32   | 5  | 1   | `--nodes=1 --ntasks-per-node=1` |
+| MT64   | 6  | 1   | `--nodes=1 --ntasks-per-node=1` |
+| MT128  | 7  | 10  | `--nodes=2 --ntasks-per-node=5` |
+| MT256  | 8  | 10  | `--nodes=2 --ntasks-per-node=5` |
+| MT512  | 9  | 80  | `--nodes=10 --ntasks-per-node=8` |
+| MT1024 | 10 | 320 | `--nodes=40 --ntasks-per-node=8` |
+| MT2048 | 11 | 1280 | `--nodes=160 --ntasks-per-node=8` |
 
 The rank counts are memory-driven: the outer FGMRES keeps up to 50 Krylov
-vectors of the full velocity-pressure system. Only rank counts that divide the
-subdomain count are legal, since the grid holds 10 * 4^lat_sdr * 2^rad_sdr
-subdomains; the script rejects anything else.
+vectors of the full velocity-pressure system, 2 TB each at MT2048. Only rank
+counts that divide the subdomain count are legal, since the grid holds
+10 * 4^lat_sdr * 2^rad_sdr subdomains; the script rejects anything else. A
+refinement above the coarsest level raises `--min-level` accordingly, which
+the driver reports.

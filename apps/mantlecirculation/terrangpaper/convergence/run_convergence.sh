@@ -34,8 +34,7 @@ case "$MT" in
 esac
 
 case "$PROFILE" in
-  lin)   VISC_PROFILE=3;;
-  stotz) VISC_PROFILE=2;;
+  lin|stotz) ;;
   *) echo "TERRANG_PROFILE must be lin or stotz" >&2; exit 1;;
 esac
 
@@ -74,11 +73,11 @@ exec "$@"
 INNER
 chmod +x ${SELECT_GPU}
 
-echo "MT$MT  level $LEVEL  profile $PROFILE (--visc-profile $VISC_PROFILE)  ranks $NTASKS  lat_sdr $LAT_SDR  rad_sdr $RAD_SDR  max-cycles $MAX_CYCLES"
+echo "MT$MT  level $LEVEL  profile $PROFILE  ranks $NTASKS  lat_sdr $LAT_SDR  rad_sdr $RAD_SDR  max-cycles $MAX_CYCLES"
 
 srun --cpu-bind=${CPU_BIND} ${SELECT_GPU} "$BIN" \
-  --solve stokes --visc-profile ${VISC_PROFILE} --gca 0 \
+  --solve stokes --visc-profile ${PROFILE} --gca 0 \
   --min-level 2 --max-level ${LEVEL} \
   --lat-sdr ${LAT_SDR} --rad-sdr ${RAD_SDR} \
-  --bc freeslip --cheby-order 2 --coarse-tol 1e-6 \
+  --bc dirichlet --cheby-order 2 --cheby-prepost 2 --coarse-tol 1e-6 \
   --max-cycles ${MAX_CYCLES}
