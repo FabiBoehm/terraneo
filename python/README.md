@@ -266,10 +266,13 @@ $$\text{synthesis:}\quad V=Y\,\hat V\,Y_r^{\top},\qquad\qquad
 
 where $Y^{+}$ and $Y_r^{+}$ are the Moore–Penrose pseudo-inverses, i.e. the
 least-squares fit. A quadrature rule (weighting each node by the area it represents)
-would be the textbook choice for analysis, but it is wrong for this storage layout: seam
-nodes appear in two or more diamonds and would be counted two or more times. The
-least-squares fit is unaffected by duplicated rows. Both matrices depend only on the
-mesh and are built once per level; they are not learned.
+would be the textbook choice for analysis; it was not used because the area weights of
+this mesh's stored node set, with seam nodes present in two or more diamonds, would have
+to be computed and corrected for the duplicates. The least-squares fit is not immune to
+the duplicates either — a repeated row counts twice — but the copies of a seam node carry
+the same value, so the extra weight distorts the fit mildly and never makes it
+inconsistent. Both matrices depend only on the mesh and are built once per level; they
+are not learned.
 
 *What the operator does to the coefficients.* A kernel that is invariant under rotations
 of the sphere cannot couple a harmonic $(\ell,m)$ to any $(\ell',m')$ with
@@ -283,10 +286,22 @@ $$\widehat{(\mathcal K v)}_{\ell mk}=\sum_{k'=0}^{k_{\max}}\left[G_\ell\right]_{
 \qquad G_\ell\in\mathbb R^{k_1\times k_1}\ \text{(single-channel form)}.$$
 
 Note what the indices say: the output at $(\ell,m,k)$ depends only on inputs at the
-same $(\ell,m)$, and $G_\ell$ carries no $m$. These matrices are the exact counterpart
-of FNO's per-mode weights, with the spherical-harmonic transform standing in for the
-FFT — the same substitution the spherical FNO makes for weather models. Sharing across
-$m$ is a symmetry of the true operator, not an approximation.
+same $(\ell,m)$, and $G_\ell$ carries no $m$. These matrices are the counterpart of
+FNO's per-mode weights, with the spherical-harmonic transform standing in for the FFT —
+the same substitution the spherical FNO makes for weather models.
+
+**How far the derivation actually carries.** The block-diagonal form is a theorem for a
+rotation-invariant operator acting on *scalar* fields. The field that enters the
+transform here is not that: the channels are learned features that start as pointwise
+mixtures of the *Cartesian* components of $f_u$ — which rotate as a vector, so their
+scalar-harmonic expansions couple degree $\ell$ to $\ell\pm1$ — and they have been
+multiplied pointwise by an $\eta$-dependent gate, which breaks rotation invariance
+outright. So for the model as built, per-degree mixing is an **inductive bias**, chosen
+because the layered operator has this structure and because the spherical FNO shows it
+works when applied channel-wise to arbitrary features; it is not an exact symmetry of
+the network, and "Green's function" below is a name for the learned blocks, not a claim
+that they equal one. What is solid is the parameterisation: the blocks are indexed by
+$(\ell,k,k')$ and not by nodes, which is what makes this term reusable across levels.
 
 *Channels.* The channels are not treated independently, because the $d_v$ features are
 not physical components but learned ones, and mixing them is where the operator's
@@ -384,16 +399,18 @@ is *local*: it only differentiates and multiplies by $\delta\eta$. Then
 $$K_\eta^{-1}=K_0^{-1}-K_0^{-1}\,\delta K\,K_0^{-1}+K_0^{-1}\,\delta K\,K_0^{-1}\,\delta K\,K_0^{-1}-\cdots$$
 
 The exact inverse for laterally varying viscosity alternates the layered *global*
-operator with *local* corrections weighted by the anomaly. The model mirrors this term
-by term:
+operator with *local* corrections weighted by the anomaly. This is the **motivation** for
+the global-then-local layout — it says what kind of operators must be composed — and
+not a derivation of the network: no layer of the model is one of these terms, and the
+correspondence below is a reading, not an identity.
 
-- **$K_0^{-1}$ is the integral term.** $G_\ell$ is generated from the radial mean and
-  spread of $\log\eta$, so it is the layered inverse for this sample's profile — exact
-  for the first term of the series and blind to everything after it.
-- **$\delta K$ is the local term.** A stencil whose weights are chosen at each node by
-  the local $\log\eta$, its mean and its spread is a learned local operator weighted by
-  the anomaly: a more capable $\delta K$, free to absorb what the truncation of $K_0^{-1}$
-  missed as well. This is where lateral structure is handled, which is why the local term
+- **$K_0^{-1}$ corresponds to the integral term.** $G_\ell$ is generated from the radial
+  mean and spread of $\log\eta$, so it is conditioned on the layered part of the
+  viscosity and, by construction, sees nothing of the lateral anomaly.
+- **$\delta K$ corresponds to the local term.** A stencil whose weights are chosen at
+  each node by the local $\log\eta$, its mean and its spread is a learned local operator
+  that depends on the anomaly, as $\delta K$ does; it is also free to absorb what the
+  truncation of the integral term missed. This is where lateral structure is handled, which is why the local term
   holds 98% of the parameters and why removing it leaves 0.8 error at every level.
 - **The second $K_0^{-1}$ is the gap.** The series' second term ends with a *global*
   operator applied after the local correction. The model applies the integral term once,
@@ -446,8 +463,8 @@ Reading it term by term:
 
 So every node has its own effective stencil, chosen by the viscosity around it. This term
 holds 98% of the parameters and almost all of the compute — 45 TFLOP per forward pass at
-level 6, against about 1.5 TFLOP for the integral term's two transforms, by operation
-count — and it is what makes the model work:
+level 6, against roughly 1.5 TFLOP for the integral term's two transforms; both are
+operation counts, not timings — and it is what makes the model work:
 without it the error is about 0.8 at every level.
 
 It is also the one component defined on the grid rather than on the continuum. With
