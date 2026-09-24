@@ -24,7 +24,7 @@ error>,<dofs>` row, which is what the plot script reads.
 
 `run_hourglass.sh` takes `TERRANG_BIN` (required), `TERRANG_MT` (32 ... 512)
 and the optional `TERRANG_OUT` and `TERRANG_ACCOUNT`. It runs all three series
-for one model size and concatenates them into `iter_MT<MT>.csv`; concatenate
+for one model size and concatenates them into `iter_MT<MT>.csv`. Concatenate
 those files over MT to get the full data set.
 
 ```
@@ -33,6 +33,6 @@ TERRANG_MT=256 TERRANG_ACCOUNT=<project> \
   sbatch --nodes=1 --ntasks-per-node=1 run_hourglass.sh
 ```
 
-The hierarchy starts at level 1, which caps the subdomain refinement at 1 and
-therefore the rank count at 80. MT32 to MT256 fit on a single device; MT512
-needs 80.
+MT32 to MT256 fit on a single device. MT512 needs 80 devices, which is also
+the maximum: the hierarchy starts at level 1, so the subdomain refinement
+cannot exceed 1 and the grid never holds more than 80 subdomains.

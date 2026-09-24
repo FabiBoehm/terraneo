@@ -10,7 +10,7 @@ shell with the same preconditioner as the app: a matrix-free geometric
 multigrid V-cycle on the velocity block, three pre- and three post-smoothing
 steps of a degree-2 Chebyshev smoother, and the inverse lumped diagonal of the
 1/eta-weighted pressure mass matrix as the Schur approximation. No-slip at both
-boundaries; the coarsest level is 2.
+boundaries, coarsest level 2.
 
 | profile | flag | viscosity range |
 |---|---|---|
@@ -20,7 +20,7 @@ boundaries; the coarsest level is 2.
 Both are read from `data/radialprofiles/ViscosityProfile_*.csv` in this
 repository, columns `radius_normalized_1p22_2p22` and
 `viscosity_scaled_by_min`. The script finds them when submitted from this
-directory; from anywhere else set `TERRANG_PROFILE_DIR` to
+directory. From anywhere else set `TERRANG_PROFILE_DIR` to
 `<repo>/data/radialprofiles`.
 
 ## Running
@@ -29,7 +29,7 @@ directory; from anywhere else set `TERRANG_PROFILE_DIR` to
 (32 ... 2048) and `TERRANG_PROFILE` (`lin` or `stotz`), plus the optional
 `TERRANG_MAX_CYCLES`, `TERRANG_OUT`, `TERRANG_PROFILE_DIR` and
 `TERRANG_ACCOUNT`. `TERRANG_MT` selects the fine level (MT32 is level 5,
-MT2048 is level 11); the subdomain refinement follows from the rank count, so
+MT2048 is level 11). The subdomain refinement follows from the rank count, so
 node and task counts go on the `sbatch` line:
 
 ```
@@ -58,7 +58,7 @@ FGMRES holds 104 block vectors of the velocity-pressure system (restart 50),
 270 GB each at MT1024, 2 TB each at MT2048, which would need more than 5000
 devices. The 10-iteration runs hold 24 and fit on a quarter of the ranks. Only
 rank counts that divide the subdomain count are legal, since the grid holds
-10 * 4^lat_sdr * 2^rad_sdr subdomains; the script rejects anything else. A
+10 * 4^lat_sdr * 2^rad_sdr subdomains, and the script rejects anything else. A
 refinement above the coarsest level raises `--min-level` accordingly, which
 the driver reports.
 
@@ -75,7 +75,7 @@ June 2026), FGMRES iterations to 1e-6:
 | MT64  | 32 | 32 | 45 | 45 |
 | MT128 | 29 | 29 | 37 | 37 |
 
-The match requires three pre- and three post-smoothing steps; the paper text
+The match requires three pre- and three post-smoothing steps. The paper text
 says two, which gives counts about four higher at every size. The paper's
 table also prints 49 for MT32 Stotz where its own data file, and every rerun,
 give 74.

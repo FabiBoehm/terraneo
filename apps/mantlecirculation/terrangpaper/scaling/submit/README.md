@@ -11,7 +11,7 @@ collect the results.
 | `submit_mc_lumi.py`       | generate mantle-circulation production jobs for LUMI-G |
 | `collect_bench_mt.py`     | read the emitted manifest and write a results CSV |
 
-Set `TERRANG_BIN` and `TERRANG_ROOT` before running; the account is a
+Set `TERRANG_BIN` and `TERRANG_ROOT` before running. The account is a
 `{ACCOUNT}` template field filled in at generation time.
 
 `../sng2_reproduction` and `../lumi_reproduction` are the two sweeps actually

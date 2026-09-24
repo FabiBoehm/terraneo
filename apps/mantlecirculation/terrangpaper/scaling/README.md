@@ -32,7 +32,7 @@ step time by up to a factor of four.
 
 Keep each script's environment exactly as it is. On SuperMUC the sweep sets
 `PSM3_GPUDIRECT=0` and deliberately sets neither `I_MPI_OFFLOAD_IPC` nor the
-MR-cache variables; substituting the production environment costs 13-79 % per
+MR-cache variables. Substituting the production environment costs 13-79 % per
 timestep.
 
 ## Running

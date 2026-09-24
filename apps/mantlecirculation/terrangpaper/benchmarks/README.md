@@ -24,7 +24,7 @@ inversely with Ra.
 
 ## Running
 
-Mesh and subdomain levels go on the command line; MT256 is mesh level 8.
+Mesh and subdomain levels go on the command line. MT256 is mesh level 8.
 
 ```
 srun mantlecirculation --config config_C3_mmoc.toml --extended-parameters \

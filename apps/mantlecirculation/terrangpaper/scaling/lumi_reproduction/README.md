@@ -14,7 +14,7 @@ TERRANG_ACCOUNT=<your-project> \
 ```
 
 `TERRANG_CFG` defaults to `../config_scal_A3.toml`; `TERRANG_OUT` defaults to a
-directory named after the point; `TERRANG_LOGDIR` sets where the Slurm logs go.
+directory named after the point. `TERRANG_LOGDIR` sets where the Slurm logs go.
 
 To read the results:
 
