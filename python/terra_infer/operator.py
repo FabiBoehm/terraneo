@@ -104,7 +104,7 @@ class ViscosityPatchAttention(nn.Module):
         le = ef[..., 0]                                            # (b, P)
         M = self.n_patch
         if self.mode == "quantile":
-            qs = torch.linspace(0.5 / M, 1 - 0.5 / M, M, device=le.device, dtype=le.dtype)
+            qs = torch.linspace(0.5 / M, 1 - 0.5 / M, M, device=le.device, dtype=torch.float32)
             q = torch.quantile(le.float(), qs, dim=1).T.to(le.dtype)          # (b, M)
             tau = ((le.amax(1) - le.amin(1)) / M).clamp_min(1e-3)[:, None, None]
             return -((le[..., None] - q[:, None, :]) / tau) ** 2
@@ -112,7 +112,7 @@ class ViscosityPatchAttention(nn.Module):
             nd, nq = 8, M // 8
             depth = ef[..., 6]
             cd = torch.linspace(0.5 / nd, 1 - 0.5 / nd, nd, device=le.device, dtype=le.dtype)
-            qs = torch.linspace(0.5 / nq, 1 - 0.5 / nq, nq, device=le.device, dtype=le.dtype)
+            qs = torch.linspace(0.5 / nq, 1 - 0.5 / nq, nq, device=le.device, dtype=torch.float32)
             q = torch.quantile(le.float(), qs, dim=1).T.to(le.dtype)          # (b, nq)
             tq = ((le.amax(1) - le.amin(1)) / nq).clamp_min(1e-3)[:, None, None]
             ld = -((depth[..., None] - cd[None, None, :]) * nd) ** 2           # (b, P, nd)
