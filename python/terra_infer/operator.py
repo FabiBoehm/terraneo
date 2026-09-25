@@ -81,21 +81,48 @@ class ViscosityPatchAttention(nn.Module):
     spherical-harmonic truncation cannot represent.
     """
 
-    def __init__(self, ch, n_patch, feat_dim, d_attn=32, hidden=64):
+    def __init__(self, ch, n_patch, feat_dim, d_attn=32, hidden=64, mode="mlp"):
         super().__init__()
         self.n_patch = int(n_patch)
         self.d_attn = int(d_attn)
-        self.to_w = nn.Sequential(nn.Linear(feat_dim, hidden), nn.GELU(),
-                                  nn.Linear(hidden, self.n_patch))
+        self.mode = mode
+        # mlp: learned assignment. quantile: centres at the per-sample quantiles of
+        # log eta, no parameters. depthclass: 8 depth bands x 4 eta classes (n_patch=32).
+        self.to_w = (nn.Sequential(nn.Linear(feat_dim, hidden), nn.GELU(),
+                                   nn.Linear(hidden, self.n_patch)) if mode == "mlp" else None)
         self.q = nn.Linear(feat_dim, self.d_attn)
         self.k = nn.Linear(feat_dim, self.d_attn)
         # zero-init: the module is the identity at initialisation, so a warm
         # start from a checkpoint without it reproduces that model exactly.
         self.gate = nn.Parameter(torch.zeros(ch))
 
+    def logits(self, ef):
+        """Patch scores from viscosity features only. ef[..., 0] is standardised
+        log eta, ef[..., 6] the normalised depth."""
+        if self.mode == "mlp":
+            return self.to_w(ef)
+        le = ef[..., 0]                                            # (b, P)
+        M = self.n_patch
+        if self.mode == "quantile":
+            qs = torch.linspace(0.5 / M, 1 - 0.5 / M, M, device=le.device, dtype=le.dtype)
+            q = torch.quantile(le.float(), qs, dim=1).T.to(le.dtype)          # (b, M)
+            tau = ((le.amax(1) - le.amin(1)) / M).clamp_min(1e-3)[:, None, None]
+            return -((le[..., None] - q[:, None, :]) / tau) ** 2
+        if self.mode == "depthclass":
+            nd, nq = 8, M // 8
+            depth = ef[..., 6]
+            cd = torch.linspace(0.5 / nd, 1 - 0.5 / nd, nd, device=le.device, dtype=le.dtype)
+            qs = torch.linspace(0.5 / nq, 1 - 0.5 / nq, nq, device=le.device, dtype=le.dtype)
+            q = torch.quantile(le.float(), qs, dim=1).T.to(le.dtype)          # (b, nq)
+            tq = ((le.amax(1) - le.amin(1)) / nq).clamp_min(1e-3)[:, None, None]
+            ld = -((depth[..., None] - cd[None, None, :]) * nd) ** 2           # (b, P, nd)
+            lq = -((le[..., None] - q[:, None, :]) / tq) ** 2                  # (b, P, nq)
+            return (ld[..., :, None] + lq[..., None, :]).reshape(le.shape[0], le.shape[1], M)
+        raise ValueError(self.mode)
+
     def forward(self, v, ef):
         """v: (b, P, C) features, linear in f.  ef: (b, P, F) viscosity features."""
-        w = torch.softmax(self.to_w(ef), dim=-1)                  # (b, P, M)
+        w = torch.softmax(self.logits(ef), dim=-1)                # (b, P, M)
         denom = w.sum(1).clamp_min(1e-6)                          # (b, M)
         tok = torch.einsum("bpm,bpc->bmc", w, v) / denom[..., None]
         desc = torch.einsum("bpm,bpf->bmf", w, ef) / denom[..., None]
@@ -147,7 +174,9 @@ class LinearOperator(nn.Module):
                  eta_stencils=0, multi_dilation=False, mode_attn=0,
                  bank_bottleneck=0, sep_stencils=False, channels_last=False,
                  seam_average=False, eta_embed_dim=16, eta_quant=0, grad_checkpoint=False,
-                 phys_attn=0, phys_attn_dim=32, spectral=True, phys_attn_layers=1):
+                 phys_attn=0, phys_attn_dim=32, spectral=True, phys_attn_layers=1,
+                 phys_window_physical=False, phys_grad_feat=False, phys_mode="mlp",
+                 green_patch_cond=False):
         super().__init__()
         self.nonlin = nonlin
         # spectral=False removes the SH x Chebyshev term: lift -> stencils -> head.
@@ -201,10 +230,15 @@ class LinearOperator(nn.Module):
         # viscosity-patch attention: patches defined by eta, attention between
         # their tokens. feat_dim = (log eta, 5^3 mean, 5^3 std) + geometry(4).
         self.phys_attn = int(phys_attn)
+        self.phys_window_physical = bool(phys_window_physical)
+        self.phys_grad_feat = bool(phys_grad_feat)
+        self.phys_mode = phys_mode
+        self.green_patch_cond = bool(green_patch_cond) and self.phys_attn > 0
+        self.phys_feat_dim = 7 + (1 if self.phys_grad_feat else 0)
         # several layers in sequence: each has its own patches and its own attention,
         # so later layers can re-partition the shell after the earlier mixing.
-        self.phys = (nn.ModuleList(ViscosityPatchAttention(n_hidden, self.phys_attn, 7,
-                                                           d_attn=int(phys_attn_dim))
+        self.phys = (nn.ModuleList(ViscosityPatchAttention(n_hidden, self.phys_attn, self.phys_feat_dim,
+                                                           d_attn=int(phys_attn_dim), mode=phys_mode)
                                    for _ in range(max(1, int(phys_attn_layers))))
                      if self.phys_attn > 0 else None)
         self.mode_attn = int(mode_attn)
@@ -268,6 +302,7 @@ class LinearOperator(nn.Module):
         if eta_green:
             n_lat = ((self.eta_lateral + 1) ** 2) * 16 if self.eta_lateral > 0 else 0
             n_in = 32 + (1 if level_cond else 0) + n_lat + self.eta_quant
+            n_in += (self.phys_attn * self.phys_feat_dim) if self.green_patch_cond else 0
             hid = max(64, 2 * self.eta_embed_dim)
             self.eta_embed = nn.Sequential(nn.Linear(n_in, hid), nn.GELU(),
                                            nn.Linear(hid, self.eta_embed_dim))
@@ -453,6 +488,29 @@ class LinearOperator(nn.Module):
             out = out * torch.exp(self.conv_scale_pow[i] * (self.level_scale * float(np.log(2.0)))).to(out.dtype)
         return out
 
+    def _patch_feats(self, eta_ch, b, s_dom, nx, ny, nr, dtype):
+        """(b, P, F) viscosity features for the patch attention: standardised log eta,
+        its mean and spread over a 5^3 window (in nodes, or in a fixed physical size when
+        phys_window_physical), geometry, and optionally |grad log eta|."""
+        lev = eta_ch.reshape(b * s_dom, 1, nx, ny, nr).float()
+        d = max(1, (int(nx) - 1) // 8) if self.phys_window_physical else 1
+        k = torch.ones(1, 1, 5, 5, 5, device=lev.device, dtype=lev.dtype)
+        cnt = F.conv3d(torch.ones_like(lev), k, padding=2 * d, dilation=d)
+        mup = F.conv3d(lev, k, padding=2 * d, dilation=d) / cnt
+        sdp = (F.conv3d(lev ** 2, k, padding=2 * d, dilation=d) / cnt - mup ** 2).clamp_min(0).sqrt()
+        feats = [lev, mup, sdp]
+        if self.phys_grad_feat:
+            gx = (lev[:, :, 2:] - lev[:, :, :-2]); gx = F.pad(gx, (0, 0, 0, 0, 1, 1))
+            gy = (lev[:, :, :, 2:] - lev[:, :, :, :-2]); gy = F.pad(gy, (0, 0, 1, 1))
+            gz = (lev[..., 2:] - lev[..., :-2]); gz = F.pad(gz, (1, 1))
+            feats.append((gx ** 2 + gy ** 2 + gz ** 2).sqrt() / (2.0 * d))
+        ef = torch.cat(feats, 1)
+        nf = ef.shape[1]
+        ef = ef.reshape(b, s_dom, nf, -1).permute(0, 1, 3, 2).reshape(b, -1, nf).to(dtype)
+        gm = self.geom.to(dtype).expand(b, -1, -1, -1).reshape(b, -1, 4)
+        # geometry goes in the middle so that index 6 is always the normalised depth
+        return torch.cat([ef[..., :3], gm, ef[..., 3:]], -1)
+
     def forward(self, fx: torch.Tensor) -> torch.Tensor:
         squeeze = fx.ndim == 5
         if squeeze:
@@ -475,6 +533,13 @@ class LinearOperator(nn.Module):
             gi = self.gate_in(self.geom.to(x.dtype))
             go = self.gate_out(self.geom.to(x.dtype))
         h = self.lift(x) * gi
+        ef = None
+        if self.phys is not None and self.eta_gates:
+            ef = self._patch_feats(eta_ch, b, s_dom, nx, ny, nr, h.dtype)
+            if self.green_patch_cond:
+                w0 = torch.softmax(self.phys[0].logits(ef), dim=-1)          # (b, P, M)
+                den0 = w0.sum(1).clamp_min(1e-6)
+                patch_desc = (torch.einsum("bpm,bpf->bmf", w0, ef) / den0[..., None]).reshape(b, -1)
 
         # spectral Green operator: SH x Chebyshev analysis, one dense
         # (block-channel x radial-mode) matrix per degree, synthesis back.
@@ -521,6 +586,8 @@ class LinearOperator(nn.Module):
                             pf = torch.cat([pf, torch.quantile(flat_le, qs, dim=1).T.to(pf.dtype)], 1)
                         if self.level_cond:
                             pf = torch.cat([pf, pf.new_full((b, 1), self.level_scale)], 1)
+                        if self.green_patch_cond:
+                            pf = torch.cat([pf, patch_desc.float()], 1)
                         emb = self.eta_embed(pf.to(hf.dtype))
                         giB = torch.cat(
                             [gi[None].expand(b, -1, -1, -1, -1),
@@ -604,16 +671,6 @@ class LinearOperator(nn.Module):
         h = vol.permute(0, 2, 3, 4, 1).reshape(b, s_dom, -1, c)
 
         if self.phys is not None and self.eta_gates:
-            # viscosity features per node: value, local mean, local spread, geometry
-            lev = eta_ch.reshape(b * s_dom, 1, nx, ny, nr).float()
-            mup = F.avg_pool3d(lev, 5, stride=1, padding=2, count_include_pad=False)
-            sdp = (F.avg_pool3d(lev ** 2, 5, stride=1, padding=2,
-                                count_include_pad=False)
-                   - mup ** 2).clamp_min(0).sqrt()
-            ef = torch.cat([lev, mup, sdp], 1).reshape(b, s_dom, 3, -1)
-            ef = ef.permute(0, 1, 3, 2).reshape(b, -1, 3).to(h.dtype)
-            gm = self.geom.to(h.dtype).expand(b, -1, -1, -1).reshape(b, -1, 4)
-            ef = torch.cat([ef, gm], -1)                     # (b, P, 7)
             hflat = h.reshape(b, -1, c)
             for layer in self.phys:
                 hflat = layer(hflat, ef)
