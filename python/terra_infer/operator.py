@@ -500,10 +500,15 @@ class LinearOperator(nn.Module):
         sdp = (F.conv3d(lev ** 2, k, padding=2 * d, dilation=d) / cnt - mup ** 2).clamp_min(0).sqrt()
         feats = [lev, mup, sdp]
         if self.phys_grad_feat:
-            gx = (lev[:, :, 2:] - lev[:, :, :-2]); gx = F.pad(gx, (0, 0, 0, 0, 1, 1))
-            gy = (lev[:, :, :, 2:] - lev[:, :, :, :-2]); gy = F.pad(gy, (0, 0, 1, 1))
-            gz = (lev[..., 2:] - lev[..., :-2]); gz = F.pad(gz, (1, 1))
-            feats.append((gx ** 2 + gy ** 2 + gz ** 2).sqrt() / (2.0 * d))
+            # central difference over +-d nodes, divided by the PHYSICAL distance 2 d h
+            # (h = 1/(n-1) in units of the shell thickness) so the feature reads the same
+            # at every level. The earlier form divided a 2-node difference by 2d, which
+            # left a factor h and made the feature 4x smaller at L5 than at L3.
+            hh = 1.0 / max(1, int(nx) - 1)
+            gx = (lev[:, :, 2 * d:] - lev[:, :, :-2 * d]); gx = F.pad(gx, (0, 0, 0, 0, d, d))
+            gy = (lev[:, :, :, 2 * d:] - lev[:, :, :, :-2 * d]); gy = F.pad(gy, (0, 0, d, d))
+            gz = (lev[..., 2 * d:] - lev[..., :-2 * d]); gz = F.pad(gz, (d, d))
+            feats.append((gx ** 2 + gy ** 2 + gz ** 2).sqrt() / (2.0 * d * hh))
         ef = torch.cat(feats, 1)
         nf = ef.shape[1]
         ef = ef.reshape(b, s_dom, nf, -1).permute(0, 1, 3, 2).reshape(b, -1, nf).to(dtype)
