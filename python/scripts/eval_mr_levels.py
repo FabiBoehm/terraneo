@@ -68,7 +68,7 @@ for name, root, LM, KM in CASES:
                          level_pyramid=ck.get("linear_level_pyramid", False),
                          stencil_scale=ck.get("linear_stencil_scale", False),
                          eta_lateral=ck.get("linear_eta_lateral", 0),
-                         eta_stencils=ck.get("linear_eta_stencils", 0), multi_dilation=ck.get("linear_multi_dilation", False), mode_attn=ck.get("linear_mode_attn", 0), eta_embed_dim=ck.get("linear_eta_embed_dim", 16), eta_quant=ck.get("linear_eta_quant", 0), seam_average=True, bank_bottleneck=ck.get("linear_bank_bottleneck", 0), sep_stencils=ck.get("linear_sep_stencils", False),
+                         eta_stencils=ck.get("linear_eta_stencils", 0), multi_dilation=ck.get("linear_multi_dilation", False), mode_attn=ck.get("linear_mode_attn", 0), eta_embed_dim=ck.get("linear_eta_embed_dim", 16), eta_quant=ck.get("linear_eta_quant", 0), seam_average=True, bank_bottleneck=ck.get("linear_bank_bottleneck", 0), sep_stencils=ck.get("linear_sep_stencils", False), phys_attn=ck.get("linear_phys_attn", 0), phys_attn_dim=ck.get("linear_phys_attn_dim", 32), phys_attn_layers=ck.get("linear_phys_attn_layers", 1), spectral=ck.get("linear_spectral", True),
                          green_mlp=True).eval()
     lev = int(mesh["level"])
     g = symmetry.SymmetryGroup(coords) if (TTA and lev <= TTA_MAXLEVEL) else None
@@ -97,7 +97,7 @@ for name, root, LM, KM in CASES:
                                pyramid=ck_i.get("linear_pyramid", 0), level_pyramid=ck_i.get("linear_level_pyramid", False),
                                stencil_scale=ck_i.get("linear_stencil_scale", False),
                                eta_lateral=ck_i.get("linear_eta_lateral", 0),
-                               eta_stencils=ck_i.get("linear_eta_stencils", 0), multi_dilation=ck_i.get("linear_multi_dilation", False), mode_attn=ck_i.get("linear_mode_attn", 0), eta_embed_dim=ck_i.get("linear_eta_embed_dim", 16), eta_quant=ck_i.get("linear_eta_quant", 0), seam_average=True, bank_bottleneck=ck_i.get("linear_bank_bottleneck", 0), sep_stencils=ck_i.get("linear_sep_stencils", False),
+                               eta_stencils=ck_i.get("linear_eta_stencils", 0), multi_dilation=ck_i.get("linear_multi_dilation", False), mode_attn=ck_i.get("linear_mode_attn", 0), eta_embed_dim=ck_i.get("linear_eta_embed_dim", 16), eta_quant=ck_i.get("linear_eta_quant", 0), seam_average=True, bank_bottleneck=ck_i.get("linear_bank_bottleneck", 0), sep_stencils=ck_i.get("linear_sep_stencils", False), phys_attn=ck_i.get("linear_phys_attn", 0), phys_attn_dim=ck_i.get("linear_phys_attn_dim", 32), phys_attn_layers=ck_i.get("linear_phys_attn_layers", 1), spectral=ck_i.get("linear_spectral", True),
                                green_mlp=True).eval()
         load_state(net_i, ck_i["model"])
         nets.append(net_i.to(EVAL_DEV))

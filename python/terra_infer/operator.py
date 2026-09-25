@@ -147,7 +147,7 @@ class LinearOperator(nn.Module):
                  eta_stencils=0, multi_dilation=False, mode_attn=0,
                  bank_bottleneck=0, sep_stencils=False, channels_last=False,
                  seam_average=False, eta_embed_dim=16, eta_quant=0, grad_checkpoint=False,
-                 phys_attn=0, phys_attn_dim=32, spectral=True):
+                 phys_attn=0, phys_attn_dim=32, spectral=True, phys_attn_layers=1):
         super().__init__()
         self.nonlin = nonlin
         # spectral=False removes the SH x Chebyshev term: lift -> stencils -> head.
@@ -201,8 +201,11 @@ class LinearOperator(nn.Module):
         # viscosity-patch attention: patches defined by eta, attention between
         # their tokens. feat_dim = (log eta, 5^3 mean, 5^3 std) + geometry(4).
         self.phys_attn = int(phys_attn)
-        self.phys = (ViscosityPatchAttention(n_hidden, self.phys_attn, 7,
-                                             d_attn=int(phys_attn_dim))
+        # several layers in sequence: each has its own patches and its own attention,
+        # so later layers can re-partition the shell after the earlier mixing.
+        self.phys = (nn.ModuleList(ViscosityPatchAttention(n_hidden, self.phys_attn, 7,
+                                                           d_attn=int(phys_attn_dim))
+                                   for _ in range(max(1, int(phys_attn_layers))))
                      if self.phys_attn > 0 else None)
         self.mode_attn = int(mode_attn)
         if self.mode_attn > 0:
@@ -611,7 +614,10 @@ class LinearOperator(nn.Module):
             ef = ef.permute(0, 1, 3, 2).reshape(b, -1, 3).to(h.dtype)
             gm = self.geom.to(h.dtype).expand(b, -1, -1, -1).reshape(b, -1, 4)
             ef = torch.cat([ef, gm], -1)                     # (b, P, 7)
-            h = self.phys(h.reshape(b, -1, c), ef).reshape(b, s_dom, -1, c)
+            hflat = h.reshape(b, -1, c)
+            for layer in self.phys:
+                hflat = layer(hflat, ef)
+            h = hflat.reshape(b, s_dom, -1, c)
 
         y = self.head(h * go).reshape(b, s_dom, nx, ny, nr, -1)
         if self.seam_average:
@@ -635,6 +641,12 @@ def load_state(model, state):
     harmless; a MISSING key would silently leave part of the model at initialisation,
     so that stays an error.
     """
+    # patch attention became a ModuleList: map 'phys.<p>' from older checkpoints
+    # onto 'phys.0.<p>' when the model expects the list form.
+    if any(k.startswith("phys.0.") for k in model.state_dict()) and \
+            any(k.startswith("phys.") and not k.startswith("phys.0.") for k in state):
+        state = {("phys.0." + k[len("phys."):] if k.startswith("phys.") and not k[5:6].isdigit()
+                  else k): v for k, v in state.items()}
     missing, unexpected = model.load_state_dict(state, strict=False)
     if missing:
         raise RuntimeError(f"checkpoint is missing {len(missing)} weights: {missing[:4]}")

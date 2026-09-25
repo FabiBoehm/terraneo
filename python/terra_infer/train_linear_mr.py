@@ -242,6 +242,8 @@ def main(argv=None):
                     help="remove the spectral term entirely (ablation)")
     ap.add_argument("--phys-attn", type=int, default=0,
                     help="patches for viscosity-patch attention (0 = off)")
+    ap.add_argument("--phys-attn-layers", type=int, default=1,
+                    help="number of patch-attention layers in sequence")
     ap.add_argument("--phys-attn-dim", type=int, default=32,
                     help="query/key width of the patch attention")
     ap.add_argument("--mode-attn", type=int, default=0,
@@ -393,6 +395,7 @@ def main(argv=None):
                      n_hidden=args.hidden, n_blocks=args.heads,
                      lmax=lv0["lmax"], kmax=lv0["kmax"],
                      phys_attn=args.phys_attn, phys_attn_dim=args.phys_attn_dim,
+                     phys_attn_layers=args.phys_attn_layers,
                      spectral=not args.no_spectral,
                      n_conv=args.linear_convs, kernel=args.linear_kernel,
                      depth_gates=args.linear_depth_gates,
@@ -666,6 +669,7 @@ def main(argv=None):
                         "linear_spectral": not args.no_spectral,
                         "linear_phys_attn": args.phys_attn,
                         "linear_phys_attn_dim": args.phys_attn_dim,
+                        "linear_phys_attn_layers": args.phys_attn_layers,
                         "linear_bank_bottleneck": args.bank_bottleneck,
                         "linear_sep_stencils": args.sep_stencils,
                         "linear_channels_last": args.channels_last,
