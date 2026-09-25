@@ -32,7 +32,7 @@ with torch.no_grad():
     if getattr(net, "attn_gate", None) is not None:
         net.attn_gate.fill_(0.5)
     if getattr(net, "phys", None) is not None:
-        net.phys.gate.fill_(0.5)
+        for layer in net.phys: layer.gate.fill_(0.5)
 
 S, nx, ny, nr = shape
 f1 = torch.randn(1, S, nx, ny, nr, 5) * 0.1
