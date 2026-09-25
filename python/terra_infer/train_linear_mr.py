@@ -238,6 +238,8 @@ def main(argv=None):
                          "mesh inverse Jacobian): penalises fine-scale error the L2 term under-weights")
     ap.add_argument("--target-eta-power", type=float, default=0.0,
                     help="train on u * eta^a * mean(eta)^(1-a) (a=1: locally contrast-free target)")
+    ap.add_argument("--seed", type=int, default=0,
+                    help="offsets weight initialisation and data order (replicates)")
     ap.add_argument("--no-spectral", action="store_true",
                     help="remove the spectral term entirely (ablation)")
     ap.add_argument("--phys-attn", type=int, default=0,
@@ -317,7 +319,7 @@ def main(argv=None):
     ap.add_argument("--out", required=True)
     args = ap.parse_args(argv)
 
-    torch.manual_seed(0)
+    torch.manual_seed(args.seed)
     dev = torch.device(args.device)
     # ---- optional data parallelism ---------------------------------------------------
     # No XPU collective backend is installed (no oneCCL, no internet to fetch it), so the
@@ -333,7 +335,7 @@ def main(argv=None):
         os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
         os.environ.setdefault("MASTER_PORT", "29577")
         dist.init_process_group("gloo", rank=RANK, world_size=WORLD)
-        torch.manual_seed(0)          # identical init on every rank
+        torch.manual_seed(args.seed)  # identical init on every rank
     def _is_main():
         return RANK == 0
     def _sync_grads(mod):
@@ -537,7 +539,7 @@ def main(argv=None):
         print(f"  resuming from {resume_path} at epoch {start_ep} (best {best:.4f})")
     for epoch in range(start_ep, args.epochs):
         t0 = time.time()
-        gen = torch.Generator().manual_seed(1234 + epoch)
+        gen = torch.Generator().manual_seed(1234 + epoch + 100000 * args.seed)
         if args.batch_mix:
             batches = []
             for j, lv_ in enumerate(levels):
@@ -667,6 +669,7 @@ def main(argv=None):
                         "linear_multi_dilation": args.multi_dilation,
                         "linear_mode_attn": args.mode_attn,
                         "linear_spectral": not args.no_spectral,
+                        "seed": args.seed,
                         "linear_phys_attn": args.phys_attn,
                         "linear_phys_attn_dim": args.phys_attn_dim,
                         "linear_phys_attn_layers": args.phys_attn_layers,
