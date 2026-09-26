@@ -176,7 +176,7 @@ class LinearOperator(nn.Module):
                  seam_average=False, eta_embed_dim=16, eta_quant=0, grad_checkpoint=False,
                  phys_attn=0, phys_attn_dim=32, spectral=True, phys_attn_layers=1,
                  phys_window_physical=False, phys_grad_feat=False, phys_mode="mlp",
-                 green_patch_cond=False):
+                 green_patch_cond=False, spectral_layers=1):
         super().__init__()
         self.nonlin = nonlin
         # spectral=False removes the SH x Chebyshev term: lift -> stencils -> head.
@@ -321,6 +321,26 @@ class LinearOperator(nn.Module):
         else:
             self.green = nn.Parameter(
                 0.02 * torch.randn(lmax + 1, n_blocks, tok, tok))
+        # spectral_layers > 1: further eta-generated spectral cores in sequence, each
+        # with its own generator, separated by a multiplicative gate of viscosity and
+        # geometry (a function of eta only, so the operator stays linear in f). This is
+        # the FNO's layer stack with the pointwise nonlinearity replaced by the gate.
+        self.spectral_layers = max(1, int(spectral_layers))
+        if green_mlp and self.spectral_layers > 1:
+            self.ggen_extra = nn.ModuleList()
+            for _ in range(self.spectral_layers - 1):
+                gg = nn.Sequential(nn.Linear(3 + (self.eta_embed_dim if eta_green else 0), 64),
+                                   nn.GELU(), nn.Linear(64, 64), nn.GELU(),
+                                   nn.Linear(64, n_blocks * bs * bs))
+                with torch.no_grad():
+                    gg[-1].weight.mul_(0.1)
+                    gg[-1].bias.normal_(0.0, 0.02)
+                self.ggen_extra.append(gg)
+            self.spec_gates = nn.ModuleList(
+                nn.Sequential(nn.Linear(gdim, h), nn.GELU(), nn.Linear(h, h))
+                for _ in range(self.spectral_layers - 1))
+        else:
+            self.ggen_extra = self.spec_gates = None
         self.convs = nn.ModuleList(
             nn.Conv3d(h, h, kernel, padding=kernel // 2, bias=False)
             for _ in range(n_conv))
@@ -552,88 +572,93 @@ class LinearOperator(nn.Module):
         # matrices are the numerically sensitive path of the operator.
         c = h.shape[-1]
         if self.spectral:
-            with torch.autocast(device_type=h.device.type, enabled=False):
-                hf = h.float() if h.dtype in (torch.bfloat16, torch.float16) else h
-                lat = hf.reshape(b, s_dom, nx, ny, nr, c).permute(0, 5, 1, 2, 3, 4)
-                lat = lat.reshape(b, c, s_dom * nx * ny, nr)
-                fm = torch.einsum("mn,bcnr->bcmr", self.sht_A.to(hf.dtype), lat)
-                fk = torch.einsum("bcmr,rk->bcmk", fm, self.sht_Ar.to(hf.dtype).T)
-                nb, bs = self.n_blocks, c // self.n_blocks
-                m = fk.shape[2]
-                t = fk.reshape(b, nb, bs, m, -1).permute(0, 1, 3, 2, 4).reshape(b, nb, m, -1)
-                if self.green_mlp:
-                    k1 = fk.shape[-1]
-                    ls = torch.arange(self.lmax + 1, device=hf.device,
-                                      dtype=hf.dtype) / 16.0
-                    ks = torch.arange(k1, device=hf.device, dtype=hf.dtype) / 8.0
-                    gi = torch.stack([
-                        ls[:, None, None].expand(-1, k1, k1),
-                        ks[None, :, None].expand(self.lmax + 1, -1, k1),
-                        ks[None, None, :].expand(self.lmax + 1, k1, -1)], -1)
-                    if self.eta_green:
-                        prof = eta_ch.reshape(b, s_dom, nx, ny, nr).float()
-                        pf = torch.stack([prof.mean(dim=(1, 2, 3)),
-                                          prof.std(dim=(1, 2, 3))], 1)  # (b,2,nr)
-                        pf = F.interpolate(pf, size=16, mode="linear",
-                                           align_corners=True)
-                        pf = pf.reshape(b, 32)
-                        if self.eta_lateral > 0:
-                            le = eta_ch.reshape(b, 1, s_dom * nx * ny, nr).float()
-                            fme = torch.einsum("mn,bcnr->bcmr", self.sht_A.float(), le)[:, 0]
-                            sel = self.deg <= self.eta_lateral
-                            fme = fme[:, sel, :]                                   # (b, (L+1)^2, nr)
-                            fme = F.interpolate(fme, size=16, mode="linear", align_corners=True)
-                            pf = torch.cat([pf, fme.reshape(b, -1)], 1)
-                        if self.eta_quant > 0:
-                            flat_le = eta_ch.reshape(b, -1).float()
-                            qs = torch.linspace(0.0, 1.0, self.eta_quant, device=flat_le.device,
-                                                dtype=flat_le.dtype)
-                            pf = torch.cat([pf, torch.quantile(flat_le, qs, dim=1).T.to(pf.dtype)], 1)
-                        if self.level_cond:
-                            pf = torch.cat([pf, pf.new_full((b, 1), self.level_scale)], 1)
-                        if self.green_patch_cond:
-                            pf = torch.cat([pf, patch_desc.float()], 1)
-                        emb = self.eta_embed(pf.to(hf.dtype))
-                        giB = torch.cat(
-                            [gi[None].expand(b, -1, -1, -1, -1),
-                             emb[:, None, None, None, :].expand(
-                                 b, self.lmax + 1, k1, k1, -1)], -1)
-                        g = self.ggen(giB).reshape(b, self.lmax + 1, k1, k1,
-                                                   nb, bs, bs)
-                        wl = g.permute(0, 1, 4, 5, 2, 6, 3).reshape(
-                            b, self.lmax + 1, nb, bs * k1, bs * k1)
-                        # per-degree loop instead of wl[:, deg]: avoids
-                        # materialising the (b, M, nb, tok, tok) tensor
-                        o = torch.empty_like(t)
-                        for l in range(self.lmax + 1):
-                            sel = self.deg == l
-                            o[:, :, sel] = torch.einsum(
-                                "bqmt,bqts->bqms", t[:, :, sel], wl[:, l])
+            for si in range(self.spectral_layers):
+                ggen = self.ggen if si == 0 else self.ggen_extra[si - 1]
+                with torch.autocast(device_type=h.device.type, enabled=False):
+                    hf = h.float() if h.dtype in (torch.bfloat16, torch.float16) else h
+                    lat = hf.reshape(b, s_dom, nx, ny, nr, c).permute(0, 5, 1, 2, 3, 4)
+                    lat = lat.reshape(b, c, s_dom * nx * ny, nr)
+                    fm = torch.einsum("mn,bcnr->bcmr", self.sht_A.to(hf.dtype), lat)
+                    fk = torch.einsum("bcmr,rk->bcmk", fm, self.sht_Ar.to(hf.dtype).T)
+                    nb, bs = self.n_blocks, c // self.n_blocks
+                    m = fk.shape[2]
+                    t = fk.reshape(b, nb, bs, m, -1).permute(0, 1, 3, 2, 4).reshape(b, nb, m, -1)
+                    if self.green_mlp:
+                        k1 = fk.shape[-1]
+                        ls = torch.arange(self.lmax + 1, device=hf.device,
+                                          dtype=hf.dtype) / 16.0
+                        ks = torch.arange(k1, device=hf.device, dtype=hf.dtype) / 8.0
+                        gi = torch.stack([
+                            ls[:, None, None].expand(-1, k1, k1),
+                            ks[None, :, None].expand(self.lmax + 1, -1, k1),
+                            ks[None, None, :].expand(self.lmax + 1, k1, -1)], -1)
+                        if self.eta_green:
+                            prof = eta_ch.reshape(b, s_dom, nx, ny, nr).float()
+                            pf = torch.stack([prof.mean(dim=(1, 2, 3)),
+                                              prof.std(dim=(1, 2, 3))], 1)  # (b,2,nr)
+                            pf = F.interpolate(pf, size=16, mode="linear",
+                                               align_corners=True)
+                            pf = pf.reshape(b, 32)
+                            if self.eta_lateral > 0:
+                                le = eta_ch.reshape(b, 1, s_dom * nx * ny, nr).float()
+                                fme = torch.einsum("mn,bcnr->bcmr", self.sht_A.float(), le)[:, 0]
+                                sel = self.deg <= self.eta_lateral
+                                fme = fme[:, sel, :]                                   # (b, (L+1)^2, nr)
+                                fme = F.interpolate(fme, size=16, mode="linear", align_corners=True)
+                                pf = torch.cat([pf, fme.reshape(b, -1)], 1)
+                            if self.eta_quant > 0:
+                                flat_le = eta_ch.reshape(b, -1).float()
+                                qs = torch.linspace(0.0, 1.0, self.eta_quant, device=flat_le.device,
+                                                    dtype=flat_le.dtype)
+                                pf = torch.cat([pf, torch.quantile(flat_le, qs, dim=1).T.to(pf.dtype)], 1)
+                            if self.level_cond:
+                                pf = torch.cat([pf, pf.new_full((b, 1), self.level_scale)], 1)
+                            if self.green_patch_cond:
+                                pf = torch.cat([pf, patch_desc.float()], 1)
+                            emb = self.eta_embed(pf.to(hf.dtype))
+                            giB = torch.cat(
+                                [gi[None].expand(b, -1, -1, -1, -1),
+                                 emb[:, None, None, None, :].expand(
+                                     b, self.lmax + 1, k1, k1, -1)], -1)
+                            g = ggen(giB).reshape(b, self.lmax + 1, k1, k1,
+                                                       nb, bs, bs)
+                            wl = g.permute(0, 1, 4, 5, 2, 6, 3).reshape(
+                                b, self.lmax + 1, nb, bs * k1, bs * k1)
+                            # per-degree loop instead of wl[:, deg]: avoids
+                            # materialising the (b, M, nb, tok, tok) tensor
+                            o = torch.empty_like(t)
+                            for l in range(self.lmax + 1):
+                                sel = self.deg == l
+                                o[:, :, sel] = torch.einsum(
+                                    "bqmt,bqts->bqms", t[:, :, sel], wl[:, l])
+                        else:
+                            g = ggen(gi).reshape(self.lmax + 1, k1, k1, nb, bs, bs)
+                            # rows (i, k), cols (j, k') -- bs-major, matching t's layout
+                            wl = g.permute(0, 3, 4, 1, 5, 2).reshape(
+                                self.lmax + 1, nb, bs * k1, bs * k1)
+                            o = torch.einsum("bqmt,mqts->bqms", t,
+                                             wl[self.deg])         # (M, nb, tok, tok)
                     else:
-                        g = self.ggen(gi).reshape(self.lmax + 1, k1, k1, nb, bs, bs)
-                        # rows (i, k), cols (j, k') -- bs-major, matching t's layout
-                        wl = g.permute(0, 3, 4, 1, 5, 2).reshape(
-                            self.lmax + 1, nb, bs * k1, bs * k1)
-                        o = torch.einsum("bqmt,mqts->bqms", t,
-                                         wl[self.deg])         # (M, nb, tok, tok)
-                else:
-                    o = torch.einsum("bqmt,mqts->bqms", t, self.green[self.deg])
-                if self.mode_attn > 0:
-                    le_a = eta_ch.reshape(b, 1, s_dom * nx * ny, nr).float()
-                    fa = torch.einsum("mn,bcnr->bcmr", self.sht_A.float(), le_a)[:, 0]   # (b, m, nr)
-                    fa = F.interpolate(fa, size=16, mode="linear", align_corners=True)
-                    pos = torch.stack([self.deg.float() / max(1, self.lmax), self.ordf], -1)  # (m, 2)
-                    feat = torch.cat([fa, pos[None].expand(b, -1, -1)], -1)                  # (b, m, 18)
-                    q = self.attn_q(feat); kk = self.attn_k(feat)
-                    A = torch.softmax(q @ kk.transpose(1, 2) / float(self.mode_attn) ** 0.5, -1)  # (b, m, m)
-                    mixed = torch.einsum("bmn,bqnt->bqmt", A.to(o.dtype), o)
-                    o = o + self.attn_gate.to(o.dtype)[None, :, None, None] * mixed
-                o = o.reshape(b, nb, m, bs, -1).permute(0, 1, 3, 2, 4).reshape(b, c, m, -1)
-                o = torch.einsum("bcmk,rk->bcmr", o, self.sht_Yr.to(hf.dtype))
-                o = torch.einsum("nm,bcmr->bcnr", self.sht_Y.to(hf.dtype), o)
-                o = o.reshape(b, c, s_dom, nx, ny, nr).permute(0, 2, 3, 4, 5, 1)
-                ospec = o.reshape(b, s_dom, -1, c)
-                h = hf + (F.gelu(ospec) if self.nonlin else ospec)
+                        o = torch.einsum("bqmt,mqts->bqms", t, self.green[self.deg])
+                    if self.mode_attn > 0:
+                        le_a = eta_ch.reshape(b, 1, s_dom * nx * ny, nr).float()
+                        fa = torch.einsum("mn,bcnr->bcmr", self.sht_A.float(), le_a)[:, 0]   # (b, m, nr)
+                        fa = F.interpolate(fa, size=16, mode="linear", align_corners=True)
+                        pos = torch.stack([self.deg.float() / max(1, self.lmax), self.ordf], -1)  # (m, 2)
+                        feat = torch.cat([fa, pos[None].expand(b, -1, -1)], -1)                  # (b, m, 18)
+                        q = self.attn_q(feat); kk = self.attn_k(feat)
+                        A = torch.softmax(q @ kk.transpose(1, 2) / float(self.mode_attn) ** 0.5, -1)  # (b, m, m)
+                        mixed = torch.einsum("bmn,bqnt->bqmt", A.to(o.dtype), o)
+                        o = o + self.attn_gate.to(o.dtype)[None, :, None, None] * mixed
+                    o = o.reshape(b, nb, m, bs, -1).permute(0, 1, 3, 2, 4).reshape(b, c, m, -1)
+                    o = torch.einsum("bcmk,rk->bcmr", o, self.sht_Yr.to(hf.dtype))
+                    o = torch.einsum("nm,bcmr->bcnr", self.sht_Y.to(hf.dtype), o)
+                    o = o.reshape(b, c, s_dom, nx, ny, nr).permute(0, 2, 3, 4, 5, 1)
+                    ospec = o.reshape(b, s_dom, -1, c)
+                    h = hf + (F.gelu(ospec) if self.nonlin else ospec)
+                if si + 1 < self.spectral_layers:
+                    gf = gfeat if self.eta_gates else self.geom.to(h.dtype).expand(b, -1, -1, -1)
+                    h = h * self.spec_gates[si](gf.to(h.dtype))
 
         vol = h.reshape(b * s_dom, nx, ny, nr, c).permute(0, 4, 1, 2, 3)
         if self.channels_last:

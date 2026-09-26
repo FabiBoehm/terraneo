@@ -353,17 +353,18 @@ imposed by a random initialisation.
 
 *Generating the entries.* A learned network $\Gamma$ — $\mathrm{Linear}(19\to64)$, GELU,
 $\mathrm{Linear}(64\to64)$, GELU, $\mathrm{Linear}(64\to2048)$ — takes $3+16=19$ inputs:
-three normalised indices and the embedding. It is evaluated for every index triple
+three scaled indices and the embedding. It is evaluated for every index triple
 $(\ell,k,k')$ with $0\le\ell\le\ell_{\max}$ and $0\le k,k'\le k_{\max}$, i.e.
 $(\ell_{\max}+1)\,k_1^2$ times per sample, and each evaluation returns
 $n_bb_s^2=8\cdot16^2=2048$ numbers, which are read as one $b_s\times b_s$
 channel-mixing block per group:
 
 $$\left[G_\ell\right]^{(q)}_{(c,k),(c',k')}
-=\Gamma\!\left(\frac{\ell}{\ell_{\max}},\ \frac{k}{k_{\max}},\ \frac{k'}{k_{\max}}\ ;\ e(\eta)\right)^{(q)}_{cc'}.$$
+=\Gamma\!\left(\frac{\ell}{16},\ \frac{k}{8},\ \frac{k'}{8}\ ;\ e(\eta)\right)^{(q)}_{cc'}.$$
 
-The three arguments before the semicolon are the indices, normalised to $[0,1]$ so that
-the same network serves every level; the argument after it is the conditioning; the
+The three arguments before the semicolon are the indices, divided by fixed constants
+(not by the current truncation) so that a given mode means the same thing at every
+level; the argument after it is the conditioning; the
 superscript and subscripts on the right pick one of the 2048 outputs. Assembling the
 outputs over all $(k,k')$ for a fixed $\ell$ and $q$ fills the $(b_sk_1)\times(b_sk_1)$
 matrix $G^{(q)}_\ell$ of section 1. Everything the integral term learns is in $\Gamma$
@@ -373,10 +374,10 @@ Two consequences follow. Every sample gets its own Green's function, conditioned
 own viscosity profile. And the learned object is a smooth function of *continuous*
 indices rather than a table with one entry per grid point, so a finer mesh — which
 allows a larger $\ell_{\max}$ and $k_{\max}$ — simply evaluates $\Gamma$ at more points.
-This is exactly what makes the integral term discretisation convergent. One caveat: the
-indices are normalised by the *current* truncation, so the model is consistent only
-when the truncation grows with level the way it did in training (12, 24, 32, 32 here);
-evaluating at a lower truncation than trained gives wrong kernels.
+This is exactly what makes the integral term discretisation convergent: raising the
+truncation only asks $\Gamma$ for modes it has not been trained on, at arguments beyond
+the trained range ($\ell/16>2$, $k/8>2$), which is extrapolation, not a different
+function. That is one reason the truncation stops growing at level 5.
 
 *What the kernel does not see.* $e(\eta)$ carries only the radial profile of the
 viscosity — nothing about *where* laterally a slab or a channel sits. Two ways of giving

@@ -252,6 +252,8 @@ def main(argv=None):
                     help="how nodes are assigned to patches")
     ap.add_argument("--green-patch-cond", action="store_true",
                     help="condition the kernel generator on the patch descriptors")
+    ap.add_argument("--spectral-layers", type=int, default=1,
+                    help="number of eta-generated spectral cores in sequence")
     ap.add_argument("--phys-attn-layers", type=int, default=1,
                     help="number of patch-attention layers in sequence")
     ap.add_argument("--phys-attn-dim", type=int, default=32,
@@ -406,6 +408,7 @@ def main(argv=None):
                      lmax=lv0["lmax"], kmax=lv0["kmax"],
                      phys_attn=args.phys_attn, phys_attn_dim=args.phys_attn_dim,
                      phys_attn_layers=args.phys_attn_layers,
+                     spectral_layers=args.spectral_layers,
                      phys_window_physical=args.phys_window_physical, phys_grad_feat=args.phys_grad_feat,
                      phys_mode=args.phys_mode, green_patch_cond=args.green_patch_cond,
                      spectral=not args.no_spectral,
@@ -683,6 +686,7 @@ def main(argv=None):
                         "linear_phys_attn": args.phys_attn,
                         "linear_phys_attn_dim": args.phys_attn_dim,
                         "linear_phys_attn_layers": args.phys_attn_layers,
+                        "linear_spectral_layers": args.spectral_layers,
                         "linear_phys_window_physical": args.phys_window_physical,
                         "linear_phys_grad_feat": args.phys_grad_feat,
                         "linear_phys_mode": args.phys_mode,
