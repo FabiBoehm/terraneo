@@ -567,10 +567,10 @@ more modes. The patch term assigns each node by its own viscosity state and geom
 and its learned weights act on patch tokens, so nothing in it depends on the node count.
 
 **Measured.** Trained on levels 3–5 with level 6 never seen, the model's error is
-0.186 / 0.257 / 0.266 / 0.276 — a 4 % growth from the finest trained level to the
-unseen one. Trained on levels 3–4 only, it is 0.215 / 0.321 / 0.384 / 0.434: two
-refinement levels beyond the training data cost a factor of 1.35 over the finest
-trained level.
+0.172 / 0.239 / 0.231 / 0.211: it does not grow beyond the training data at all, and
+level 6 scores below level 4. Trained on levels 3–4 only, it is
+0.215 / 0.321 / 0.384 / 0.434, so two refinement levels beyond the training data cost a
+factor of 1.35 over the finest trained level. Training through level 5 removes that.
 
 **What still limits it.** The truncation is held at $\ell_{\max}=32$ from level 5
 upward while the mesh keeps refining, so the harmonics span 21 % of the lateral degrees
@@ -615,26 +615,26 @@ To check the generator against TERRA itself:
 
 ### 2. Train
 
-The recipe behind the current checkpoint (`w3d_linear_lad_clean3.pt`): levels 3–5,
-general-contrast sets plus high-contrast sets at every level, level 6 held out. One
-process per GPU tile, four tiles, gradients averaged through gloo on the host:
+The recipe behind the current checkpoint (`w3d_linear_lad_xgen.pt`): levels 3–5,
+general-contrast sets only, level 6 held out. One process per GPU tile, four tiles,
+gradients averaged through gloo on the host:
 
     for r in 0 1 2 3; do
       WORLD_SIZE=4 RANK=$r ZE_AFFINITY_MASK=$r MASTER_ADDR=127.0.0.1 MASTER_PORT=29500 \
       python -m terra_infer.train_linear_mr \
         --hidden 128 --heads 8 --linear-convs 0 --eta-gates --eta-green --phys-attn 32 \
-        --data $ML/stokes_L3_d8 --data2 $ML/stokes_L4_d8 \
-        --data3 $ML/stokes_L5_hcall --max-train3 1600 \
-        --extra-data $ML/stokes_L3_hc:12:8:32 --extra-data $ML/stokes_L4_hc:24:16:16 \
-        --extra-data $ML/stokes_L5_hc3:32:16:4:2000 \
+        --data $ML/stokes_L3_d8 --data2 $ML/stokes_L4_d8 --data3 $ML/stokes_L5_d8ok \
         --lmax 12 --kmax 8 --lmax2 24 --kmax2 16 --lmax3 32 --kmax3 16 \
         --batch-size 32 --batch-size2 16 --batch-size3 4 --batch-mix \
         --epochs 120 --lr 6e-3 --h1-weight 0.5 --seam-average \
         --amp --grad-checkpoint --max-test 32 --device xpu \
-        --out $ML/w3d_linear_clean3.pt &
+        --out $ML/w3d_linear_xgen.pt &
     done; wait
 
-`--extra-data path:lmax:kmax:batch[:max_train]` adds a dataset; `--batch-mix`
+Training on the general-contrast sets alone beats adding the high-contrast sets at
+every level, although the general sets are a third of the data: the high-contrast sets
+double the error below contrast 10 and buy ground only above contrast 1000. The
+`--extra-data path:lmax:kmax:batch[:max_train]` option adds a dataset; `--batch-mix`
 interleaves shuffled batches from all datasets so the weights never see a per-epoch
 level seesaw. The learning rate follows a one-cycle schedule over the whole run. The
 loss is relative L2 on velocity and mean-free pressure plus an `H^1` gradient term
@@ -651,8 +651,9 @@ Practicalities that matter on PVC:
   per-batch gather stalls on page faults. Each rank stages its own copy, so the recipe
   above needs ~95 GiB per rank and four ranks per 512 GB node. Build the caches once
   in a single process before starting several jobs on the same datasets.
-- An epoch of the recipe above takes ~150 s on four tiles. 120 epochs is not the
-  optimum: the held-out error was still falling when the schedule ended.
+- An epoch of the recipe above takes ~65 s on four tiles. 120 epochs is not the
+  optimum: the held-out error was still falling when the schedule ended, and 60 epochs
+  is far short of it (0.26 against 0.19 at level 3).
 - The host all-reduce costs ~1.5 s per step, so the batch has to grow with the rank
   count for the ranks to pay off.
 - Learning rate: the optimum is near `6e-3`; `2e-3` is 5–12 % worse at every level.
@@ -670,12 +671,13 @@ Every architecture switch is recorded in the checkpoint (`hidden`, `heads`,
 Held-out error per level on the general-contrast test sets:
 
     EVAL_DEVICE=xpu EVAL_NTEST=32 EVAL_NTEST_L6=27 \
-      python scripts/eval_mr_levels.py $ML/w3d_linear_clean3.pt
+      python scripts/eval_mr_levels.py $ML/w3d_linear_xgen.pt
 
 reports mean / best / median / worst relative L2 for velocity and the pressure error at
 each level (a comma-separated list of checkpoints is scored as a set routed by viscosity
-contrast, with `EVAL_MOE_THRESH` giving the band thresholds). On the GPU with sample
-prefetching this takes about a minute; on CPU 25 minutes. `EVAL_LM_L6=48 EVAL_KM_L6=24` overrides the truncation at a level;
+contrast, with `EVAL_MOE_THRESH` giving the band thresholds; without it a list of
+checkpoints is averaged instead). `EVAL_BINS=1` adds a breakdown by viscosity contrast.
+On the GPU with sample prefetching this takes about a minute; on CPU 25 minutes. `EVAL_LM_L6=48 EVAL_KM_L6=24` overrides the truncation at a level;
 `EVAL_ONLY=L6` restricts to one.
 
     python scripts/plot_crosscut.py stokes_L5_d8 32 16 24 crosscut_L5.png
@@ -719,16 +721,28 @@ Held-out relative $L^2$ velocity error $\|u_{pred}-u\|/\|u\|$ on the general tes
 
 | level | best | median | **mean** | worst | pressure |
 |---|---|---|---|---|---|
-| L3 (9^3) | 0.053 | 0.158 | **0.186** | 0.437 | 0.057 |
-| L4 (17^3) | 0.069 | 0.220 | **0.257** | 0.733 | 0.041 |
-| L5 (33^3) | 0.089 | 0.218 | **0.266** | 0.806 | 0.041 |
-| L6 (65^3, unseen) | 0.110 | 0.214 | **0.276** | 0.918 | 0.038 |
+| L3 (9^3) | 0.025 | 0.157 | **0.172** | 0.587 | 0.049 |
+| L4 (17^3) | 0.032 | 0.181 | **0.239** | 1.007 | 0.035 |
+| L5 (33^3) | 0.034 | 0.179 | **0.231** | 0.966 | 0.035 |
+| L6 (65^3, unseen) | 0.038 | 0.172 | **0.211** | 0.955 | 0.032 |
 
-The distribution is skewed: medians sit well below means, and a few high-contrast
-problems set the worst case — a narrow low-viscosity channel cutting across the shell
-is the typical one, exactly the structure that a truncated harmonic expansion cannot
-represent and the patch term must carry. The median is nearly level-independent from
-level 4 on; the mean grows by 4 % from the finest trained level to the unseen one.
+The error does not grow with refinement above level 4: the two levels the model was
+never trained on score at or below the finest trained level.
+
+The mean is set almost entirely by high viscosity contrast. Splitting the same test
+sets by $\chi=\max\eta/\min\eta$:
+
+| contrast band | samples | L3 | L4 | L5 | L6 |
+|---|---|---|---|---|---|
+| 1 – 10 | 12 | 0.053 | 0.065 | 0.067 | 0.076 |
+| 10 – 100 | 8 | 0.169 | 0.205 | 0.198 | 0.201 |
+| 100 – 1000 | 3 | 0.251 | 0.333 | 0.330 | 0.292 |
+| above 1000 | 9 | 0.308 | 0.470 | 0.445 | 0.408 |
+
+At low contrast the operator is already well inside the useful range. What sets the
+mean is the top two bands, where the solution is controlled by narrow weak channels and
+sharp interfaces — structure that the harmonic truncation cannot represent and that the
+patch term alone has to carry. That is where the remaining work is.
 
 The solver benchmark (pipeline step 4: cold start against the prediction as initial
 guess, iterations to reach a given velocity error) has not yet been run with this
@@ -736,10 +750,21 @@ operator.
 
 ## Known limits
 
-- The mean error is 0.19–0.28, the median 0.16–0.22. The target for a useful initial
-  guess is 0.1 at every level; the held-out error was still falling at the end of the
-  120-epoch schedule and the model has a single spectral layer, so longer schedules,
-  stacked spectral cores (`--spectral-layers`) and wider channels are the open levers.
+- The mean error is 0.17–0.24 and is set by the two highest contrast bands, where it
+  reaches 0.31–0.47. The target for a useful initial guess is 0.1 at every level, which
+  needs roughly a factor of two in those bands. The held-out error was still falling at
+  the end of the 120-epoch schedule, the model has a single spectral layer, and the
+  lateral structure of the viscosity reaches the operator only through the 3 232
+  parameters of the patch term, so longer schedules, stacked spectral cores
+  (`--spectral-layers`), more patches and coupling across harmonic degrees are the open
+  levers.
+- Training data is thin above level 3: 10 000 general-contrast samples at level 3
+  against 1 000 at level 4 and 737 at level 5, which is the likeliest reason level 3 is
+  the most accurate level at the same relative truncation.
+- Contrast-routed experts, which gave the previous design a factor of 2.4, do not work
+  for this operator: the kernel generator is conditioned on viscosity statistics, so an
+  expert trained on a narrow contrast band extrapolates badly outside it and is worse
+  than a general model even inside it.
 - Error grows with refinement for the reasons in *Discretisation convergence*: the
   truncation stops at $\ell_{\max}=32$ and the patch statistics use a window in nodes.
 - As a **preconditioner** inside FGMRES, every learned operator tried — several
