@@ -212,7 +212,12 @@ def cband_preconditioner(fields):
                                kernel=ck_.get("linear_kernel", 3),
                                depth_gates=ck_.get("linear_depth_gates", False),
                                radial_dense=ck_.get("linear_radial_dense", False),
-                               pyramid=ck_.get("linear_pyramid", 0)
+                               pyramid=ck_.get("linear_pyramid", 0),
+                               seam_average=True,
+                               phys_attn=ck_.get("linear_phys_attn", 0),
+                               phys_attn_dim=ck_.get("linear_phys_attn_dim", 32),
+                               phys_attn_layers=ck_.get("linear_phys_attn_layers", 1),
+                               spectral_layers=ck_.get("linear_spectral_layers", 1),
                                ).to(dev).eval()
             load_state(n, ck_["model"])
             return n
