@@ -81,24 +81,39 @@ expensive fine one. Our goals, in order of how strictly we achieve them:
 
 1. **Exact linearity in $f$.** For fixed $\eta$ the true map $f\mapsto K_\eta^{-1}f$ is
    linear. We build that in rather than hoping to learn it.
-2. **Discretisation convergence** for as much of the model as possible. One component
-   violates it, deliberately, and the violation is measured and documented.
+2. **Discretisation convergence.** Every learned component of the operator is defined
+   on the continuum; what still limits transfer to finer meshes is measured and documented.
 3. **Enough accuracy to save solver time.** Around 10% relative error turns out to be
    worth a factor of two in iterations; below that the returns diminish.
 
 
 ## The operator
 
-### Two facts that shape the design
-
 The true solution operator $\mathcal G^\dagger(f,\eta)=K_\eta^{-1}f$ has two properties
 that every decision below traces back to.
+
+### Two facts that shape the design
 
 1. **It is linear in $f$ and nonlinear only in $\eta$.** Doubling the load doubles the
    flow; changing the viscosity changes the operator itself.
 2. **It is non-local.** $K_\eta^{-1}$ has a dense Green's function: a load anywhere
    moves fluid everywhere, with an influence that decays only algebraically with
    distance. No stencil of fixed width can represent it.
+
+### How the design was arrived at
+
+The architecture below is the result of an ablation campaign (25–26 September 2026,
+~40 trained models, every job in `ml_registry.md` on sng2) that started from the
+previously deployed design — the same spectral core followed by four layers of
+$5\times5\times5$ convolutional stencils on each diamond, 8–41 M parameters per expert —
+and removed everything that did not improve held-out error by at least 10 %. The
+stencils, 98 % of those parameters, added nothing at the levels they were trained on
+and were what made the model fail on finer meshes; they are replaced by a 3 000-parameter
+attention between viscosity-defined patches. The learning rate rose tenfold once the
+convolutions were gone. Everything else that was tried — attention across harmonic
+degrees, defect correction, more patches, more layers, dilated or separable or pyramid
+stencils, doubled truncation, extra conditioning of the kernel generator — was cut by the
+same rule. The result has 180 528 parameters.
 
 ### Notation
 
@@ -113,16 +128,12 @@ that every decision below traces back to.
 | $k$ | Chebyshev radial index, $0\le k\le k_{\max}$; $k_1=k_{\max}+1$ | $k_{\max}=8,16,16,16$ |
 | $Y_\ell^m$, $T_k$ | real spherical harmonic, Chebyshev polynomial | — |
 | $n_b$, $b_s$ | channel groups and channels per group, $d_v=n_b b_s$ | 8, 16 |
-| $n_{loc}$ | number of local layers | 4 (8 in the top expert) |
-| $J$ | learned stencil kernels per local layer | 4 |
-| $d$ | stencil dilation, in nodes | 1 (or $(n-1)/8$ with `--dilated-stencils`) |
-| $\chi$ | viscosity contrast $\max\eta/\min\eta$ of a sample | 1 – $10^4$ |
+| $M_p$ | number of viscosity patches | 32 |
 | $\Pi$ | projection onto the finite-element space, defined in *Projection* below | — |
 | $\odot$ | product channel by channel at each node | — |
 
-Two typographic conventions. $K_\eta$ (roman) is always the discrete Stokes matrix and
-$\mathcal K$ (script) always the network's integral term. Boldface is not used; vectors
-and fields are clear from context.
+$K_\eta$ (roman) is always the discrete Stokes matrix and $\mathcal K$ (script) always
+the network's integral term.
 
 **Inputs and outputs, concretely.** At every node the network receives five numbers:
 the three components of $f_u$, the value of $f_p$, and the *standardised*
@@ -179,13 +190,11 @@ below define $\mathcal K(\eta)$:
 
 $$v\ \leftarrow\ v+\mathcal K(\eta)\,v.$$
 
-**Step 3 — local layers, $n_{loc}$ of them.** Each layer $t$ has its own stencil
-operator $\mathcal W_t(\eta)$ — a $5^3$ stencil whose weights depend on the local
-viscosity, defined in full in section 3 — and its own gate $g_t$, a learned MLP
-$\mathrm{Linear}(4\to128)$, GELU, $\mathrm{Linear}(128\to128)$ of the four geometry
-numbers only (position and depth, not viscosity):
+**Step 3 — attention between viscosity patches, applied once.** The second coupling,
+between regions of the shell in the same viscosity state; section 3 defines
+$\mathcal A(\eta)$:
 
-$$v\ \leftarrow\ v+\mathcal W_t(\eta)\left(g_t\odot v\right),\qquad t=1,\dots,n_{loc}.$$
+$$v\ \leftarrow\ v+\gamma\odot\mathcal A(\eta)\,v .$$
 
 **Step 4 — project.** Rescale by an output gate $g_{out}$ of exactly the same form and
 inputs as $g_{in}$ (separate weights), map the $d_v$ features back to the four
@@ -196,16 +205,16 @@ $$x\ \leftarrow\ \Pi\left(W_Q\left(g_{out}(\eta)\odot v\right)\right).$$
 
 Compared with the template, three things are different, all on purpose.
 
-- **$\mathcal K$ and $\mathcal W$ are not interleaved.** The template alternates them in
-  every layer. We apply $\mathcal K$ once and then $n_{loc}$ local layers, because one
-  application of $\mathcal K$ already couples every radial mode with every other at each
-  harmonic degree — a second gains little — whereas each local layer extends the local
-  term's reach by two nodes, and reach is what the model lacks.
-- **No bias.** Every $b_t=0$, and $W_P$, $W_Q$ have none.
+- **There is no local term at all.** The template's $\mathcal W_t$ — a stencil or a
+  pointwise map on the grid — is absent. Both coupling terms are defined on the
+  continuum: one in the shell's spectral basis, one over patches of nodes grouped by
+  their physical state. This is what makes the operator usable on meshes it was never
+  trained on (see *Discretisation convergence*).
+- **No bias.** $W_P$, $W_Q$ and every layer on the forcing path have none.
 - **No nonlinearity on the path $f$ takes.** The only nonlinear functions in the model
-  are the gates $g$, the kernel generator $\Gamma$ (section 2) and the stencil mixing
-  weights $\lambda$ (section 3) — and all of them are functions of $\eta$ and geometry,
-  never of $f$. Section 4 states what this buys.
+  are the gates $g$, the kernel generator $\Gamma$ (section 2) and the patch assignment
+  and attention weights (section 3) — and all of them are functions of $\eta$ and
+  geometry, never of $f$. Section 4 states what this buys.
 
 ### 1. The integral term acts in the shell's own basis
 
@@ -214,7 +223,7 @@ $\kappa(x,y)=\kappa(x-y)$ on a periodic box: the integral is then a convolution,
 FFT diagonalises it, and the model learns one weight matrix per Fourier mode up to a
 truncation. A spherical shell has no translations, but it has rotations about its
 centre, and the basis adapted to those is spherical harmonics laterally and Chebyshev
-polynomials radially. This subsection defines that expansion; the next two say what the
+polynomials radially. This subsection defines that expansion; the next says what the
 model does with it.
 
 *Coordinates.* Write a point as $x=(r,\theta,\varphi)$: radius $r\in[r_{\min},r_{\max}]$,
@@ -272,7 +281,9 @@ to be computed and corrected for the duplicates. The least-squares fit is not im
 the duplicates either — a repeated row counts twice — but the copies of a seam node carry
 the same value, so the extra weight distorts the fit mildly and never makes it
 inconsistent. Both matrices depend only on the mesh and are built once per level; they
-are not learned.
+are not learned. (Doubling the truncation was tested and cut: it costs 4x and is worse;
+at $\ell_{\max}=64$ on the level-5 node count the least-squares analysis is
+ill-conditioned.)
 
 *What the operator does to the coefficients.* A kernel that is invariant under rotations
 of the sphere cannot couple a harmonic $(\ell,m)$ to any $(\ell',m')$ with
@@ -318,8 +329,8 @@ $$\widehat{(\mathcal K v)}^{(q)}_{c,\ell mk}
 so for each degree $\ell$ there are $n_b$ matrices, one per group, each acting on the
 group's stacked (channel, radial-mode) vector of length $b_sk_1$ — 144 at level 3, 272
 from level 4 on. That block size is called `tok` in the code. Groups do not exchange
-information inside $\mathcal K$; they do in the local layers, whose $W_{t,\delta}$ mix
-all 128 channels.
+information inside $\mathcal K$; they do in the patch attention, which mixes all 128
+channels.
 
 ### 2. The kernel is generated from the viscosity, not stored
 
@@ -327,7 +338,8 @@ The template allows the kernel to depend on the parameter, $\kappa(x,y,a(x),a(y)
 every $G_\ell^{(q)}$ were a free matrix, the model would learn one Green's function for
 the *average* viscosity of the training set and could not respond to the viscosity of
 the problem in front of it. So the matrices are *generated* from $\eta$ by a small
-network, once per sample.
+network, once per sample. (A fixed table was tested: 43 % worse at the trained levels,
+and it diverges — error $10^8$ — when queried on a finer mesh.)
 
 *Summarising the viscosity.* For each of the $n$ radial layers, take the mean and the
 standard deviation of $\log\eta$ over that spherical surface (all $10n^2$ lateral nodes
@@ -355,33 +367,24 @@ the same network serves every level; the argument after it is the conditioning; 
 superscript and subscripts on the right pick one of the 2048 outputs. Assembling the
 outputs over all $(k,k')$ for a fixed $\ell$ and $q$ fills the $(b_sk_1)\times(b_sk_1)$
 matrix $G^{(q)}_\ell$ of section 1. Everything the integral term learns is in $\Gamma$
-and $e$: 138 560 + 3 152 parameters, against 8.2 M in the local term of the smallest
-expert.
+and $e$: 138 560 + 3 152 parameters — 78 % of the whole model.
 
 Two consequences follow. Every sample gets its own Green's function, conditioned on its
 own viscosity profile. And the learned object is a smooth function of *continuous*
 indices rather than a table with one entry per grid point, so a finer mesh — which
 allows a larger $\ell_{\max}$ and $k_{\max}$ — simply evaluates $\Gamma$ at more points.
-This is exactly what makes the integral term discretisation convergent.
+This is exactly what makes the integral term discretisation convergent. One caveat: the
+indices are normalised by the *current* truncation, so the model is consistent only
+when the truncation grows with level the way it did in training (12, 24, 32, 32 here);
+evaluating at a lower truncation than trained gives wrong kernels.
 
-*Lateral contrast.* The block-diagonal structure was derived for $\eta=\eta(r)$. When
-the viscosity varies strongly laterally, harmonics of different degree do couple, and
-$\mathcal K$ as defined so far cannot express that. The two experts that serve the
-highest contrasts add a learned coupling across degrees, acting on the *output* of the
-block multiplication above, before synthesis. For each harmonic $(\ell,m)$ an
-18-vector is formed: the radial profile of that harmonic's own coefficient of $\log\eta$
-— obtained by applying $Y^{+}$ to $\log\eta$ and resampling the resulting $n$ values to
-16 — together with $\ell/\ell_{\max}$ and $(m+\ell)/2\ell$, the order's position within
-its degree. Learned matrices $Q_a,K_a\in\mathbb R^{32\times18}$ (with biases) map the
-18-vector to a query and a key; $A=\mathrm{softmax}(QK^{\top}/\sqrt{32})$ is then an
-$M\times M$ row-stochastic matrix saying how much each harmonic draws from every other.
-It is applied to the block-multiplied coefficients of every group and added through a
-learned gate $\in\mathbb R^{n_b}$, one scalar per group, initialised at zero:
-
-$$\widehat{(\mathcal Kv)}^{(q)}\ \leftarrow\ \widehat{(\mathcal Kv)}^{(q)}+\text{gate}_q\ A\,\widehat{(\mathcal Kv)}^{(q)}.$$
-
-Because $A$ is built from $\eta$ alone, this remains a fixed linear map of the
-coefficients for a given problem.
+*What the kernel does not see.* $e(\eta)$ carries only the radial profile of the
+viscosity — nothing about *where* laterally a slab or a channel sits. Two ways of giving
+it more were tested and cut: a learned attention across harmonic degrees keyed on the
+harmonic content of $\log\eta$ (−3 %), and feeding the generator the descriptors of the
+viscosity patches of section 3 (helps when extrapolating from levels 3–4, overfits as
+soon as level 5 is in the training data). The lateral structure is handled by the next
+term instead.
 
 ### What if the viscosity is not layered?
 
@@ -399,108 +402,112 @@ is *local*: it only differentiates and multiplies by $\delta\eta$. Then
 $$K_\eta^{-1}=K_0^{-1}-K_0^{-1}\,\delta K\,K_0^{-1}+K_0^{-1}\,\delta K\,K_0^{-1}\,\delta K\,K_0^{-1}-\cdots$$
 
 The exact inverse for laterally varying viscosity alternates the layered *global*
-operator with *local* corrections weighted by the anomaly. This is the **motivation** for
-the global-then-local layout — it says what kind of operators must be composed — and
-not a derivation of the network: no layer of the model is one of these terms, and the
-correspondence below is a reading, not an identity.
+operator with corrections weighted by the anomaly. This is the **motivation** for
+pairing the integral term with a second, anomaly-aware term — it says what kind of
+operators must be composed — and not a derivation of the network: no layer of the model
+is one of these terms.
 
 - **$K_0^{-1}$ corresponds to the integral term.** $G_\ell$ is generated from the radial
   mean and spread of $\log\eta$, so it is conditioned on the layered part of the
   viscosity and, by construction, sees nothing of the lateral anomaly.
-- **$\delta K$ corresponds to the local term.** A stencil whose weights are chosen at
-  each node by the local $\log\eta$, its mean and its spread is a learned local operator
-  that depends on the anomaly, as $\delta K$ does; it is also free to absorb what the
-  truncation of the integral term missed. This is where lateral structure is handled, which is why the local term
-  holds 98% of the parameters and why removing it leaves 0.8 error at every level.
-- **The second $K_0^{-1}$ is the gap.** The series' second term ends with a *global*
-  operator applied after the local correction. The model applies the integral term once,
-  before the local layers, and not again: it is global → local where the true operator
-  is global → local → global → … . Three mechanisms partially fill this: the degree
-  attention of section 2 (a low-rank stand-in for the off-diagonal coupling, inside the
-  spectral step), the defect correction below (a second pass of the whole network through
-  the residual, which contains exactly the missing $\mathcal G\,K_\eta\,\mathcal G$
-  structure), and the experimental patch attention (a global coupling placed after the
-  local layers).
+- **The anomaly correction corresponds to the patch attention.** The previous design
+  used index-space stencils for this — a learned $\delta K$-like operator with a fixed
+  reach in nodes. Those are gone; section 3 explains what replaced them and why.
 
 The series converges only for $\|K_0^{-1}\delta K\|<1$, roughly modest contrast. At
-$\chi=10^4$ it does not; the interfaces dominate and want different stencils from the
-near-layered regime, which is the reason for the contrast-routed experts.
+$\chi=10^4$ it does not; the interfaces dominate, and the deployed model handled that
+with four contrast-routed experts (see *Experts*).
 
-### 3. The local term is a short-range kernel, not a pointwise one
+### 3. The second term: attention between viscosity patches
 
-In FNO, $\mathcal W_t$ is pointwise and all spatial coupling is in $\mathcal K_t$. That is
-not enough here. A harmonic truncation at $\ell_{\max}=32$ resolves lateral features no
-finer than about $1/32$ of the circumference, and at level 6 that is 2.6% of the mesh's
-lateral degrees of freedom; the edge of a stiff slab, where velocity gradients are
-steepest, lies far below that scale. So $\mathcal W_t$ is widened from a point to a
-$5\times5\times5$ stencil in the diamond's index space, whose weights vary with the
-viscosity around the node:
+*Why not a local term.* The previous design widened the template's pointwise
+$\mathcal W_t$ into four layers of $5^3$ stencils on each diamond's index grid — 98 % of
+its parameters. Measured against the same model without them, at equal training budget,
+they changed nothing at the levels they were trained on (0.326 vs 0.332 held-out error
+at level 3) and they were what broke the model on finer meshes: a stencil's reach is
+counted in nodes, so its physical footprint halves with every refinement level, and the
+operator it computes at level 6 is a different one from the operator trained at level 3.
+Trained on levels 3–4, the stencil model is worse than predicting zero at level 6.
 
-$$(\mathcal W_t v)(x_i)=\sum_{\|\delta\|_\infty\le2}
-\left[\,W_{t,\delta}+\sum_{j=1}^{J}\lambda_j(\eta;x_i)\,\Psi^{(j)}_{t,\delta}\right]
-v\!\left(x_{i+d\delta}\right).$$
+*What replaces it.* The idea is Transolver's physics attention (Wu et al., ICML 2024):
+mesh points that share a *physical state* should exchange information regardless of
+where they are, so instead of attention between the $P$ nodes (cost $P^2$), attend
+between a few *patches* of nodes in the same state. The physical state here is the
+viscosity. The one change from Transolver is that the assignment and the attention are
+computed from $\eta$ alone, so the whole term stays a linear map of the features and
+the operator stays exactly linear in $f$.
 
-Reading it term by term:
+*Step (a) — assign nodes to patches.* For every node $x_i$ take seven numbers that
+depend only on $\eta$ and geometry: the standardised $\log\eta$ at the node, its mean and
+standard deviation over the $5^3$ window of nodes around it (the spread marks an
+interface), and the four geometry features. A learned MLP,
+$\mathrm{Linear}(7\to64)$, GELU, $\mathrm{Linear}(64\to M_p)$, gives $M_p=32$ scores,
+and a softmax over patches turns them into weights
 
-- $x_i$ is a node and $\delta\in\{-2,\dots,2\}^3$ ranges over its $5^3$ index offsets, so
-  $x_{i+d\delta}$ is the node $d\delta$ steps away along the diamond's grid directions,
-  with $d$ the dilation.
-- $W_{t,\delta}\in\mathbb R^{d_v\times d_v}$ is a dense weight for each offset: a standard
-  $5^3$ convolution with $128\to128$ channels, the same at every node.
-- $\Psi^{(j)}_{t,\delta}$ are $J=4$ further kernels. To keep them affordable they act
-  through a *bottleneck*: the features are projected $128\to32$ by a learned matrix
-  $B_{in}\in\mathbb R^{32\times128}$ (a $1\times1\times1$ convolution, no bias), each
-  $\Psi^{(j)}_t$ is a $5^3$ kernel with $32\to32$ channels, and the mixed result is
-  projected back by $B_{out}\in\mathbb R^{128\times32}$. $B_{in}$ and $B_{out}$ are
-  shared by all local layers; the kernels are per layer. In the formula above,
-  $\Psi^{(j)}_{t,\delta}$ stands for the composite $B_{out}\Psi^{(j)}_{t,\delta}B_{in}$.
-  The bottleneck width 32 is what the expert table calls "bank width".
-- $\lambda_j(\eta;x_i)$ are the mixing weights: a softmax over $j$ output by a learned
-  two-layer MLP, $\mathrm{Linear}(3\to32)$, GELU, $\mathrm{Linear}(32\to J)$, one per
-  local layer, whose three inputs are $\log\eta$ at $x_i$ and the mean and standard
-  deviation of $\log\eta$ over the same $5^3$ window. The mean says how stiff the neighbourhood is,
-  the deviation says whether an interface runs through it.
+$$w_{im}\ \ge 0,\qquad \sum_{m=1}^{M_p} w_{im}=1 .$$
 
-So every node has its own effective stencil, chosen by the viscosity around it. This term
-holds 98% of the parameters and almost all of the compute — 45 TFLOP per forward pass at
-level 6, against roughly 1.5 TFLOP for the integral term's two transforms; both are
-operation counts, not timings — and it is what makes the model work:
-without it the error is about 0.8 at every level.
+So node $i$ belongs *softly* to the $M_p$ patches. Nodes deep inside stiff material get
+similar weight vectors wherever they are on the shell; nodes at an interface get their
+own patches. The patches have whatever shape the viscosity field has — they are not
+geometric blocks. (A parameter-free assignment — centres at the per-sample quantiles of
+$\log\eta$ — performs the same; the learned one is kept because it is the one the
+deployed checkpoints carry.)
 
-It is also the one component defined on the grid rather than on the continuum. With
-$n_{loc}$ layers the term reaches $2n_{loc}d$ nodes from any node, a *physical* distance
+*Step (b) — pool features into one token per patch.* With $v_i\in\mathbb R^{d_v}$ the
+feature vector at node $i$,
 
-$$\rho=2\,n_{loc}\,d\,h.$$
+$$s_m=\frac{\sum_i w_{im}\,v_i}{\sum_i w_{im}}\qquad\text{(linear in } v\text{)},$$
 
-With $d=1$, refining the mesh (smaller $h$) shrinks $\rho$; with $d\propto1/h$ it stays
-fixed. *Discretisation convergence* below measures what this costs.
+and, with the same weights, a descriptor $c_m\in\mathbb R^7$ of what each patch
+physically is — the weighted mean of the seven inputs.
+
+*Step (c) — let the patches attend to each other.* Learned $Q_p,K_p\in\mathbb R^{32\times7}$
+(with biases) map the descriptors to queries and keys, and
+
+$$A_{mn}=\mathrm{softmax}_n\!\left(\frac{Q_pc_m\cdot K_pc_n}{\sqrt{32}}\right),\qquad
+\tilde s_m=\sum_{n=1}^{M_p} A_{mn}\,s_n .$$
+
+"Patch $m$ attends to patch $n$" means "material in state $m$ receives influence from
+material in state $n$", and how much is learned as a function of the two states — a
+weak channel next to a stiff slab, for instance. Because $A$ is built from the
+descriptors and never from $v$, this step is still a linear map of $v$.
+
+*Step (d) — scatter back.* Each node receives the updated tokens of the patches it
+belongs to, through a learned channel gate $\gamma\in\mathbb R^{d_v}$ initialised at zero:
+
+$$(\mathcal A v)_i=\sum_m w_{im}\,\tilde s_m,\qquad v_i\ \leftarrow\ v_i+\gamma\odot(\mathcal A v)_i .$$
+
+*Properties.* Every weight in the term — $w$, $A$, $\gamma$ — is a function of $\eta$
+and geometry, so for a fixed viscosity field the term is linear in $v$. The assignment
+is pointwise and the descriptors are physical, so the same weights act on any mesh. The
+cost is $O(P\,M_p\,d_v)$ — about 44 GFLOP at level 6, one thousandth of the stencils it
+replaces — and the term has 3 232 parameters. What was measured: with this term in place
+of the stencils, error at the trained levels is unchanged and error one and two levels
+above training falls by 27 % and 35 % (seed means), while every attempt to enlarge it —
+64 or 128 patches, two or three layers, a wider attention — left the trained levels
+unchanged and the off-level error slightly worse.
 
 ### 4. No nonlinearity on the forcing path, and what it guarantees
 
 A generic neural operator applies $\sigma$ after every layer; that is what gives it
 universal approximation. We omit it, together with every bias, wherever $f$ flows. All
-the nonlinearity lives in functions of $\eta$ and geometry — $g_{in},g_t,g_{out}$,
-$\Gamma$, the degree-mixing attention, and $\lambda$ — which enter only by multiplying
-$v$ or by setting the weights that multiply $v$. Consequently, for every viscosity field
-and at every resolution, the network satisfies exactly
+the nonlinearity lives in functions of $\eta$ and geometry — $g_{in},g_{out}$, $\Gamma$,
+the patch assignment $w$ and the attention $A$ — which enter only by multiplying $v$ or
+by setting the weights that multiply $v$. Consequently, for every viscosity field and at
+every resolution, the network satisfies exactly
 
 $$\mathcal G_\theta(\alpha f_1+\beta f_2,\ \eta)=\alpha\,\mathcal G_\theta(f_1,\eta)+\beta\,\mathcal G_\theta(f_2,\eta),
 \qquad\text{and in particular}\qquad\mathcal G_\theta(0,\eta)=0.$$
 
 `scripts/check_linearity.py` verifies this numerically on a random model and mesh; the
-relative deviation is $10^{-6}$, i.e. floating-point rounding. It is a strictly smaller hypothesis class than the universal one, and that is the
-point: it is the class the true operator belongs to. The network cannot waste capacity
-learning that small loads behave like large ones, cannot produce spurious flow from zero
-forcing, and cannot drift out of the class during training. The `--nonlin` flag inserts
-a GELU after the integral and local terms and gives all of this up; it is off in every
-deployed expert.
+relative deviation is $10^{-6}$, i.e. floating-point rounding. It is a strictly smaller
+hypothesis class than the universal one, and that is the point: it is the class the
+true operator belongs to. The network cannot waste capacity learning that small loads
+behave like large ones, cannot produce spurious flow from zero forcing, and cannot drift
+out of the class during training. The `--nonlin` flag inserts a GELU after the coupling
+terms and gives all of this up; it is off.
 
 ### Every learned parameter
-
-The table lists every learned object in the model, where it acts, its exact form, and
-its parameter count. "Bias" means the layer has an additive bias; every layer on the
-path the forcing takes has none, and every layer with a bias acts only on viscosity and
-geometry — that split is what section 4 relies on.
 
 | symbol | acts in | exact form | parameters |
 |---|---|---|---|
@@ -508,63 +515,21 @@ geometry — that split is what section 4 relies on.
 | $g_{in}$ | step 1 | $\mathrm{Linear}(5\to128)$+bias, GELU, $\mathrm{Linear}(128\to128)$+bias | 17 280 |
 | $e(\eta)$ | section 2 | $\mathrm{Linear}(32\to64)$+bias, GELU, $\mathrm{Linear}(64\to16)$+bias | 3 152 |
 | $\Gamma$ | section 2 | $\mathrm{Linear}(19\to64)$+bias, GELU, $\mathrm{Linear}(64\to64)$+bias, GELU, $\mathrm{Linear}(64\to2048)$+bias | 138 560 |
-| $Q_a$, $K_a$, gate | section 2, high/top experts only | $\mathrm{Linear}(18\to32)$+bias, twice; gate $\in\mathbb R^{8}$ | 608 + 608 + 8 |
-| $g_t$ | step 3, per local layer | $\mathrm{Linear}(4\to128)$+bias, GELU, $\mathrm{Linear}(128\to128)$+bias | 17 152 per layer |
-| $W_{t,\delta}$ | section 3, per local layer | $5^3$ convolution, $128\to128$ channels, no bias: $128\cdot128\cdot125$ | 2 048 000 per layer |
-| $B_{in}$, $B_{out}$ | section 3, shared by all local layers | $1^3$ convolutions $128\to32$ and $32\to128$, no bias | 4 096 each |
-| $\Psi^{(j)}_t$ | section 3, per local layer | $J=4$ kernels, $5^3$, $32\to32$, no bias: $4\cdot32\cdot32\cdot125$ | 512 000 per layer |
-| $\lambda$-MLP | section 3, per local layer | $\mathrm{Linear}(3\to32)$+bias, GELU, $\mathrm{Linear}(32\to4)$+bias | 260 per layer |
+| patch assignment | section 3 (a) | $\mathrm{Linear}(7\to64)$+bias, GELU, $\mathrm{Linear}(64\to32)$+bias | 2 592 |
+| $Q_p$, $K_p$ | section 3 (c) | $\mathrm{Linear}(7\to32)$+bias, twice | 512 |
+| $\gamma$ | section 3 (d) | $\in\mathbb R^{128}$, initialised at zero | 128 |
 | $g_{out}$ | step 4 | as $g_{in}$, separate weights | 17 280 |
 | $W_Q$ | step 4 | $\mathrm{Linear}(128\to4)$, no bias | 512 |
-| $\gamma$ | defect correction, optional | one scalar, initial value 0.25 | 1 |
+| **total** | | | **180 528** |
 
-The transform matrices $Y$, $Y_r$ and their pseudo-inverses are *not* learned: they are
-computed from the node positions of each level and stored as buffers. Nor are the
-geometry features.
+"Bias" means the layer has an additive bias; every layer on the path the forcing takes
+has none, and every layer with a bias acts only on viscosity and geometry — that split
+is what section 4 relies on. The transform matrices $Y$, $Y_r$ and their pseudo-inverses
+are *not* learned: they are computed from the node positions of each level and stored
+as buffers. Nor are the geometry features. The integral term (the last two rows of
+section 2) is 78 % of the model; the patch attention 1.8 %.
 
-The four deployed experts are exactly these pieces in different combinations, and the
-counts add up to the checkpoint sizes:
-
-| | generalist | mid | high | top |
-|---|---|---|---|---|
-| $n_{loc}$ | 4 | 4 | 4 | 8 |
-| $W_{t,\delta}$, all layers | 8 192 000 | 8 192 000 | 8 192 000 | 16 384 000 |
-| $\Psi$ banks, all layers | – | 32 768 000 (full width, $128\to128$) | 2 048 000 | 4 096 000 |
-| $B_{in}+B_{out}$ | – | – (no bottleneck) | 8 192 | 8 192 |
-| $\lambda$-MLPs | – | 1 040 | 1 040 | 2 080 |
-| $g_t$, all layers | 68 608 | 68 608 | 68 608 | 137 216 |
-| $\Gamma$ + $e(\eta)$ | 141 712 | 141 712 | 141 712 | 141 712 |
-| degree attention | – | – | 1 224 | 1 224 |
-| $W_P$, $W_Q$, $g_{in}$, $g_{out}$ | 35 584 | 35 584 | 35 584 | 35 584 |
-| **total** | **8 437 904** | **41 206 944** | **10 496 360** | **20 806 008** |
-
-Two readings of this table. The integral term — everything that makes the model a
-neural operator in the FNO sense — is 0.14 M parameters, under 2% of the smallest
-expert; the local stencils are the rest. And the mid expert is four times the size of
-the others only because its banks act at full width, which the bottleneck later made
-unnecessary.
-
-### Experimental: attention between viscosity patches
-
-Not part of any deployed expert; under test (`--phys-attn 32`). It adds long-range
-coupling that neither the truncated harmonics nor the stencils can express, in the
-spirit of Transolver's physics attention (Wu et al., ICML 2024) but keyed on the
-viscosity so that linearity in $f$ survives. Every node $i$ is assigned softly to
-$M_p=32$ patches by weights $w_{im}$, a softmax over $m$ of a learned MLP
-$\mathrm{Linear}(7\to64)$, GELU, $\mathrm{Linear}(64\to32)$ of seven viscosity and
-geometry numbers ($\log\eta$, its $5^3$ mean and spread, and the four geometry
-features). The features are averaged into one token per patch,
-$s_m=\sum_i w_{im}v_i/\sum_i w_{im}$, and the same weights average the seven inputs into
-a descriptor $c_m$ of what each patch physically is. Learned
-$Q_p,K_p\in\mathbb R^{32\times7}$ (with biases) turn descriptors into queries and keys,
-$A=\mathrm{softmax}(QK^{\top}/\sqrt{32})$ lets the patches attend to each other, and the
-result is scattered back through a gate $\in\mathbb R^{128}$ initialised at zero:
-$v_i\leftarrow v_i+\mathrm{gate}\odot\sum_m w_{im}(As)_m$. Since $w$, $A$ and the gate
-depend on $\eta$ and geometry only, the module is a linear map of $v$; 3 232 parameters;
-cost $O(P\,M_p\,d_v)$, about 0.1% of the local branch at level 6. It sits between the
-last local layer and step 4.
-
-### Projection, defect correction, experts
+### Projection and experts
 
 **Projection onto the finite-element space.** Recall that seam nodes are stored once
 per diamond. The network processes each diamond's copy independently, so its raw output
@@ -573,31 +538,20 @@ that does not exist in the solver's finite-element space. $\Pi$ replaces every c
 the mean over the copies of that node. This is essential, not cosmetic: a Krylov solver
 can only remove error components that lie in its own space, and any part of the guess
 outside it is error the solver cannot touch. Before $\Pi$ was added the solver plateaued
-at 6% error no matter how many iterations it was given. The solver-side glue then sets
+at 6 % error no matter how many iterations it was given. The solver-side glue then sets
 $u=0$ on the two Dirichlet shells.
 
-**Defect correction.** One pass leaves a residual $r=f-K_\eta\,\mathcal G_\theta f$.
-Feeding the residual through the same network and adding the correction back,
+**Defect correction — removed.** The previous design could apply the network a second
+time to the residual $f-K_\eta\,\mathcal G_\theta f$ (`--refine-steps`). With the
+stencils it was worth about 10 %; with this operator it makes error worse at every level
+(+26 % at the trained ones) and is off.
 
-$$x=\mathcal G_\theta f+\gamma\,\mathcal G_\theta\!\left(f-K_\eta\,\mathcal G_\theta f\right)
-=\left[(1+\gamma)\,\mathcal G_\theta-\gamma\,\mathcal G_\theta K_\eta\,\mathcal G_\theta\right]f,$$
-
-is classical iterative refinement with one learned scalar $\gamma$ (initialised at
-0.25). The right-hand form shows it is still linear in $f$. In training, $K_\eta$ is
-evaluated by a finite-difference form of the Stokes operator on the diamond grid
-(`terra_infer/stokes_residual.py`), which coincides with the true discrete operator at
-interior nodes; the residual is masked to those nodes. It doubles the forward cost, adds
-one parameter, and reduces the error by about 10% relative. It is enabled with
-`--refine-steps 1`.
-
-**Experts.** Four copies of the operator are trained, and one is selected per problem by
-its contrast $\chi$ against the thresholds $10$, $10^2$, $10^3$. Since $\chi$ is a
-function of $\eta$ alone, routing keeps the map linear in $f$. The motivation is
-empirical: a problem at $\chi=2$ is nearly constant-viscosity Stokes and a problem at
-$\chi=10^4$ is dominated by interfaces, they want different stencils, and one shared
-weight set is measurably worse than four specialised ones — mean error 0.20 / 0.25 /
-0.27 / 0.31 at levels 3–6 for a single model against 0.084 / 0.112 / 0.135 / 0.189 for
-the router (see *Results*).
+**Experts.** The deployed checkpoints are four contrast-routed experts of the *previous*
+design (see the results section), selected per problem by $\chi=\max\eta/\min\eta$
+against the thresholds $10$, $10^2$, $10^3$; routing gave that design a factor of 2.4
+over a single model. Whether the same holds for this operator is being measured (four
+experts of it are training as this is written); until then the reference for it is the
+single model.
 
 ### As implemented: shapes and sizes
 
@@ -618,79 +572,43 @@ The tensor pipeline, with `B` the batch size and `S = 10` diamonds:
   $Y_r^{+}$ to get `(B, 128, M, k_1)`; regroup channels into `(B, 8, M, 16 k_1)`; for
   each degree $\ell$ multiply the group's block by $G_\ell$, which `ggen`
   (`19 -> 64 -> 64 -> 2048`) has produced from the normalised indices and the
-  16-dimensional embedding; apply $Y_r$ then $Y$; add to the features. The degree-mixing
-  attention, where present, forms `18 -> 32` queries and keys per harmonic and applies
-  the resulting `(B, M, M)` matrix to the coefficients before synthesis.
-- **Local layers.** Reshape to `(S B, 128, n, n, n)`. Each layer: multiply by a geometry
-  gate, apply the dense bias-free `5³` convolution `128 -> 128`, add the bank (`1³`
-  `128 -> 32`, four `5³` kernels `32 -> 32`, softmax mix from a `3 -> 32 -> 4` MLP, `1³`
-  `32 -> 128`), add to the features. No activation.
+  16-dimensional embedding; apply $Y_r$ then $Y$; add to the features.
+- **Patch attention.** Flatten to `(B, P, 128)`; viscosity features `(B, P, 7)`;
+  assignment `(B, P, 32)` by softmax; tokens and descriptors `(B, 32, 128)` and
+  `(B, 32, 7)` by weighted means; attention `(B, 32, 32)`; scatter back and add through
+  the channel gate. No activation.
 - **Head.** Multiply by `gate_out`, `Linear(128 -> 4)`, then the seam-mean projection
   $\Pi$.
 
-The four deployed experts:
-
-| expert | contrast band $\chi$ | $n_{loc}$ | stencil banks $J$ | bank width | degree attention | parameters |
-|---|---|---|---|---|---|---|
-| generalist | $<10$ | 4 | none | – | no | 8.44 M |
-| mid | $10$ – $10^2$ | 4 | 4 | 128 (no bottleneck) | no | 41.21 M |
-| high | $10^2$ – $10^3$ | 4 | 4 | 32 | yes | 10.50 M |
-| top | $>10^3$ | **8** | 4 | 32 | yes | 20.81 M |
-
-80.96 M parameters in total. The generalist's local layers are the dense $W_{t,\delta}$
-alone. The mid expert's banks act at full width, which is why it is four times larger;
-it predates the bottleneck and was not retrained. The top
-expert has twice the local depth (`--linear-convs 8`, hence its checkpoint name
-`c8ckpt`) and therefore reaches 16 nodes instead of 8.
+Cost per forward pass at level 6, by operation count: ~1.5 TFLOP for the two spectral
+transforms, ~0.04 TFLOP for the patch attention. The previous design's stencils were
+45 TFLOP.
 
 ### Discretisation convergence: what holds and what does not
 
 A model is discretisation convergent when one set of weights acts on any discretisation
-and the outputs converge to a single continuum operator as the mesh is refined. The two
-terms of this model behave oppositely, and the split is the central caveat of this work.
+and the outputs converge to a single continuum operator as the mesh is refined.
 
-**The integral term converges.** Its weights are indexed by channel, degree and radial
-mode, and they are the values of the smooth function $\Gamma$ at normalised indices —
-not a table tied to nodes. Refining the mesh rebuilds only the transform matrices
-$Y,Y_r$ (which depend on node positions) and evaluates $\Gamma$ at more modes. Nothing
-learned is resolution-specific.
+**Both terms of this operator are defined on the continuum.** The integral term's
+weights are values of $\Gamma$ at normalised indices, not a table tied to nodes;
+refining the mesh rebuilds only the transform matrices $Y,Y_r$ and evaluates $\Gamma$ at
+more modes. The patch term assigns each node by its own viscosity state and geometry,
+and its learned weights act on patch tokens, so nothing in it depends on the node count.
 
-**The local term does not.** Its offsets are counted in nodes, so its physical reach is
-$\rho=2n_{loc}dh$, and $h$ halves with every level. With $d=1$:
+**Measured.** Trained on levels 3–5 with level 6 never seen, the model's error is
+0.186 / 0.257 / 0.266 / 0.276 — a 4 % growth from the finest trained level to the
+unseen one. Trained on levels 3–4 only, error at the unseen levels 5 and 6 is 27 % and
+35 % lower than the previous design's, which grows by a factor of 2–4 there and is worse
+than zero at level 6.
 
-| level | $h$ in units of the shell thickness, $1/(n-1)$ | reach of 4 layers, $8h$ | fraction of the thickness |
-|---|---|---|---|
-| 3 | 0.125 | 8 nodes = 1.0 | all of it |
-| 4 | 0.0625 | 0.5 | half |
-| 5 | 0.031 | 0.25 | a quarter |
-| 6 | 0.016 | 0.125 | an eighth |
-
-In the limit $h\to0$ the term degenerates to a pointwise map — the generic template's
-$\mathcal W_t$ — which is a *different* operator from the one that was trained at level
-3. The model does not converge to anything as the mesh is refined; it changes character.
-The option `--dilated-stencils` sets $d=(n-1)/8$, i.e. $d=1,2,4,8$ at levels 3–6, so that
-$\rho$ stays at the level-3 value. It costs no weights.
-
-**A second, milder violation.** The truncation is held at $\ell_{\max}=32$ from level 5
-upward while the mesh keeps refining, so the harmonics span 21% of the lateral degrees
-of freedom at levels 3–4, 10% at level 5, and 2.6% at level 6. The integral term still
-converges — to the operator truncated at $\ell_{\max}=32$ — but that operator represents
-less and less of the solution.
-
-**Measured.** Both effects predict that the error grows with level, and it does (see
-*Results*). Isolating the first: models trained with dilated stencils have a held-out
-error ratio between level 6 and level 3 of **1.0–1.2**, against **1.9–2.8** for
-index-space stencils, consistently across three experiments with different training
-histories. Dilation therefore removes the level dependence. It does not, so far, improve
-the absolute error: at coarse levels dilated models are about twice as inaccurate as
-index-space ones, and at level 6 the best of each are tied. Whether dilation wins at
-level 7, where the index-space model would degrade further, has not been tested.
-Neither option is in the deployed experts.
-
-**A caveat that the results inherit.** The two experts that serve $\chi<10^2$ were
-trained on levels 3–5 only and have never seen a level-6 field. They handle two thirds
-of the level-6 test set, so the level-6 column of every table below is largely a
-zero-shot result.
+**What still limits it.** The truncation is held at $\ell_{\max}=32$ from level 5
+upward while the mesh keeps refining, so the harmonics span 21 % of the lateral degrees
+of freedom at levels 3–4, 10 % at level 5, and 2.6 % at level 6; the term converges to
+the operator truncated at 32, which represents less of the solution as the mesh grows.
+Raising the truncation is not the answer (section 1); the patch term is what carries the
+sub-truncation structure. And the patch statistics use a $5^3$ window in nodes rather
+than a fixed physical size; the physical-window variant was tested and is no better
+alone, and harmful in combination with generator conditioning.
 
 ## Pipeline
 
