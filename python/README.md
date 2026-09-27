@@ -102,10 +102,27 @@ that every decision below traces back to.
 
 ### How the design was arrived at
 
-Every component below is in the model because removing it raises the held-out error
-by at least 10 % at the levels trained on, or breaks the transfer to finer meshes;
-everything that failed that test in the ablation campaign that produced this design
-was removed. The model has 498 448 parameters.
+Every component below is in the model because removing it raises the held-out error by
+at least 10 % at the levels trained on, or breaks the transfer to finer meshes;
+everything that failed that test was removed. The model has 498 448 parameters. What
+survived, and how much each is worth:
+
+| lever | setting | effect | caveat |
+|---|---|---|---|
+| spectral cores in sequence | 3 | −16 % going 2→3 | non-monotonic: 4 cores is 13 % *worse* than 3 |
+| training data | general contrast only, enlarged at levels 4–5 | −27 % at L3, −36 to −42 % above | high-contrast data breaks transfer, worse the deeper the model |
+| schedule | 240 epochs | −12 to −18 % | composes additively with depth |
+| viscosity patches | 128 | −10 % | only at 3 cores; neutral at 1–2, and 256 is worse |
+
+**These do not tune independently.** Depth has an optimum, the useful number of patches
+depends on that depth, and the contrast distribution of the training data decides
+whether added capacity transfers to finer meshes at all. Each of them, measured alone,
+gives a misleading answer.
+
+Cut by the same rule: convolutional stencils and their dilated, separable and pyramid
+variants; contrast-routed experts; high-contrast training sets; level-6 training data;
+defect correction; stacked patch layers; coupling across harmonic degrees; wider
+channels; different channel groupings; doubled truncation; and model ensembling.
 
 ### Notation
 
@@ -581,8 +598,8 @@ more modes. The patch term assigns each node by its own viscosity state and geom
 and its learned weights act on patch tokens, so nothing in it depends on the node count.
 
 **Measured.** Trained on levels 3–5 with level 6 never seen, the model's error is
-0.080 / 0.121 / 0.113 / 0.097: it does not grow beyond the training data at all, and
-level 6, two levels above the finest mesh it ever saw, is its *best* level. Trained on
+0.070 / 0.082 / 0.083 / 0.076: it is flat across levels and does not grow beyond the
+training data at all. Trained on
 levels 3–4 only, an earlier version scored 0.215 / 0.321 / 0.384 / 0.434, so two levels
 beyond the training data cost a factor of 1.35 there. Training through level 5 removes
 that. The training data's viscosity distribution decides whether this holds at all:
@@ -642,6 +659,7 @@ gradients averaged through gloo on the host:
         --hidden 128 --heads 8 --linear-convs 0 --eta-gates --eta-green \
         --spectral-layers 3 --phys-attn 128 \
         --data $ML/stokes_L3_d8 --data2 $ML/stokes_L4_d8 --data3 $ML/stokes_L5_d8ok \
+        --extra-data $ML/stokes_L4_d8b:24:16:16 --extra-data $ML/stokes_L5_d8b:32:16:4 \
         --lmax 12 --kmax 8 --lmax2 24 --kmax2 16 --lmax3 32 --kmax3 16 \
         --batch-size 32 --batch-size2 16 --batch-size3 4 --batch-mix \
         --epochs 120 --lr 6e-3 --h1-weight 0.5 --seam-average \
@@ -745,15 +763,27 @@ Held-out relative $L^2$ velocity error $\|u_{pred}-u\|/\|u\|$ on the general tes
 
 | level | best | median | **mean** | worst | pressure |
 |---|---|---|---|---|---|
-| L3 (9^3) | 0.010 | 0.056 | **0.080** | 0.304 | 0.029 |
-| L4 (17^3) | 0.015 | 0.069 | **0.121** | 0.537 | 0.022 |
-| L5 (33^3) | 0.014 | 0.066 | **0.113** | 0.485 | 0.021 |
-| L6 (65^3, unseen) | 0.016 | 0.064 | **0.097** | 0.474 | 0.019 |
+| L3 (9^3) | 0.016 | 0.052 | **0.070** | 0.225 | 0.028 |
+| L4 (17^3) | 0.014 | 0.057 | **0.082** | 0.325 | 0.018 |
+| L5 (33^3) | 0.020 | 0.063 | **0.083** | 0.311 | 0.018 |
+| L6 (65^3, unseen) | 0.020 | 0.053 | **0.076** | 0.306 | 0.017 |
 
-For comparison, the previous design — four contrast-routed experts with convolutional
-stencils, 81 M parameters, trained on *all* levels including 6 — scored
-0.084 / 0.112 / 0.135 / 0.189. This is one model of 498 k parameters that has never
-seen level 6.
+This checkpoint stopped at epoch 95 of 120, so it has not had its annealing tail, which
+is normally worth a further 10–20 %.
+
+How it got here, and what it replaces:
+
+| model | L3 | L4 | L5 | L6 | parameters |
+|---|---|---|---|---|---|
+| **this model** | **0.070** | **0.082** | **0.083** | **0.076** | 498 k |
+| same, original (smaller) datasets, 240 epochs | 0.066 | 0.104 | 0.097 | 0.088 | 498 k |
+| same, original datasets, 120 epochs | 0.080 | 0.121 | 0.113 | 0.097 | 498 k |
+| one spectral core, 32 patches | 0.172 | 0.239 | 0.231 | 0.211 | 181 k |
+| previous design: 4 routed experts with stencils, trained on *all* levels | 0.084 | 0.112 | 0.135 | 0.189 | 81 M |
+
+The previous design was trained on every level including 6 and used four experts
+selected by viscosity contrast. This is one model, 160 times smaller, that has never
+seen level 6, and it is better at every level.
 
 The error does not grow with refinement: level 6, never trained on, is the best level.
 The median is about 0.06 everywhere, so the typical problem is well inside the useful
@@ -764,17 +794,17 @@ sets by $\chi=\max\eta/\min\eta$:
 
 | contrast band | samples | L3 | L4 | L5 | L6 |
 |---|---|---|---|---|---|
-| 1 – 10 | 12 | 0.024 | 0.031 | 0.033 | 0.036 |
-| 10 – 100 | 8 | 0.073 | 0.096 | 0.093 | 0.094 |
-| 100 – 1000 | 3 | 0.135 | 0.183 | 0.162 | 0.153 |
-| above 1000 | 9 | 0.144 | 0.243 | 0.220 | 0.180 |
+| 1 – 10 | 12 | 0.026 | 0.026 | 0.031 | 0.032 |
+| 10 – 100 | 8 | 0.071 | 0.079 | 0.082 | 0.078 |
+| 100 – 1000 | 3 | 0.117 | 0.127 | 0.127 | 0.126 |
+| above 1000 | 9 | 0.112 | 0.146 | 0.139 | 0.129 |
 
-What sets the
-mean is still the top two bands, where the solution is controlled by narrow weak
-channels and sharp interfaces — structure the harmonic truncation cannot represent. The
-worst case at every level is such a channel; `scripts/plot_crosscut.py` draws it. Three
-separate things reduce that band and they overlap: more spectral depth, more
-general-contrast training data, and a longer schedule.
+The top two bands still set the mean, since the solution there is controlled by narrow
+weak channels and sharp interfaces that the harmonic truncation cannot represent, and
+the worst case at every level is such a channel. `scripts/plot_crosscut.py` draws it.
+But the band is no longer the dominant term: it was 0.31–0.47 with one core and the
+smaller datasets, and is 0.11–0.15 now. Three separate things reduced it and they
+overlap: spectral depth, more general-contrast data, and a longer schedule.
 
 The solver benchmark (pipeline step 4: cold start against the prediction as initial
 guess, iterations to reach a given velocity error) has not yet been run with this
@@ -782,9 +812,9 @@ operator.
 
 ## Known limits
 
-- The mean error is 0.08–0.12 and is set by the two highest contrast bands, where it
-  reaches 0.14–0.24; the median is about 0.06 at every level. The held-out error was
-  still falling at the end of the 120-epoch schedule.
+- The mean error is 0.07–0.08 and the median about 0.055 at every level, set by the two
+  highest contrast bands where it reaches 0.12–0.15. The current checkpoint stopped
+  before the end of its schedule, so this is not yet the best this recipe can do.
 - The levers are not independent. Spectral depth has an optimum at three cores, the
   useful number of patches depends on that depth, and the contrast distribution of the
   training data decides whether added capacity transfers to finer meshes at all. Any of
