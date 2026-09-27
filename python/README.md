@@ -105,7 +105,7 @@ that every decision below traces back to.
 Every component below is in the model because removing it raises the held-out error
 by at least 10 % at the levels trained on, or breaks the transfer to finer meshes;
 everything that failed that test in the ablation campaign that produced this design
-was removed. The model has 180 528 parameters.
+was removed. The model has 498 448 parameters.
 
 ### Notation
 
@@ -120,7 +120,8 @@ was removed. The model has 180 528 parameters.
 | $k$ | Chebyshev radial index, $0\le k\le k_{\max}$; $k_1=k_{\max}+1$ | $k_{\max}=8,16,16,16$ |
 | $Y_\ell^m$, $T_k$ | real spherical harmonic, Chebyshev polynomial | — |
 | $n_b$, $b_s$ | channel groups and channels per group, $d_v=n_b b_s$ | 8, 16 |
-| $M_p$ | number of viscosity patches | 32 |
+| $M_p$ | number of viscosity patches | 128 |
+| $N_s$ | spectral cores in sequence | 3 |
 | $\Pi$ | projection onto the finite-element space, defined in *Projection* below | — |
 | $\odot$ | product channel by channel at each node | — |
 
@@ -177,10 +178,17 @@ two-layer MLP, $\mathrm{Linear}(5\to128)$, GELU, $\mathrm{Linear}(128\to128)$, e
 at each node on the four geometry numbers and the standardised $\log\eta$ there; its
 output is the vector of $d_v$ scale factors.
 
-**Step 2 — the integral term, applied once.** The global coupling; sections 1 and 2
-below define $\mathcal K(\eta)$:
+**Step 2 — the integral term, applied $N_s=3$ times.** The global coupling; sections 1
+and 2 below define $\mathcal K_j(\eta)$. Each of the three cores has its own kernel
+generator, and consecutive cores are separated by a multiplicative gate $s_j$ of the
+same form and inputs as $g_{in}$:
 
-$$v\ \leftarrow\ v+\mathcal K(\eta)\,v.$$
+$$v\ \leftarrow\ v+\mathcal K_j(\eta)\,v,\qquad
+v\ \leftarrow\ s_j(\eta)\odot v \ \ (j<N_s),\qquad j=0,\dots,N_s-1 .$$
+
+Because the gates are functions of $\eta$ and geometry only, stacking cores keeps the
+whole operator exactly linear in $f$ (section 4). Three is the measured optimum: two
+cores score 13–22 % worse and four cores 13 % worse than three.
 
 **Step 3 — attention between viscosity patches, applied once.** The second coupling,
 between regions of the shell in the same viscosity state; section 3 defines
@@ -429,7 +437,7 @@ the operator stays exactly linear in $f$.
 depend only on $\eta$ and geometry: the standardised $\log\eta$ at the node, its mean and
 standard deviation over the $5^3$ window of nodes around it (the spread marks an
 interface), and the four geometry features. A learned MLP,
-$\mathrm{Linear}(7\to64)$, GELU, $\mathrm{Linear}(64\to M_p)$, gives $M_p=32$ scores,
+$\mathrm{Linear}(7\to64)$, GELU, $\mathrm{Linear}(64\to M_p)$, gives $M_p=128$ scores,
 and a softmax over patches turns them into weights
 
 $$w_{im}\ \ge 0,\qquad \sum_{m=1}^{M_p} w_{im}=1 .$$
@@ -467,9 +475,11 @@ $$(\mathcal A v)_i=\sum_m w_{im}\,\tilde s_m,\qquad v_i\ \leftarrow\ v_i+\gamma\
 and geometry, so for a fixed viscosity field the term is linear in $v$. The assignment
 is pointwise and the descriptors are physical, so the same weights act on any mesh. The
 cost is $O(P\,M_p\,d_v)$, about 44 GFLOP at level 6, and the term has 3 232
-parameters. Enlarging it — 64 or 128 patches, two or three layers in sequence, a wider
-attention — does not lower the error at the trained levels and slightly raises it at the
-levels above them, so it stays at 32 patches and one layer.
+parameters at $M_p=128$. How many patches are worth having depends on the depth of the
+spectral core, and only on that: widening 32 to 128 patches is neutral or slightly
+harmful with one or two cores and worth 10 % with three. Stacking two or three patch
+layers instead is neutral at any depth, and 256 patches is worse than 128. So the
+partition's resolution matters, not how often the model re-partitions.
 
 ### 4. No nonlinearity on the forcing path, and what it guarantees
 
@@ -498,20 +508,22 @@ terms and gives all of this up; it is off.
 | $W_P$ | step 1 | $\mathrm{Linear}(4\to128)$, no bias | 512 |
 | $g_{in}$ | step 1 | $\mathrm{Linear}(5\to128)$+bias, GELU, $\mathrm{Linear}(128\to128)$+bias | 17 280 |
 | $e(\eta)$ | section 2 | $\mathrm{Linear}(32\to64)$+bias, GELU, $\mathrm{Linear}(64\to16)$+bias | 3 152 |
-| $\Gamma$ | section 2 | $\mathrm{Linear}(19\to64)$+bias, GELU, $\mathrm{Linear}(64\to64)$+bias, GELU, $\mathrm{Linear}(64\to2048)$+bias | 138 560 |
-| patch assignment | section 3 (a) | $\mathrm{Linear}(7\to64)$+bias, GELU, $\mathrm{Linear}(64\to32)$+bias | 2 592 |
+| $\Gamma_j$, $j=0,1,2$ | section 2 | $\mathrm{Linear}(19\to64)$+bias, GELU, $\mathrm{Linear}(64\to64)$+bias, GELU, $\mathrm{Linear}(64\to2048)$+bias, one per core | 415 680 |
+| $s_0$, $s_1$ | step 2 | as $g_{in}$, one between each pair of cores | 34 560 |
+| patch assignment | section 3 (a) | $\mathrm{Linear}(7\to64)$+bias, GELU, $\mathrm{Linear}(64\to128)$+bias | 8 832 |
 | $Q_p$, $K_p$ | section 3 (c) | $\mathrm{Linear}(7\to32)$+bias, twice | 512 |
 | $\gamma$ | section 3 (d) | $\in\mathbb R^{128}$, initialised at zero | 128 |
 | $g_{out}$ | step 4 | as $g_{in}$, separate weights | 17 280 |
 | $W_Q$ | step 4 | $\mathrm{Linear}(128\to4)$, no bias | 512 |
-| **total** | | | **180 528** |
+| **total** | | | **498 448** |
 
 "Bias" means the layer has an additive bias; every layer on the path the forcing takes
 has none, and every layer with a bias acts only on viscosity and geometry — that split
 is what section 4 relies on. The transform matrices $Y$, $Y_r$ and their pseudo-inverses
 are *not* learned: they are computed from the node positions of each level and stored
 as buffers. Nor are the geometry features. The integral term (the last two rows of
-section 2) is 78 % of the model; the patch attention 1.8 %.
+section 2) is 84 % of the model; the patch attention 1.9 %. The embedding $e(\eta)$ is
+shared by all three cores; only the generators $\Gamma_j$ are separate.
 
 ### Projection
 
@@ -539,21 +551,23 @@ The tensor pipeline, with `B` the batch size and `S = 10` diamonds:
 - **Lift and gate.** Input `(B, S, n, n, n, 5)`; the log-viscosity channel is split off
   and the other four go through `Linear(4 -> 128)`; multiplied by `gate_in`, a
   `5 -> 128 -> 128` MLP of geometry and log-viscosity.
-- **Integral term** (kept in fp32 even under bf16 autocast, since the transforms are
-  ill-conditioned in half precision). Reshape to `(B, 128, S n², n)`; apply $Y^{+}$ and
-  $Y_r^{+}$ to get `(B, 128, M, k_1)`; regroup channels into `(B, 8, M, 16 k_1)`; for
-  each degree $\ell$ multiply the group's block by $G_\ell$, which `ggen`
-  (`19 -> 64 -> 64 -> 2048`) has produced from the normalised indices and the
-  16-dimensional embedding; apply $Y_r$ then $Y$; add to the features.
+- **Integral term, three times** (kept in fp32 even under bf16 autocast, since the
+  transforms are ill-conditioned in half precision). Per core: reshape to
+  `(B, 128, S n², n)`; apply $Y^{+}$ and $Y_r^{+}$ to get `(B, 128, M, k_1)`; regroup
+  channels into `(B, 8, M, 16 k_1)`; for each degree $\ell$ multiply the group's block by
+  $G_\ell$, which that core's `ggen` (`19 -> 64 -> 64 -> 2048`) has produced from the
+  scaled indices and the shared 16-dimensional embedding; apply $Y_r$ then $Y$; add to
+  the features. Between cores, multiply by a `5 -> 128 -> 128` gate of geometry and
+  log-viscosity.
 - **Patch attention.** Flatten to `(B, P, 128)`; viscosity features `(B, P, 7)`;
-  assignment `(B, P, 32)` by softmax; tokens and descriptors `(B, 32, 128)` and
-  `(B, 32, 7)` by weighted means; attention `(B, 32, 32)`; scatter back and add through
-  the channel gate. No activation.
+  assignment `(B, P, 128)` by softmax; tokens and descriptors `(B, 128, 128)` and
+  `(B, 128, 7)` by weighted means; attention `(B, 128, 128)`; scatter back and add
+  through the channel gate. No activation.
 - **Head.** Multiply by `gate_out`, `Linear(128 -> 4)`, then the seam-mean projection
   $\Pi$.
 
-Cost per forward pass at level 6, by operation count: ~1.5 TFLOP for the two spectral
-transforms, ~0.04 TFLOP for the patch attention.
+Cost per forward pass at level 6, by operation count: ~4.4 TFLOP for the three cores'
+spectral transforms, ~0.2 TFLOP for the patch attention.
 
 ### Discretisation convergence: what holds and what does not
 
@@ -567,10 +581,13 @@ more modes. The patch term assigns each node by its own viscosity state and geom
 and its learned weights act on patch tokens, so nothing in it depends on the node count.
 
 **Measured.** Trained on levels 3–5 with level 6 never seen, the model's error is
-0.172 / 0.239 / 0.231 / 0.211: it does not grow beyond the training data at all, and
-level 6 scores below level 4. Trained on levels 3–4 only, it is
-0.215 / 0.321 / 0.384 / 0.434, so two refinement levels beyond the training data cost a
-factor of 1.35 over the finest trained level. Training through level 5 removes that.
+0.080 / 0.121 / 0.113 / 0.097: it does not grow beyond the training data at all, and
+level 6, two levels above the finest mesh it ever saw, is its *best* level. Trained on
+levels 3–4 only, an earlier version scored 0.215 / 0.321 / 0.384 / 0.434, so two levels
+beyond the training data cost a factor of 1.35 there. Training through level 5 removes
+that. The training data's viscosity distribution decides whether this holds at all:
+the same architecture trained on high-contrast-heavy sets reaches 0.098 at level 3 and
+0.539 at level 6, and the damage grows with depth.
 
 **What still limits it.** The truncation is held at $\ell_{\max}=32$ from level 5
 upward while the mesh keeps refining, so the harmonics span 21 % of the lateral degrees
@@ -615,25 +632,30 @@ To check the generator against TERRA itself:
 
 ### 2. Train
 
-The recipe behind the current checkpoint (`w3d_linear_lad_xgen.pt`): levels 3–5,
+The recipe behind the current checkpoint (`w3d_linear_gen_s3pa128.pt`): levels 3–5,
 general-contrast sets only, level 6 held out. One process per GPU tile, four tiles,
 gradients averaged through gloo on the host:
 
     for r in 0 1 2 3; do
       WORLD_SIZE=4 RANK=$r ZE_AFFINITY_MASK=$r MASTER_ADDR=127.0.0.1 MASTER_PORT=29500 \
       python -m terra_infer.train_linear_mr \
-        --hidden 128 --heads 8 --linear-convs 0 --eta-gates --eta-green --phys-attn 32 \
+        --hidden 128 --heads 8 --linear-convs 0 --eta-gates --eta-green \
+        --spectral-layers 3 --phys-attn 128 \
         --data $ML/stokes_L3_d8 --data2 $ML/stokes_L4_d8 --data3 $ML/stokes_L5_d8ok \
         --lmax 12 --kmax 8 --lmax2 24 --kmax2 16 --lmax3 32 --kmax3 16 \
         --batch-size 32 --batch-size2 16 --batch-size3 4 --batch-mix \
         --epochs 120 --lr 6e-3 --h1-weight 0.5 --seam-average \
         --amp --grad-checkpoint --max-test 32 --device xpu \
-        --out $ML/w3d_linear_xgen.pt &
+        --out $ML/w3d_linear_s3pa128.pt &
     done; wait
 
 Training on the general-contrast sets alone beats adding the high-contrast sets at
-every level, although the general sets are a third of the data: the high-contrast sets
-double the error below contrast 10 and buy ground only above contrast 1000. The
+every level, although the general sets are a third of the data. High-contrast training
+data is not merely a trade: it breaks resolution transfer, and the deeper the model the
+worse the damage. With three cores it gives 0.098 at level 3 and 0.539 at level 6,
+against 0.080 and 0.097 here. Adding more *general*-contrast data helps a great deal
+(`stokes_L4_d8b`, `stokes_L5_d8b` as extra sets: −27 % at level 3 and −36 to −42 %
+above it for the one-core model), including in the high-contrast bands. The
 `--extra-data path:lmax:kmax:batch[:max_train]` option adds a dataset; `--batch-mix`
 interleaves shuffled batches from all datasets so the weights never see a per-epoch
 level seesaw. The learning rate follows a one-cycle schedule over the whole run. The
@@ -651,9 +673,11 @@ Practicalities that matter on PVC:
   per-batch gather stalls on page faults. Each rank stages its own copy, so the recipe
   above needs ~95 GiB per rank and four ranks per 512 GB node. Build the caches once
   in a single process before starting several jobs on the same datasets.
-- An epoch of the recipe above takes ~65 s on four tiles. 120 epochs is not the
-  optimum: the held-out error was still falling when the schedule ended, and 60 epochs
-  is far short of it (0.26 against 0.19 at level 3).
+- An epoch of the recipe above takes ~121 s on four tiles. 120 epochs is not the
+  optimum: doubling the schedule to 240 is worth a further 12–18 % at every level, and
+  60 epochs is far short of it.
+- `--spectral-layers N` stacks N kernel-generating cores; three is the measured optimum
+  and the setting interacts with `--phys-attn`, so the two must be tuned together.
 - The host all-reduce costs ~1.5 s per step, so the batch has to grow with the rank
   count for the ranks to pay off.
 - Learning rate: the optimum is near `6e-3`; `2e-3` is 5–12 % worse at every level.
@@ -671,7 +695,7 @@ Every architecture switch is recorded in the checkpoint (`hidden`, `heads`,
 Held-out error per level on the general-contrast test sets:
 
     EVAL_DEVICE=xpu EVAL_NTEST=32 EVAL_NTEST_L6=27 \
-      python scripts/eval_mr_levels.py $ML/w3d_linear_xgen.pt
+      python scripts/eval_mr_levels.py $ML/w3d_linear_s3pa128.pt
 
 reports mean / best / median / worst relative L2 for velocity and the pressure error at
 each level (a comma-separated list of checkpoints is scored as a set routed by viscosity
@@ -721,28 +745,36 @@ Held-out relative $L^2$ velocity error $\|u_{pred}-u\|/\|u\|$ on the general tes
 
 | level | best | median | **mean** | worst | pressure |
 |---|---|---|---|---|---|
-| L3 (9^3) | 0.025 | 0.157 | **0.172** | 0.587 | 0.049 |
-| L4 (17^3) | 0.032 | 0.181 | **0.239** | 1.007 | 0.035 |
-| L5 (33^3) | 0.034 | 0.179 | **0.231** | 0.966 | 0.035 |
-| L6 (65^3, unseen) | 0.038 | 0.172 | **0.211** | 0.955 | 0.032 |
+| L3 (9^3) | 0.010 | 0.056 | **0.080** | 0.304 | 0.029 |
+| L4 (17^3) | 0.015 | 0.069 | **0.121** | 0.537 | 0.022 |
+| L5 (33^3) | 0.014 | 0.066 | **0.113** | 0.485 | 0.021 |
+| L6 (65^3, unseen) | 0.016 | 0.064 | **0.097** | 0.474 | 0.019 |
 
-The error does not grow with refinement above level 4: the two levels the model was
-never trained on score at or below the finest trained level.
+For comparison, the previous design — four contrast-routed experts with convolutional
+stencils, 81 M parameters, trained on *all* levels including 6 — scored
+0.084 / 0.112 / 0.135 / 0.189. This is one model of 498 k parameters that has never
+seen level 6.
+
+The error does not grow with refinement: level 6, never trained on, is the best level.
+The median is about 0.06 everywhere, so the typical problem is well inside the useful
+range and the mean is set by a few high-contrast cases.
 
 The mean is set almost entirely by high viscosity contrast. Splitting the same test
 sets by $\chi=\max\eta/\min\eta$:
 
 | contrast band | samples | L3 | L4 | L5 | L6 |
 |---|---|---|---|---|---|
-| 1 – 10 | 12 | 0.053 | 0.065 | 0.067 | 0.076 |
-| 10 – 100 | 8 | 0.169 | 0.205 | 0.198 | 0.201 |
-| 100 – 1000 | 3 | 0.251 | 0.333 | 0.330 | 0.292 |
-| above 1000 | 9 | 0.308 | 0.470 | 0.445 | 0.408 |
+| 1 – 10 | 12 | 0.024 | 0.031 | 0.033 | 0.036 |
+| 10 – 100 | 8 | 0.073 | 0.096 | 0.093 | 0.094 |
+| 100 – 1000 | 3 | 0.135 | 0.183 | 0.162 | 0.153 |
+| above 1000 | 9 | 0.144 | 0.243 | 0.220 | 0.180 |
 
-At low contrast the operator is already well inside the useful range. What sets the
-mean is the top two bands, where the solution is controlled by narrow weak channels and
-sharp interfaces — structure that the harmonic truncation cannot represent and that the
-patch term alone has to carry. That is where the remaining work is.
+What sets the
+mean is still the top two bands, where the solution is controlled by narrow weak
+channels and sharp interfaces — structure the harmonic truncation cannot represent. The
+worst case at every level is such a channel; `scripts/plot_crosscut.py` draws it. Three
+separate things reduce that band and they overlap: more spectral depth, more
+general-contrast training data, and a longer schedule.
 
 The solver benchmark (pipeline step 4: cold start against the prediction as initial
 guess, iterations to reach a given velocity error) has not yet been run with this
@@ -750,23 +782,20 @@ operator.
 
 ## Known limits
 
-- The mean error is 0.17–0.24 and is set by the two highest contrast bands, where it
-  reaches 0.31–0.47. The target for a useful initial guess is 0.1 at every level, which
-  needs roughly a factor of two in those bands. The held-out error was still falling at
-  the end of the 120-epoch schedule, the model has a single spectral layer, and the
-  lateral structure of the viscosity reaches the operator only through the 3 232
-  parameters of the patch term, so longer schedules, stacked spectral cores
-  (`--spectral-layers`), more patches and coupling across harmonic degrees are the open
-  levers.
-- Training data is thin above level 3: 10 000 general-contrast samples at level 3
-  against 1 000 at level 4 and 737 at level 5, which is the likeliest reason level 3 is
-  the most accurate level at the same relative truncation.
+- The mean error is 0.08–0.12 and is set by the two highest contrast bands, where it
+  reaches 0.14–0.24; the median is about 0.06 at every level. The held-out error was
+  still falling at the end of the 120-epoch schedule.
+- The levers are not independent. Spectral depth has an optimum at three cores, the
+  useful number of patches depends on that depth, and the contrast distribution of the
+  training data decides whether added capacity transfers to finer meshes at all. Any of
+  them tuned alone gives a misleading answer.
 - Contrast-routed experts, which gave the previous design a factor of 2.4, do not work
   for this operator: the kernel generator is conditioned on viscosity statistics, so an
   expert trained on a narrow contrast band extrapolates badly outside it and is worse
   than a general model even inside it.
-- Error grows with refinement for the reasons in *Discretisation convergence*: the
-  truncation stops at $\ell_{\max}=32$ and the patch statistics use a window in nodes.
+- The truncation stops at $\ell_{\max}=32$ above level 5 and the patch statistics use a
+  window counted in nodes, so the operator is not fully resolution-independent even
+  though the measured error does not grow. See *Discretisation convergence*.
 - As a **preconditioner** inside FGMRES, every learned operator tried — several
   architectures and training objectives, including unrolled exact-operator rollouts and
   direct spectral-radius minimisation — plateaus at variable viscosity (residual
@@ -774,4 +803,5 @@ operator.
   have negligible residual signature, which is exactly the signal a preconditioner is
   fed. The initial-guess role is what works.
 - The operator has not yet been run inside the simulation; the solver-side glue is
-  updated for it but untested.
+  updated for it but untested. The solver-iteration benchmark has not been re-run for
+  this model either, so the table above is held-out accuracy only.
