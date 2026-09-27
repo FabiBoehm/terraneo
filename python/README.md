@@ -3,21 +3,20 @@
 *Draft: a learned initial guess for the TERRA-NG Stokes solver. First results are
 promising; this has not been through a review and is ongoing work.*
 
-A neural solution operator for variable-viscosity Stokes flow on the TERRA-NG
-spherical shell — a network that takes the forcing and the viscosity field and returns
-velocity and pressure in one forward pass — together with the synthetic data it trains
-on, the code path by which the simulation calls it, and a benchmark mode in the
-production solver that measures how many iterations it saves.
+A neural solution operator for variable-viscosity Stokes flow on the TERRA-NG spherical
+shell: a network taking the forcing and the viscosity field and returning velocity and
+pressure in one forward pass, with the synthetic data it trains on, the code path by
+which the simulation calls it, and a benchmark mode in the production solver that
+measures how many iterations it saves.
 
-- `terra_data` — training data by the method of manufactured solutions: pick a random
-  polynomial velocity, pressure and viscosity field, and compute symbolically the forcing
-  that makes them an exact Stokes solution, using the same form of the viscous operator
+- `terra_data` — training data by the method of manufactured solutions: draw a random
+  polynomial velocity, pressure and viscosity field and compute the forcing symbolically
+  so they are an exact Stokes solution, using the same form of the viscous operator
   TERRA implements. Verified against the code's own analytic test cases.
-- `terra_infer` — the operator (`operator.py`), its trainer (`train_linear_mr.py`),
-  the spherical-harmonic and Chebyshev transforms, a finite-difference form of the
-  Stokes operator used in the loss, the mesh's symmetry group
-  used for augmentation, and the entry point (`__init__.py`) the simulation's embedded
-  Python interpreter calls.
+- `terra_infer` — the operator (`operator.py`), its trainer (`train_linear_mr.py`), the
+  spherical-harmonic and Chebyshev transforms, a finite-difference Stokes operator used
+  in the loss, the mesh's symmetry group used for augmentation, and the entry point
+  (`__init__.py`) the simulation's embedded Python interpreter calls.
 - `scripts` — held-out evaluation, solver-bench problem generation, cross-section plots.
 
 ## Install
@@ -61,22 +60,20 @@ which is what makes this safe to deploy. We do not try to replace the solver, an
 not use the network as a preconditioner (that was tried and does not work; see *Known
 limits*).
 
-**The mesh.** TERRA-NG covers the sphere with ten curvilinear *diamonds*, each an
-$n\times n$ grid of nodes laterally and $n$ nodes radially, so a diamond holds $n^3$
-nodes and the shell holds $10n^3$. Refinement level $L$ has $n=2^L+1$: 9, 17, 33, 65 at
-levels 3–6, i.e. 7 290 to 2.75 million nodes. Diamonds share their edge nodes; the data
-layout stores each shared node once *per diamond*, so a node on a seam between two
-diamonds appears twice in memory and a corner node up to five times. That detail matters
-twice below.
+**The mesh.** TERRA-NG covers the sphere with ten curvilinear *diamonds*, each $n\times
+n$ nodes laterally and $n$ radially, so the shell holds $10n^3$ nodes. Refinement level
+$L$ has $n=2^L+1$: 9, 17, 33, 65 at levels 3–6, i.e. 7 290 to 2.75 million nodes.
+Diamonds share their edge nodes and the layout stores each shared node once *per
+diamond*, so a seam node appears twice in memory and a corner node up to five times.
+That detail matters twice below.
 
-**Why a neural operator.** A network that maps a picture of $(f,\eta)$ on one grid to a
-picture of $x$ on the same grid learns nothing that transfers: the weights are tied to
-the pixel layout, and a finer mesh is a different problem. Kovachki et al. (*Neural
-Operator: Learning Maps Between Function Spaces*, arXiv:2108.08481) formalise the
-alternative: parameterise a map between *functions*, so that one set of weights acts
-on any discretisation of the input and, as the mesh is refined, the outputs converge to
-a single continuum operator. They call this **discretisation convergence**, and it is
-the property that lets a model trained mostly on cheap coarse meshes be used on the
+**Why a neural operator.** A network mapping $(f,\eta)$ on one grid to $x$ on the same
+grid learns nothing that transfers: the weights are tied to the pixel layout and a finer
+mesh is a different problem. Kovachki et al. (*Neural Operator: Learning Maps Between
+Function Spaces*, arXiv:2108.08481) parameterise a map between *functions* instead, so
+one set of weights acts on any discretisation and the outputs converge to a single
+continuum operator as the mesh is refined. That property, **discretisation
+convergence**, is what lets a model trained on cheap coarse meshes be used on the
 expensive fine one. Our goals, in order of how strictly we achieve them:
 
 1. **Exact linearity in $f$.** For fixed $\eta$ the true map $f\mapsto K_\eta^{-1}f$ is
@@ -99,30 +96,6 @@ that every decision below traces back to.
 2. **It is non-local.** $K_\eta^{-1}$ has a dense Green's function: a load anywhere
    moves fluid everywhere, with an influence that decays only algebraically with
    distance. No stencil of fixed width can represent it.
-
-### How the design was arrived at
-
-Every component below is in the model because removing it raises the held-out error by
-at least 10 % at the levels trained on, or breaks the transfer to finer meshes;
-everything that failed that test was removed. The model has 498 448 parameters. What
-survived, and how much each is worth:
-
-| lever | setting | effect | caveat |
-|---|---|---|---|
-| spectral cores in sequence | 3 | −16 % going 2→3 | non-monotonic: 4 cores is 13 % *worse* than 3 |
-| training data | general contrast only, enlarged at levels 4–5 | −27 % at L3, −36 to −42 % above | high-contrast data breaks transfer, worse the deeper the model |
-| schedule | 240 epochs | −12 to −18 % | composes additively with depth |
-| viscosity patches | 128 | −10 % | only at 3 cores; neutral at 1–2, and 256 is worse |
-
-**These do not tune independently.** Depth has an optimum, the useful number of patches
-depends on that depth, and the contrast distribution of the training data decides
-whether added capacity transfers to finer meshes at all. Each of them, measured alone,
-gives a misleading answer.
-
-Cut by the same rule: convolutional stencils and their dilated, separable and pyramid
-variants; contrast-routed experts; high-contrast training sets; level-6 training data;
-defect correction; stacked patch layers; coupling across harmonic degrees; wider
-channels; different channel groupings; doubled truncation; and model ensembling.
 
 ### Notation
 
@@ -204,8 +177,7 @@ $$v\ \leftarrow\ v+\mathcal K_j(\eta)\,v,\qquad
 v\ \leftarrow\ s_j(\eta)\odot v \ \ (j<N_s),\qquad j=0,\dots,N_s-1 .$$
 
 Because the gates are functions of $\eta$ and geometry only, stacking cores keeps the
-whole operator exactly linear in $f$ (section 4). Three is the measured optimum: two
-cores score 13–22 % worse and four cores 13 % worse than three.
+operator exactly linear in $f$ (section 4). Three is the measured optimum; four is worse.
 
 **Step 3 — attention between viscosity patches, applied once.** The second coupling,
 between regions of the shell in the same viscosity state; section 3 defines
@@ -235,13 +207,11 @@ Compared with the template, three things are different, all on purpose.
 
 ### 1. The integral term acts in the shell's own basis
 
-FNO makes the integral cheap by assuming a translation-invariant kernel
-$\kappa(x,y)=\kappa(x-y)$ on a periodic box: the integral is then a convolution, the
-FFT diagonalises it, and the model learns one weight matrix per Fourier mode up to a
-truncation. A spherical shell has no translations, but it has rotations about its
-centre, and the basis adapted to those is spherical harmonics laterally and Chebyshev
-polynomials radially. This subsection defines that expansion; the next says what the
-model does with it.
+FNO makes the integral cheap by assuming $\kappa(x,y)=\kappa(x-y)$ on a periodic box:
+the integral is a convolution, the FFT diagonalises it, and one weight matrix is learned
+per Fourier mode up to a truncation. A spherical shell has no translations but it has
+rotations about its centre, and the basis adapted to those is spherical harmonics
+laterally and Chebyshev polynomials radially.
 
 *Coordinates.* Write a point as $x=(r,\theta,\varphi)$: radius $r\in[r_{\min},r_{\max}]$,
 colatitude $\theta\in[0,\pi]$, longitude $\varphi\in[0,2\pi)$. The radius is mapped to
@@ -249,15 +219,13 @@ the Chebyshev interval by
 
 $$\hat r=\frac{2r-r_{\min}-r_{\max}}{r_{\max}-r_{\min}}\in[-1,1].$$
 
-*The basis functions.* $Y_\ell^m(\theta,\varphi)$ are the real spherical harmonics: the
-eigenfunctions of the Laplacian on the unit sphere, indexed by degree $\ell=0,1,2,\dots$
-and order $m=-\ell,\dots,\ell$. Degree sets the lateral scale — $Y_\ell^m$ oscillates
-roughly $\ell$ times around a great circle, so $\ell_{\max}=32$ resolves nothing finer
-than about $1/32$ of the circumference — and the $2\ell+1$ orders of one degree are
-rotated copies of each other, which is the property section 2 exploits. Radially,
-$T_k(\hat r)=\cos(k\arccos\hat r)$ is the Chebyshev polynomial of degree $k$; $T_0=1$,
-$T_1=\hat r$, $T_2=2\hat r^2-1$, and $T_k$ oscillates $k$ times across the shell's
-thickness.
+*The basis functions.* $Y_\ell^m(\theta,\varphi)$ are the real spherical harmonics,
+eigenfunctions of the Laplacian on the unit sphere, indexed by degree $\ell$ and order
+$m=-\ell,\dots,\ell$. Degree sets the lateral scale: $Y_\ell^m$ oscillates roughly
+$\ell$ times around a great circle, so $\ell_{\max}=32$ resolves nothing finer than
+about $1/32$ of the circumference. The $2\ell+1$ orders of one degree are rotated copies
+of each other. Radially, $T_k(\hat r)=\cos(k\arccos\hat r)$ is the Chebyshev polynomial
+of degree $k$, oscillating $k$ times across the shell's thickness.
 
 *The expansion.* The feature field $v$ has $d_v$ channels; each channel is a scalar
 field on the shell and is expanded on its own. For one channel,
@@ -265,15 +233,12 @@ field on the shell and is expanded on its own. For one channel,
 $$v(r,\theta,\varphi)\ \approx\ \sum_{\ell=0}^{\ell_{\max}}\ \sum_{m=-\ell}^{\ell}\ \sum_{k=0}^{k_{\max}}
 \hat v_{\ell mk}\ \,Y_\ell^m(\theta,\varphi)\ T_k(\hat r),$$
 
-a sum of $M\cdot k_1$ terms, with $M=(\ell_{\max}+1)^2$ lateral functions (all pairs
-$(\ell,m)$ up to $\ell_{\max}$) and $k_1=k_{\max}+1$ radial ones. The coefficients
-$\hat v_{\ell mk}$ are the field's representation in this basis; there is one such set
-of $M k_1$ numbers per channel. Because $Mk_1$ is far smaller than the number of nodes
-— $1089\times17\approx18{,}500$ against $2.75$ million at level 6 — the expansion is a
-*truncation*: it can represent exactly only fields that are smooth at the scale of
-$\ell_{\max}$ and $k_{\max}$, and for any other field the coefficients are chosen as the
-best fit in the least-squares sense. That is why the symbol is $\approx$, and it is the
-reason section 3 exists.
+a sum of $M\cdot k_1$ terms, with $M=(\ell_{\max}+1)^2$ lateral functions and
+$k_1=k_{\max}+1$ radial ones, so $Mk_1$ coefficients per channel. Because $Mk_1$ is far
+smaller than the node count — $1089\times17\approx18{,}500$ against 2.75 million at
+level 6 — this is a *truncation*: exact only for fields smooth at the scale of
+$\ell_{\max}$ and $k_{\max}$, and a least-squares fit otherwise. Hence $\approx$, and
+hence section 3.
 
 *How the coefficients are computed.* The mesh is a product: every diamond has the same
 $n$ radial layers, so the $10n^3$ stored nodes are $10n^2$ lateral positions
@@ -291,50 +256,43 @@ $$\text{synthesis:}\quad V=Y\,\hat V\,Y_r^{\top},\qquad\qquad
 \text{analysis:}\quad \hat V=Y^{+}\,V\,(Y_r^{+})^{\top},$$
 
 where $Y^{+}$ and $Y_r^{+}$ are the Moore–Penrose pseudo-inverses, i.e. the
-least-squares fit. A quadrature rule (weighting each node by the area it represents)
-would be the textbook choice for analysis; it was not used because the area weights of
-this mesh's stored node set, with seam nodes present in two or more diamonds, would have
-to be computed and corrected for the duplicates. The least-squares fit is not immune to
-the duplicates either — a repeated row counts twice — but the copies of a seam node carry
-the same value, so the extra weight distorts the fit mildly and never makes it
-inconsistent. Both matrices depend only on the mesh and are built once per level; they
-are not learned. (Doubling the truncation was tested and cut: it costs 4x and is worse;
-at $\ell_{\max}=64$ on the level-5 node count the least-squares analysis is
-ill-conditioned.)
+least-squares fit. Quadrature would be the textbook choice for analysis, but the area
+weights of this node set would have to be corrected for the seam duplicates. The
+least-squares fit is not immune to them either, since a repeated row counts twice, but
+the copies carry the same value, so the extra weight distorts the fit mildly and never
+makes it inconsistent. Both matrices depend only on the mesh, are built once per level,
+and are not learned. The truncation cannot simply be raised: at $\ell_{\max}=64$ on the
+level-5 node count the least-squares analysis is ill-conditioned.
 
-*What the operator does to the coefficients.* A kernel that is invariant under rotations
-of the sphere cannot couple a harmonic $(\ell,m)$ to any $(\ell',m')$ with
-$\ell'\ne\ell$, and must act identically on all $2\ell+1$ orders $m$ of one degree — this
-is the spherical analogue of "a convolution is diagonal in Fourier space". The Stokes
-inverse has this invariance whenever $\eta$ depends on $r$ only. For a single channel,
-the integral term then reduces to one small dense matrix per degree, acting on the
-$k_1$ radial coefficients of every harmonic of that degree:
+*What the operator does to the coefficients.* A rotation-invariant kernel cannot couple
+$(\ell,m)$ to any $(\ell',m')$ with $\ell'\ne\ell$ and must act identically on all
+$2\ell+1$ orders of one degree — the spherical analogue of "a convolution is diagonal in
+Fourier space". The Stokes inverse has this invariance whenever $\eta=\eta(r)$. For a
+single channel the integral term then reduces to one dense matrix per degree, acting on
+the $k_1$ radial coefficients of every harmonic of that degree:
 
 $$\widehat{(\mathcal K v)}_{\ell mk}=\sum_{k'=0}^{k_{\max}}\left[G_\ell\right]_{kk'}\,\hat v_{\ell mk'},
 \qquad G_\ell\in\mathbb R^{k_1\times k_1}\ \text{(single-channel form)}.$$
 
-Note what the indices say: the output at $(\ell,m,k)$ depends only on inputs at the
-same $(\ell,m)$, and $G_\ell$ carries no $m$. These matrices are the counterpart of
-FNO's per-mode weights, with the spherical-harmonic transform standing in for the FFT —
-the same substitution the spherical FNO makes for weather models.
+The output at $(\ell,m,k)$ depends only on inputs at the same $(\ell,m)$, and $G_\ell$
+carries no $m$. These are the counterpart of FNO's per-mode weights, with the
+spherical-harmonic transform standing in for the FFT.
 
-**How far the derivation actually carries.** The block-diagonal form is a theorem for a
-rotation-invariant operator acting on *scalar* fields. The field that enters the
-transform here is not that: the channels are learned features that start as pointwise
-mixtures of the *Cartesian* components of $f_u$ — which rotate as a vector, so their
-scalar-harmonic expansions couple degree $\ell$ to $\ell\pm1$ — and they have been
-multiplied pointwise by an $\eta$-dependent gate, which breaks rotation invariance
-outright. So for the model as built, per-degree mixing is an **inductive bias**, chosen
-because the layered operator has this structure and because the spherical FNO shows it
-works when applied channel-wise to arbitrary features; it is not an exact symmetry of
-the network, and "Green's function" below is a name for the learned blocks, not a claim
-that they equal one. What is solid is the parameterisation: the blocks are indexed by
-$(\ell,k,k')$ and not by nodes, which is what makes this term reusable across levels.
+**How far the derivation carries.** The block-diagonal form is a theorem for a
+rotation-invariant operator on *scalar* fields, and the field entering the transform is
+not that. The channels are learned features, pointwise mixtures of the *Cartesian*
+components of $f_u$, which rotate as a vector so their scalar-harmonic expansions couple
+$\ell$ to $\ell\pm1$; and they have been multiplied by an $\eta$-dependent gate, which
+breaks rotation invariance outright. Per-degree mixing is therefore an **inductive
+bias**, not an exact symmetry of the network, and "Green's function" is a name for the
+learned blocks rather than a claim that they equal one. What is solid is the
+parameterisation: the blocks are indexed by $(\ell,k,k')$ and not by nodes, which is
+what makes the term reusable across levels.
 
-*Channels.* The channels are not treated independently, because the $d_v$ features are
-not physical components but learned ones, and mixing them is where the operator's
-expressiveness lives. The $d_v$ channels are split into $n_b=8$ groups of $b_s=16$, and
-within a group the matrix mixes channels and radial modes together. Writing
+*Channels.* Channels are not treated independently: they are learned features, and
+mixing them is where the operator's expressiveness lives. The $d_v$ channels are split
+into $n_b=8$ groups of $b_s=16$, and within a group the matrix mixes channels and radial
+modes together. Writing
 $\hat v^{(q)}_{c,\ell mk}$ for the coefficient of channel $c$ of group $q$, the form
 actually used is
 
@@ -344,29 +302,25 @@ $$\widehat{(\mathcal K v)}^{(q)}_{c,\ell mk}
 \qquad G^{(q)}_\ell\in\mathbb R^{(b_sk_1)\times(b_sk_1)},$$
 
 so for each degree $\ell$ there are $n_b$ matrices, one per group, each acting on the
-group's stacked (channel, radial-mode) vector of length $b_sk_1$ — 144 at level 3, 272
-from level 4 on. That block size is called `tok` in the code. Groups do not exchange
-information inside $\mathcal K$; they do in the patch attention, which mixes all 128
-channels.
+group's stacked (channel, radial-mode) vector of length $b_sk_1$: 144 at level 3, 272
+from level 4 on (`tok` in the code). Groups do not exchange information inside
+$\mathcal K$; they do in the patch attention, which mixes all 128 channels.
 
 ### 2. The kernel is generated from the viscosity, not stored
 
 The template allows the kernel to depend on the parameter, $\kappa(x,y,a(x),a(y))$. If
 every $G_\ell^{(q)}$ were a free matrix, the model would learn one Green's function for
-the *average* viscosity of the training set and could not respond to the viscosity of
-the problem in front of it. So the matrices are *generated* from $\eta$ by a small
-network, once per sample. (A fixed table was tested: 43 % worse at the trained levels,
-and it diverges — error $10^8$ — when queried on a finer mesh.)
+the *average* viscosity of the training set and could not respond to the problem in
+front of it; a fixed table is 43 % worse and diverges on a finer mesh. So the matrices
+are *generated* from $\eta$ by a small network, once per sample.
 
-*Summarising the viscosity.* For each of the $n$ radial layers, take the mean and the
-standard deviation of $\log\eta$ over that spherical surface (all $10n^2$ lateral nodes
-of the layer). That gives two profiles of length $n$; each is resampled to 16 radii by
-linear interpolation, so that the summary has the same size at every level. The 32
-numbers pass through a learned MLP, $\mathrm{Linear}(32\to64)$, GELU,
-$\mathrm{Linear}(64\to16)$, giving the embedding $e(\eta)\in\mathbb R^{16}$. Its last
-layer is initialised with small weights, so at the start of training every sample gets
-nearly the same kernel and the dependence on $\eta$ is learned gradually rather than
-imposed by a random initialisation.
+*Summarising the viscosity.* For each of the $n$ radial layers take the mean and
+standard deviation of $\log\eta$ over that surface (all $10n^2$ lateral nodes). Each of
+the two resulting profiles is resampled to 16 radii by linear interpolation, so the
+summary has the same size at every level. The 32 numbers pass through a learned MLP,
+$\mathrm{Linear}(32\to64)$, GELU, $\mathrm{Linear}(64\to16)$, giving
+$e(\eta)\in\mathbb R^{16}$. Its last layer is initialised small, so every sample starts
+with nearly the same kernel and the dependence on $\eta$ is learned gradually.
 
 *Generating the entries.* A learned network $\Gamma$ — $\mathrm{Linear}(19\to64)$, GELU,
 $\mathrm{Linear}(64\to64)$, GELU, $\mathrm{Linear}(64\to2048)$ — takes $3+16=19$ inputs:
@@ -387,20 +341,18 @@ outputs over all $(k,k')$ for a fixed $\ell$ and $q$ fills the $(b_sk_1)\times(b
 matrix $G^{(q)}_\ell$ of section 1. Everything the integral term learns is in $\Gamma$
 and $e$: 138 560 + 3 152 parameters — 78 % of the whole model.
 
-Two consequences follow. Every sample gets its own Green's function, conditioned on its
-own viscosity profile. And the learned object is a smooth function of *continuous*
-indices rather than a table with one entry per grid point, so a finer mesh — which
-allows a larger $\ell_{\max}$ and $k_{\max}$ — simply evaluates $\Gamma$ at more points.
+Two consequences. Every sample gets its own Green's function, conditioned on its own
+viscosity profile. And the learned object is a smooth function of *continuous* indices
+rather than a table with one entry per grid point, so a finer mesh simply evaluates
+$\Gamma$ at more points.
 This is exactly what makes the integral term discretisation convergent: raising the
 truncation only asks $\Gamma$ for modes it has not been trained on, at arguments beyond
 the trained range ($\ell/16>2$, $k/8>2$), which is extrapolation, not a different
 function. That is one reason the truncation stops growing at level 5.
 
-*What the kernel does not see.* $e(\eta)$ carries only the radial profile of the
-viscosity — nothing about *where* laterally a slab or a channel sits. Giving the
-generator lateral information (the harmonic content of $\log\eta$, or the patch
-descriptors of section 3) overfits; the lateral structure is handled by the next term
-instead.
+*What the kernel does not see.* $e(\eta)$ carries only the radial profile — nothing
+about *where* laterally a slab or channel sits. Feeding the generator lateral
+information overfits; that structure is handled by the next term instead.
 
 ### What if the viscosity is not layered?
 
@@ -437,10 +389,9 @@ in the results below.
 
 *Why not a local term.* The template's $\mathcal W_t$, realised on a mesh, is a stencil:
 a weighted sum over a node's neighbours in index space. Its reach is counted in nodes,
-so its physical footprint halves with every refinement level, and the operator it
-computes at level 6 is a different one from the operator trained at level 3. That is
-the one component of the template that cannot be discretisation convergent, and it is
-the one this model does without.
+so its physical footprint halves with every refinement and the operator it computes at
+level 6 differs from the one trained at level 3. It is the one component of the template
+that cannot be discretisation convergent, and this model does without it.
 
 *What is used instead.* The idea is Transolver's physics attention (Wu et al., ICML 2024):
 mesh points that share a *physical state* should exchange information regardless of
@@ -491,12 +442,11 @@ $$(\mathcal A v)_i=\sum_m w_{im}\,\tilde s_m,\qquad v_i\ \leftarrow\ v_i+\gamma\
 *Properties.* Every weight in the term — $w$, $A$, $\gamma$ — is a function of $\eta$
 and geometry, so for a fixed viscosity field the term is linear in $v$. The assignment
 is pointwise and the descriptors are physical, so the same weights act on any mesh. The
-cost is $O(P\,M_p\,d_v)$, about 44 GFLOP at level 6, and the term has 3 232
-parameters at $M_p=128$. How many patches are worth having depends on the depth of the
-spectral core, and only on that: widening 32 to 128 patches is neutral or slightly
-harmful with one or two cores and worth 10 % with three. Stacking two or three patch
-layers instead is neutral at any depth, and 256 patches is worse than 128. So the
-partition's resolution matters, not how often the model re-partitions.
+cost is $O(P\,M_p\,d_v)$, about 0.2 TFLOP at level 6, for 9 472 parameters. How many
+patches are worth having depends on the depth of the spectral core and only on that:
+widening 32 to 128 is neutral at one or two cores and worth 10 % at three, while
+stacking extra patch layers is neutral at any depth and 256 patches is worse than 128.
+The partition's resolution matters, not how often the model re-partitions.
 
 ### 4. No nonlinearity on the forcing path, and what it guarantees
 
@@ -510,13 +460,12 @@ every resolution, the network satisfies exactly
 $$\mathcal G_\theta(\alpha f_1+\beta f_2,\ \eta)=\alpha\,\mathcal G_\theta(f_1,\eta)+\beta\,\mathcal G_\theta(f_2,\eta),
 \qquad\text{and in particular}\qquad\mathcal G_\theta(0,\eta)=0.$$
 
-`scripts/check_linearity.py` verifies this numerically on a random model and mesh; the
-relative deviation is $10^{-6}$, i.e. floating-point rounding. It is a strictly smaller
-hypothesis class than the universal one, and that is the point: it is the class the
-true operator belongs to. The network cannot waste capacity learning that small loads
-behave like large ones, cannot produce spurious flow from zero forcing, and cannot drift
-out of the class during training. The `--nonlin` flag inserts a GELU after the coupling
-terms and gives all of this up; it is off.
+`scripts/check_linearity.py` verifies this on a random model and mesh; the relative
+deviation is $10^{-6}$, i.e. floating-point rounding. The hypothesis class is strictly
+smaller than the universal one, and that is the point: it is the class the true operator
+belongs to. The network cannot waste capacity learning that small loads behave like
+large ones, cannot produce spurious flow from zero forcing, and cannot drift out of the
+class during training. The `--nonlin` flag gives this up; it is off.
 
 ### Every learned parameter
 
@@ -534,25 +483,24 @@ terms and gives all of this up; it is off.
 | $W_Q$ | step 4 | $\mathrm{Linear}(128\to4)$, no bias | 512 |
 | **total** | | | **498 448** |
 
-"Bias" means the layer has an additive bias; every layer on the path the forcing takes
-has none, and every layer with a bias acts only on viscosity and geometry — that split
-is what section 4 relies on. The transform matrices $Y$, $Y_r$ and their pseudo-inverses
-are *not* learned: they are computed from the node positions of each level and stored
-as buffers. Nor are the geometry features. The integral term (the last two rows of
-section 2) is 84 % of the model; the patch attention 1.9 %. The embedding $e(\eta)$ is
-shared by all three cores; only the generators $\Gamma_j$ are separate.
+"Bias" means the layer has an additive bias. Every layer on the path the forcing takes
+has none, and every layer with a bias acts only on viscosity and geometry; that split is
+what section 4 relies on. The transform matrices $Y$, $Y_r$ and their pseudo-inverses
+are computed from the node positions of each level and stored as buffers, not learned,
+and nor are the geometry features. The generators are 84 % of the model and the patch
+attention 1.9 %. The embedding $e(\eta)$ is shared by all three cores; only the
+generators $\Gamma_j$ are separate.
 
 ### Projection
 
-Recall that seam nodes are stored once per diamond. The network processes each
-diamond's copy independently, so its raw output generally assigns *different* values to
-the copies of one physical node — a function that does not exist in the solver's
-finite-element space. $\Pi$ replaces every copy by the mean over the copies of that
-node. This is essential, not cosmetic: a Krylov solver can only remove error components
-that lie in its own space, and any part of the guess outside it is error the solver
-cannot touch. Without $\Pi$ the solver plateaus at 6 % error no matter how many
-iterations it is given. The solver-side glue then sets $u=0$ on the two Dirichlet
-shells.
+Seam nodes are stored once per diamond and the network processes each copy
+independently, so its raw output assigns *different* values to the copies of one
+physical node — a function that does not exist in the solver's finite-element space.
+$\Pi$ replaces every copy by the mean over the copies. This is essential, not cosmetic:
+a Krylov solver can only remove error components lying in its own space, and any part of
+the guess outside it is error the solver cannot touch. Without $\Pi$ the solver plateaus
+at 6 % error however many iterations it is given. The solver-side glue then sets $u=0$
+on the two Dirichlet shells.
 
 ### As implemented: shapes and sizes
 
@@ -597,22 +545,19 @@ refining the mesh rebuilds only the transform matrices $Y,Y_r$ and evaluates $\G
 more modes. The patch term assigns each node by its own viscosity state and geometry,
 and its learned weights act on patch tokens, so nothing in it depends on the node count.
 
-**Measured.** Trained on levels 3–5 with level 6 never seen, the model's error is
-0.070 / 0.082 / 0.083 / 0.076: it is flat across levels and does not grow beyond the
-training data at all. Trained on
-levels 3–4 only, an earlier version scored 0.215 / 0.321 / 0.384 / 0.434, so two levels
-beyond the training data cost a factor of 1.35 there. Training through level 5 removes
-that. The training data's viscosity distribution decides whether this holds at all:
-the same architecture trained on high-contrast-heavy sets reaches 0.098 at level 3 and
-0.539 at level 6, and the damage grows with depth.
+**Measured.** Trained on levels 3–5 with level 6 never seen, the error is
+0.070 / 0.082 / 0.083 / 0.076: flat across levels, with no growth beyond the training
+data. This holds only for general-contrast training data. The same architecture trained
+on high-contrast-heavy sets reaches 0.098 at level 3 and 0.539 at level 6, and the
+damage grows with the number of cores.
 
-**What still limits it.** The truncation is held at $\ell_{\max}=32$ from level 5
-upward while the mesh keeps refining, so the harmonics span 21 % of the lateral degrees
-of freedom at levels 3–4, 10 % at level 5, and 2.6 % at level 6; the term converges to
-the operator truncated at 32, which represents less of the solution as the mesh grows.
-Raising the truncation is not the answer (section 1); the patch term is what carries the
-sub-truncation structure. And the patch statistics use a $5^3$ window in nodes rather
-than a fixed physical size; a physical-size window was tested and is no better.
+**What still limits it.** The truncation is held at $\ell_{\max}=32$ from level 5 up
+while the mesh keeps refining, so the harmonics span 21 % of the lateral degrees of
+freedom at levels 3–4, 10 % at level 5 and 2.6 % at level 6: the term converges to the
+operator truncated at 32, which represents less of the solution as the mesh grows.
+Raising the truncation is not the answer (section 1); the patch term carries the
+sub-truncation structure. The patch statistics also use a $5^3$ window in nodes rather
+than a fixed physical size, which a physical-size window does not improve on.
 
 ## Pipeline
 
@@ -649,9 +594,8 @@ To check the generator against TERRA itself:
 
 ### 2. Train
 
-The recipe behind the current checkpoint (`w3d_linear_gen_s3pa128.pt`): levels 3–5,
-general-contrast sets only, level 6 held out. One process per GPU tile, four tiles,
-gradients averaged through gloo on the host:
+Levels 3–5, general-contrast sets only, level 6 held out. One process per GPU tile,
+four tiles, gradients averaged through gloo on the host:
 
     for r in 0 1 2 3; do
       WORLD_SIZE=4 RANK=$r ZE_AFFINITY_MASK=$r MASTER_ADDR=127.0.0.1 MASTER_PORT=29500 \
@@ -667,39 +611,42 @@ gradients averaged through gloo on the host:
         --out $ML/w3d_linear_s3pa128.pt &
     done; wait
 
-Training on the general-contrast sets alone beats adding the high-contrast sets at
-every level, although the general sets are a third of the data. High-contrast training
-data is not merely a trade: it breaks resolution transfer, and the deeper the model the
-worse the damage. With three cores it gives 0.098 at level 3 and 0.539 at level 6,
-against 0.080 and 0.097 here. Adding more *general*-contrast data helps a great deal
-(`stokes_L4_d8b`, `stokes_L5_d8b` as extra sets: −27 % at level 3 and −36 to −42 %
-above it for the one-core model), including in the high-contrast bands. The
-`--extra-data path:lmax:kmax:batch[:max_train]` option adds a dataset; `--batch-mix`
-interleaves shuffled batches from all datasets so the weights never see a per-epoch
-level seesaw. The learning rate follows a one-cycle schedule over the whole run. The
-loss is relative L2 on velocity and mean-free pressure plus an `H^1` gradient term
+`--extra-data path:lmax:kmax:batch[:max_train]` adds a dataset; `--batch-mix`
+interleaves shuffled batches from all of them so the weights never see a per-epoch level
+seesaw. The learning rate follows a one-cycle schedule over the whole run. The loss is
+relative L2 on velocity and mean-free pressure plus an `H^1` gradient term
 (`--h1-weight`), restricted to nodes where the finite-difference stencil is the true
 operator; velocity targets are scaled by the sample's geometric-mean viscosity.
-Augmentation is over the mesh's exact symmetry group. `--spectral-layers N` stacks
-several spectral cores (section 2) with viscosity gates between them; `--seed` fixes
-the initialisation.
+Augmentation is over the mesh's exact symmetry group. `--seed` fixes the initialisation.
 
-Practicalities that matter on PVC:
+**Choosing the data.** Use general-contrast sets only. High-contrast data does not
+merely trade accuracy between contrast bands, it breaks resolution transfer, and the
+damage grows with the number of cores: with three cores it gives 0.098 at level 3 and
+0.539 at level 6. More *general*-contrast data at levels 4 and 5 is worth 27–42 %,
+including in the high-contrast bands.
+
+**Choosing the size.** `--spectral-layers 3` is the optimum; two and four are both
+worse. `--phys-attn 128` is worth 10 % at three cores and nothing at one or two, so
+depth and patch count have to be tuned together. Neither is a pure capacity effect:
+four cores with 128 patches has the same parameter count as three and is 20 % worse.
+
+Practicalities on PVC:
 
 - The assembled cache (`_asm_*` next to each dataset) is read into RAM when it fits
   (`TERRA_CACHE_RAM_GB`, default 96); memory-mapped from the parallel filesystem the
   per-batch gather stalls on page faults. Each rank stages its own copy, so the recipe
   above needs ~95 GiB per rank and four ranks per 512 GB node. Build the caches once
   in a single process before starting several jobs on the same datasets.
-- An epoch of the recipe above takes ~121 s on four tiles. 120 epochs is not the
-  optimum: doubling the schedule to 240 is worth a further 12–18 % at every level, and
-  60 epochs is far short of it.
-- `--spectral-layers N` stacks N kernel-generating cores; three is the measured optimum
-  and the setting interacts with `--phys-attn`, so the two must be tuned together.
+- An epoch takes ~121 s on four tiles without the extra datasets and ~530 s with them.
+  120 epochs is not the optimum: doubling to 240 is worth a further 12–18 % at every
+  level. Size the wall clock accordingly — a run cut short loses its annealing tail,
+  which is where a one-cycle schedule gives up much of its remaining error.
 - The host all-reduce costs ~1.5 s per step, so the batch has to grow with the rank
   count for the ranks to pay off.
 - Learning rate: the optimum is near `6e-3`; `2e-3` is 5–12 % worse at every level.
-- The trainer resumes from `<out>.resume` if it exists — use a fresh `--out` per run.
+- The trainer resumes from `<out>.resume` if it exists, restoring model, optimiser and
+  schedule state. That makes an interrupted run recoverable, and makes a fresh `--out`
+  mandatory for a genuinely new run.
 - The SNG-2 `test` partition shares GPUs between jobs; use `general` for any GPU work.
 
 Every architecture switch is recorded in the checkpoint (`hidden`, `heads`,
@@ -768,28 +715,10 @@ Held-out relative $L^2$ velocity error $\|u_{pred}-u\|/\|u\|$ on the general tes
 | L5 (33^3) | 0.020 | 0.063 | **0.083** | 0.311 | 0.018 |
 | L6 (65^3, unseen) | 0.020 | 0.053 | **0.076** | 0.306 | 0.017 |
 
-This checkpoint stopped at epoch 95 of 120, so it has not had its annealing tail, which
-is normally worth a further 10–20 %.
-
-How it got here, and what it replaces:
-
-| model | L3 | L4 | L5 | L6 | parameters |
-|---|---|---|---|---|---|
-| **this model** | **0.070** | **0.082** | **0.083** | **0.076** | 498 k |
-| same, original (smaller) datasets, 240 epochs | 0.066 | 0.104 | 0.097 | 0.088 | 498 k |
-| same, original datasets, 120 epochs | 0.080 | 0.121 | 0.113 | 0.097 | 498 k |
-| one spectral core, 32 patches | 0.172 | 0.239 | 0.231 | 0.211 | 181 k |
-| previous design: 4 routed experts with stencils, trained on *all* levels | 0.084 | 0.112 | 0.135 | 0.189 | 81 M |
-
-The previous design was trained on every level including 6 and used four experts
-selected by viscosity contrast. This is one model, 160 times smaller, that has never
-seen level 6, and it is better at every level.
-
-The error does not grow with refinement: level 6, never trained on, is the best level.
-The median is about 0.06 everywhere, so the typical problem is well inside the useful
-range and the mean is set by a few high-contrast cases.
-
-The mean is set almost entirely by high viscosity contrast. Splitting the same test
+This checkpoint stopped at epoch 95 of 120, so it has not had its annealing tail, worth
+a further 10–20 %. The error is flat across levels and does not grow beyond the training
+data. The median is about 0.055 everywhere, so the typical problem is well inside the
+useful range and the mean is set by a few high-contrast cases. Splitting the same test
 sets by $\chi=\max\eta/\min\eta$:
 
 | contrast band | samples | L3 | L4 | L5 | L6 |
@@ -799,39 +728,33 @@ sets by $\chi=\max\eta/\min\eta$:
 | 100 – 1000 | 3 | 0.117 | 0.127 | 0.127 | 0.126 |
 | above 1000 | 9 | 0.112 | 0.146 | 0.139 | 0.129 |
 
-The top two bands still set the mean, since the solution there is controlled by narrow
-weak channels and sharp interfaces that the harmonic truncation cannot represent, and
-the worst case at every level is such a channel. `scripts/plot_crosscut.py` draws it.
-But the band is no longer the dominant term: it was 0.31–0.47 with one core and the
-smaller datasets, and is 0.11–0.15 now. Three separate things reduced it and they
-overlap: spectral depth, more general-contrast data, and a longer schedule.
+The top two bands set the mean: there the solution is controlled by narrow weak
+channels and sharp interfaces that the harmonic truncation cannot represent, and the
+worst case at every level is such a channel. `scripts/plot_crosscut.py` draws it.
 
-The solver benchmark (pipeline step 4: cold start against the prediction as initial
-guess, iterations to reach a given velocity error) has not yet been run with this
-operator.
+The solver benchmark (pipeline step 4: iterations to reach a given velocity error from a
+cold start against the prediction) has not been run with this operator.
 
 ## Known limits
 
 - The mean error is 0.07–0.08 and the median about 0.055 at every level, set by the two
   highest contrast bands where it reaches 0.12–0.15. The current checkpoint stopped
-  before the end of its schedule, so this is not yet the best this recipe can do.
-- The levers are not independent. Spectral depth has an optimum at three cores, the
-  useful number of patches depends on that depth, and the contrast distribution of the
-  training data decides whether added capacity transfers to finer meshes at all. Any of
-  them tuned alone gives a misleading answer.
-- Contrast-routed experts, which gave the previous design a factor of 2.4, do not work
-  for this operator: the kernel generator is conditioned on viscosity statistics, so an
-  expert trained on a narrow contrast band extrapolates badly outside it and is worse
-  than a general model even inside it.
+  before the end of its schedule, so this is not the best the recipe can do.
+- The levers are not independent: depth has an optimum, the useful patch count depends
+  on that depth, and the contrast distribution of the training data decides whether
+  added capacity transfers at all. Any of them tuned alone gives a misleading answer.
+- Contrast-routed experts do not work for this operator. The kernel generator is
+  conditioned on viscosity statistics, so an expert trained on a narrow contrast band
+  extrapolates badly outside it and is worse than a general model even inside it.
 - The truncation stops at $\ell_{\max}=32$ above level 5 and the patch statistics use a
   window counted in nodes, so the operator is not fully resolution-independent even
   though the measured error does not grow. See *Discretisation convergence*.
-- As a **preconditioner** inside FGMRES, every learned operator tried — several
-  architectures and training objectives, including unrolled exact-operator rollouts and
-  direct spectral-radius minimisation — plateaus at variable viscosity (residual
-  0.06–0.8 with error above 1). Root cause: the near-null modes of high-contrast Stokes
-  have negligible residual signature, which is exactly the signal a preconditioner is
-  fed. The initial-guess role is what works.
+- As a **preconditioner** inside FGMRES every learned operator tried plateaus at
+  variable viscosity (residual 0.06–0.8 with error above 1), across several
+  architectures and training objectives including unrolled exact-operator rollouts and
+  direct spectral-radius minimisation. The near-null modes of high-contrast Stokes have
+  negligible residual signature, which is exactly the signal a preconditioner is fed.
+  The initial-guess role is what works.
 - The operator has not yet been run inside the simulation; the solver-side glue is
   updated for it but untested. The solver-iteration benchmark has not been re-run for
   this model either, so the table above is held-out accuracy only.
