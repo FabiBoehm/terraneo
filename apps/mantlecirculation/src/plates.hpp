@@ -19,14 +19,14 @@ using grid::Grid3DDataVec;
 using grid::Grid4DDataVec;
 
 template < typename GridType, typename RadiiType, typename DataType, typename VelocityFn >
-struct Computeplate_velocities
+struct Compute_plate_velocities
 {
     GridType   grid_;
     RadiiType  radii_;
     DataType   plate_data_;
     VelocityFn computeVelocity;
 
-    Computeplate_velocities(
+    Compute_plate_velocities(
         const GridType&  grid,
         const RadiiType& radii,
         const DataType&  plate_data,
@@ -49,9 +49,6 @@ struct Computeplate_velocities
     }
 };
 
-/// @param on_device evaluate the velocities in a Kokkos kernel from the packed stage views rather than by
-///                  querying the oracle per point on the host. Ignored when interpolating in time, which
-///                  blends two stages and has no device path yet.
 void extract_plate_velocities(
     ScalarType                            plate_age,
     Grid4DDataVec< ScalarType, 3 >&       plate_velocities,
@@ -60,8 +57,7 @@ void extract_plate_velocities(
     const Grid2DDataScalar< ScalarType >& coords_radii,
     const bool                            interpolate_in_time,
     const ScalarType                      scale_factor,
-    const grid::shell::DistributedDomain*  domain_for_device = nullptr,
-    const bool                             on_device         = false )
+    const grid::shell::DistributedDomain* domain_for_device = nullptr )
 {
     util::Timer timer_plates( "plate_velocities" );
 
@@ -70,8 +66,20 @@ void extract_plate_velocities(
     plates::StatisticsPlateNotFoundHandler    errorHandler;
     plates::UniformCirclesPointWeightProvider pointWeightProvider( { { 1.0 / 100.0, 6 } }, 1e-1 );
 
+    ScalarType plate_age_ceil;
+    ScalarType plate_age_floor;
+    ScalarType interpolation_factor;
+
+    const ScalarType remainder = std::ceil( plate_age ) - plate_age;
+
     if ( !interpolate_in_time )
         plate_age = std::ceil( plate_age );
+    else
+    {
+        plate_age_ceil  = std::ceil( plate_age );
+        plate_age_floor = std::ceil( plate_age ) - 1;
+        interpolation_factor = ( plate_age - plate_age_floor ) / ( plate_age_ceil - plate_age_floor );
+    }
 
     util::logroot << "Updating plates..... Plate age: " << plate_age << " Ma." << std::endl;
 
@@ -82,12 +90,12 @@ void extract_plate_velocities(
     else
         oracle.prepareEulerVectors( plate_age );
 
-    if ( on_device && !interpolate_in_time && domain_for_device != nullptr )
+    if ( !interpolate_in_time || remainder == 0 )
     {
         const plates::UniformCirclesPointWeightProvider weights( { { 1.0 / 100.0, 6 } }, 1e-1 );
-        const auto stencil = plates::make_device_averaging_stencil( weights );
+        const auto                                      stencil = plates::make_device_averaging_stencil( weights );
 
-        plates::extract_plate_velocities_device< ScalarType >(
+        plates::extract_plate_velocities< ScalarType >(
             *domain_for_device,
             coords_shell,
             coords_radii,
@@ -96,56 +104,29 @@ void extract_plate_velocities(
             plate_velocities,
             scale_factor );
 
-        util::logroot << "Plate data extracted (device)." << std::endl;
+        util::logroot << "Plate data extracted." << std::endl;
         return;
     }
+    else
+    {
+        const plates::UniformCirclesPointWeightProvider weights( { { 1.0 / 100.0, 6 } }, 1e-1 );
+        const auto                                      stencil = plates::make_device_averaging_stencil( weights );
 
-    // Mirror the needed Kokkos::Views to the host
-    auto coords_host = Kokkos::create_mirror_view( coords_shell );
-    Kokkos::deep_copy( coords_host, coords_shell );
-    auto radii_host = Kokkos::create_mirror_view( coords_radii );
-    Kokkos::deep_copy( radii_host, coords_radii );
+        plates::extract_plate_velocities_interpolated_in_time< ScalarType >(
+            *domain_for_device,
+            coords_shell,
+            coords_radii,
+            plate_age,
+            oracle.stageFor( plate_age_ceil ).device(),
+            oracle.stageFor( plate_age_floor ).device(),
+            stencil,
+            plate_velocities,
+            scale_factor,
+            interpolation_factor );
 
-    // Copy plate data object to host, using Grid4DDataVec's own overloads
-    // and make sure to zero-initialize on host-side.
-    auto plate_velocities_host = create_mirror( Kokkos::HostSpace{}, plate_velocities );
-    for ( int d = 0; d < 3; ++d )
-        Kokkos::deep_copy( plate_velocities_host.comp_[d], ScalarType( 0 ) );
-
-    // Callback function for computing velocity components
-    auto getPointVelocity =
-        [&oracle, plate_age, &pointWeightProvider, &errorHandler, interpolate_in_time, scale_factor](
-            const vec3D& point ) {
-            vec3D velocity;
-            if ( interpolate_in_time )
-            {
-                velocity = oracle.getLocallyAveragedPointVelocityInterpolatedInTime(
-                    point, plate_age, pointWeightProvider, errorHandler );
-            }
-
-            else
-            {
-                velocity =
-                    oracle.getLocallyAveragedPointVelocity( point, plate_age, pointWeightProvider, errorHandler );
-            }
-
-            // Nondimensionalise and scale before returning
-            return velocity * scale_factor;
-        };
-
-    // Extract plate velocities from data
-    // Explicitly on host since underlying plates functionality is not device-callable.
-    Kokkos::parallel_for(
-        "Computeplate_velocities",
-        Kokkos::MDRangePolicy< HostExecSpace, Kokkos::Rank< 3 > >(
-            { 0, 0, 0 }, { coords_host.extent( 0 ), coords_host.extent( 1 ), coords_host.extent( 2 ) } ),
-        Computeplate_velocities( coords_host, radii_host, plate_velocities_host, getPointVelocity ) );
-    Kokkos::fence();
-
-    // Copy to device
-    deep_copy( plate_velocities, plate_velocities_host );
-
-    util::logroot << "Plate data extracted." << std::endl;
+        util::logroot << "Plate data extracted (interpolated in time)." << std::endl;
+        return;
+    }
 }
 
 inline std::shared_ptr< plates::PlateVelocityProvider >

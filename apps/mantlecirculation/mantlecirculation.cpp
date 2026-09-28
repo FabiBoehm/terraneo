@@ -444,8 +444,7 @@ Result<> run( const Parameters& prm )
             coords_radii[velocity_level],
             prm.boundary_parameters.plate_parameters.interpolate_plates_in_time,
             plate_velocity_nondim_scale,
-            domains[velocity_level].get(),
-            prm.boundary_parameters.plate_parameters.plates_on_device );
+            domains[velocity_level].get() );
     }
 
     // If we start from a checkpoint but it is not supposed to be a continuation of the simulation
@@ -741,8 +740,7 @@ Result<> run( const Parameters& prm )
                     coords_radii[velocity_level],
                     prm.boundary_parameters.plate_parameters.interpolate_plates_in_time,
                     plate_velocity_nondim_scale,
-                    domains[velocity_level].get(),
-                    prm.boundary_parameters.plate_parameters.plates_on_device );
+                    domains[velocity_level].get() );
             }
         }
 

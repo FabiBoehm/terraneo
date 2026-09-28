@@ -22,17 +22,17 @@
 
 #include <set>
 
+#include "terra/plates/conversions.hpp"
 #include "terra/plates/plate_not_found_handlers.hpp"
 #include "terra/plates/plate_rotation_provider.hpp"
 #include "terra/plates/plate_stage_data.hpp"
 #include "terra/plates/plate_storage.hpp"
 #include "terra/plates/smoothing_strategies.hpp"
-#include "terra/plates/conversions.hpp"
 
 // preserve ordering of includes
 #include "terra/plates/file_io.hpp"
-#include "terra/plates/local_averaging_point_weight_provider.hpp"
 #include "terra/plates/functions_for_plates.hpp"
+#include "terra/plates/local_averaging_point_weight_provider.hpp"
 
 namespace terra {
 namespace plates {
@@ -65,8 +65,7 @@ class PlateVelocityProvider
         // We use the Lon, Lat coordinates
         const vec3D pointLonLat = conversions::cart2sph( point );
 
-        std::tie( plateFound, plateID, distance ) =
-            findPlate( pointLonLat, age );
+        std::tie( plateFound, plateID, distance ) = findPlate( pointLonLat, age );
         return plateID;
     }
 
@@ -83,8 +82,7 @@ class PlateVelocityProvider
         // We use the Lon, Lat coordinates
         const vec3D pointLonLat = conversions::cart2sph( point );
 
-        std::tie( plateFound, plateID, distance ) =
-            findPlate( pointLonLat, age );
+        std::tie( plateFound, plateID, distance ) = findPlate( pointLonLat, age );
         distance /= plates::constants::earthRadiusInKm;
 
         if ( distance < eps )
@@ -132,8 +130,7 @@ class PlateVelocityProvider
         // We use the Lon, Lat coordinates
         vec3D pointLonLat = conversions::cart2sph( point );
 
-        std::tie( plateFound, plateID, distance ) =
-            findPlate( pointLonLat, age );
+        std::tie( plateFound, plateID, distance ) = findPlate( pointLonLat, age );
 
         if ( !plateFound )
         {
@@ -235,8 +232,7 @@ class PlateVelocityProvider
         // We use the Lon, Lat coordinates
         const vec3D pointLonLat = conversions::cart2sph( point );
 
-        std::tie( plateFound, plateID, distance ) =
-            findPlate( pointLonLat, age );
+        std::tie( plateFound, plateID, distance ) = findPlate( pointLonLat, age );
 
         if ( !plateFound )
         {
@@ -266,8 +262,7 @@ class PlateVelocityProvider
             bool   avgPointPlateFound{ false };
             double avgPointDistance{ static_cast< double >( -1 ) };
 
-            std::tie( avgPointPlateFound, avgPointPlateID, avgPointDistance ) =
-                findPlate( samplePointSphLonLat, age );
+            std::tie( avgPointPlateFound, avgPointPlateID, avgPointDistance ) = findPlate( samplePointSphLonLat, age );
 
             if ( avgPointPlateFound )
             {
@@ -440,8 +435,7 @@ class PlateVelocityProvider
             return std::make_tuple( false, idWhenNoPlateFound, std::numeric_limits< double >::max() );
         }
 
-        return usableResult(
-            std::make_tuple( true, r.plateId, r.distanceRad * plates::constants::earthRadiusInKm ) );
+        return usableResult( std::make_tuple( true, r.plateId, r.distanceRad * plates::constants::earthRadiusInKm ) );
     }
 
     /// Drops packed stages far from \p age

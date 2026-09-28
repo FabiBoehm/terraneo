@@ -289,7 +289,7 @@ int main( int argc, char** argv )
         const plates::UniformCirclesPointWeightProvider weights( { { 1.0 / 100.0, 6 } }, 1e-1 );
         const auto stencil = plates::make_device_averaging_stencil( weights );
 
-        plates::extract_plate_velocities_device< ScalarType >(
+        plates::extract_plate_velocities< ScalarType >(
             domain_fine, coords_fine, radii_grid, stage.device(), stencil,
             plate_velocities_device.block_1().grid_data(),
             static_cast< ScalarType >( prm.velocity_scale ) );

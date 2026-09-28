@@ -123,7 +123,7 @@ void compare_at_level(
     const auto& stage         = oracle.stageFor( age );
     const auto  stencil_device = plates::make_device_averaging_stencil( stencil_host );
 
-    plates::extract_plate_velocities_device< ScalarType >(
+    plates::extract_plate_velocities< ScalarType >(
         domain, coords, radii_grid, stage.device(), stencil_device, device_v, ScalarType( 1 ) );
 
     // ---- compare, split by regime -------------------------------------------------------------------------

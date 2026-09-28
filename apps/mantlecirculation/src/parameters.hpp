@@ -53,9 +53,6 @@ struct MeshParameters
 struct PlateParameters
 {
     bool apply_plate_velocities     = false;
-
-    /// Evaluate the plate velocities in a Kokkos kernel instead of querying the oracle per point on the host.
-    bool plates_on_device           = false;
     bool interpolate_plates_in_time = true;
     int  initial_plate_age          = 400;
     int  final_plate_age            = 0;
@@ -665,11 +662,6 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
         ->group( "Boundary Conditions" );
 
     // Plate parameters
-    add_flag_with_default(
-        app, "--plates-on-device", parameters.boundary_parameters.plate_parameters.plates_on_device )
-        ->group( "Boundary Conditions" )
-        ->description( "Evaluate plate velocities on the device rather than on the host." );
-
     add_option_with_default(
         app, "--apply-plate-velocities", parameters.boundary_parameters.plate_parameters.apply_plate_velocities )
         ->group( "Plate Parameters" )
