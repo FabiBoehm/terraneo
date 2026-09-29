@@ -17,7 +17,11 @@ import os
 TTA = os.environ.get("EVAL_TTA", "0") == "1"
 SMOOTH = os.environ.get("EVAL_SMOOTH", "0") == "1"
 BINS = os.environ.get("EVAL_BINS", "0") == "1"
-EVAL_DEV = torch.device(os.environ.get("EVAL_DEVICE", "cpu"))
+_dev = os.environ.get("EVAL_DEVICE", "cpu")
+if _dev == "auto":          # ROCm presents as cuda
+    _dev = ("cuda" if torch.cuda.is_available()
+            else "xpu" if hasattr(torch, "xpu") and torch.xpu.is_available() else "cpu")
+EVAL_DEV = torch.device(_dev)
 MOE_T = [float(t) for t in os.environ.get("EVAL_MOE_THRESH", "0").split(",") if float(t) > 0]   # thresholds: ck[k] serves band k
 
 M = os.environ.get("TERRA_ML_DIR", "/hppfs/scratch/0E/di35guv2/ml")   # datasets and checkpoints

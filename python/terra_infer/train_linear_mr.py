@@ -128,6 +128,23 @@ def _assembled_cache(root, max_train, max_test, eta_power, build):
     return arrs, float(st[0]), float(st[1])
 
 
+def _resolve_device(name):
+    """`auto` -> the accelerator this build actually has. ROCm presents as `cuda`.
+    With several devices per node, each rank takes the one matching its local rank."""
+    if name != "auto":
+        return name
+    if torch.cuda.is_available():
+        loc = int(os.environ.get("LOCAL_RANK", os.environ.get("SLURM_LOCALID", "0")))
+        n = torch.cuda.device_count()
+        if n > 1:
+            torch.cuda.set_device(loc % n)
+            return f"cuda:{loc % n}"
+        return "cuda"
+    if hasattr(torch, "xpu") and torch.xpu.is_available():
+        return "xpu"          # one tile per rank, pinned by ZE_AFFINITY_MASK
+    return "cpu"
+
+
 def build_level(root, lmax, kmax, max_train=None, max_test=None, eta_power=0.0):
     coords = load_coords(root)
     state = {}
@@ -320,7 +337,11 @@ def main(argv=None):
                          "visit per epoch, e.g. 1,0.5,0.25: the fine levels dominate the epoch "
                          "cost, so sampling a fresh random subset of them each epoch keeps the "
                          "data coverage over the run while making epochs several times cheaper")
-    ap.add_argument("--device", default="xpu")
+    ap.add_argument("--device", default="auto",
+                    help="auto | cuda (also AMD ROCm) | xpu | cpu")
+    ap.add_argument("--dist-backend", default="auto",
+                    help="auto | nccl (also RCCL on AMD) | gloo; auto picks nccl on cuda, "
+                         "gloo otherwise")
     ap.add_argument("--amp", action="store_true",
                     help="bf16 autocast on lift/convs/head; the spectral Green "
                          "core stays fp32 (guarded inside the operator)")
@@ -330,7 +351,7 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     torch.manual_seed(args.seed)
-    dev = torch.device(args.device)
+    dev = torch.device(_resolve_device(args.device))
     # ---- optional data parallelism ---------------------------------------------------
     # No XPU collective backend is installed (no oneCCL, no internet to fetch it), so the
     # gradients are averaged through gloo on the host. The models here are 0.2-8.4 M
@@ -344,7 +365,10 @@ def main(argv=None):
         import torch.distributed as dist
         os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
         os.environ.setdefault("MASTER_PORT", "29577")
-        dist.init_process_group("gloo", rank=RANK, world_size=WORLD)
+        backend = args.dist_backend
+        if backend == "auto":
+            backend = "nccl" if dev.type == "cuda" else "gloo"
+        dist.init_process_group(backend, rank=RANK, world_size=WORLD)
         torch.manual_seed(args.seed)  # identical init on every rank
     def _is_main():
         return RANK == 0

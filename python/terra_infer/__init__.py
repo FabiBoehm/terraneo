@@ -183,7 +183,11 @@ def cband_preconditioner(fields):
         path = os.environ.get("TERRA_NEURAL_CHECKPOINT")
         if not path:
             raise RuntimeError("model 'cband' needs $TERRA_NEURAL_CHECKPOINT")
-        dev = os.environ.get("TERRA_NEURAL_DEVICE", "xpu")
+        dev = os.environ.get("TERRA_NEURAL_DEVICE", "")
+        if not dev:
+            dev = ("cuda" if torch.cuda.is_available()
+                   else "xpu" if hasattr(torch, "xpu") and torch.xpu.is_available()
+                   else "cpu")
         ck = torch.load(path, map_location="cpu", weights_only=False)
         shape = tuple(fields["u"].shape)      # (S, nx, ny, nr, 3)
         cpath = os.environ.get("TERRA_MESH_COORDS")
