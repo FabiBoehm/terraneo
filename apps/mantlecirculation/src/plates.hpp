@@ -6,7 +6,7 @@
 #include "grid/shell/spherical_shell.hpp"
 #include "linalg/vector_q1.hpp"
 #include "parameters.hpp"
-#include "terra/plates/plate_velocity_device.hpp"
+#include "terra/plates/plate_velocity_calculator.hpp"
 #include "terra/plates/plate_velocity_provider.hpp"
 #include "terra/plates/types.hpp"
 #include "util/logging.hpp"
@@ -57,14 +57,16 @@ void extract_plate_velocities(
     const Grid2DDataScalar< ScalarType >& coords_radii,
     const bool                            interpolate_in_time,
     const ScalarType                      scale_factor,
-    const grid::shell::DistributedDomain* domain_for_device = nullptr )
+    const grid::shell::DistributedDomain* domain_for_plates = nullptr )
 {
     util::Timer timer_plates( "plate_velocities" );
 
     using HostExecSpace = Kokkos::DefaultHostExecutionSpace;
 
-    plates::StatisticsPlateNotFoundHandler    errorHandler;
-    plates::UniformCirclesPointWeightProvider pointWeightProvider( { { 1.0 / 100.0, 6 } }, 1e-1 );
+    plates::StatisticsPlateNotFoundHandler errorHandler;
+
+    const plates::UniformCirclesPointWeightProvider weights( { { 1.0 / 100.0, 6 } }, 1e-1 );
+    const auto                                      stencil = plates::make_averaging_stencil( weights );
 
     ScalarType plate_age_ceil;
     ScalarType plate_age_floor;
@@ -76,8 +78,8 @@ void extract_plate_velocities(
         plate_age = std::ceil( plate_age );
     else
     {
-        plate_age_ceil  = std::ceil( plate_age );
-        plate_age_floor = std::ceil( plate_age ) - 1;
+        plate_age_ceil       = std::ceil( plate_age );
+        plate_age_floor      = std::ceil( plate_age ) - 1;
         interpolation_factor = ( plate_age - plate_age_floor ) / ( plate_age_ceil - plate_age_floor );
     }
 
@@ -92,11 +94,8 @@ void extract_plate_velocities(
 
     if ( !interpolate_in_time || remainder == 0 )
     {
-        const plates::UniformCirclesPointWeightProvider weights( { { 1.0 / 100.0, 6 } }, 1e-1 );
-        const auto                                      stencil = plates::make_device_averaging_stencil( weights );
-
         plates::extract_plate_velocities< ScalarType >(
-            *domain_for_device,
+            *domain_for_plates,
             coords_shell,
             coords_radii,
             oracle.stageFor( plate_age ).device(),
@@ -109,11 +108,8 @@ void extract_plate_velocities(
     }
     else
     {
-        const plates::UniformCirclesPointWeightProvider weights( { { 1.0 / 100.0, 6 } }, 1e-1 );
-        const auto                                      stencil = plates::make_device_averaging_stencil( weights );
-
         plates::extract_plate_velocities_interpolated_in_time< ScalarType >(
-            *domain_for_device,
+            *domain_for_plates,
             coords_shell,
             coords_radii,
             plate_age,

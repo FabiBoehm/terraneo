@@ -1,8 +1,6 @@
 /*
  * Copyright (c) 2022-2025 Berta Vilacis, Marcus Mohr, Nils Kohl, Andreas Burkhart, Fatemeh Rezaei.
  *
- * This file is part of HyTeG
- * (see https://i10git.cs.fau.de/hyteg/hyteg).
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -293,33 +291,6 @@ class PlateVelocityProvider
         return tangentComponent;
     }
 
-    /// Returns velocity vector for a point determined from the velocity of the associated plate at given age stage
-    ///
-    /// Interpolated linearly in time between the current and next plate age stage. Defaults to the boundaries of
-    /// plateTopologies_.getListOfPlateStages() if age lies out of bounds of plateTopologies_.getListOfPlateStages().
-    ///
-    /// This is the version using a weighted average of the velocity around the given point given a LocalAveragingPointWeightProvider.
-    template < typename PlateNotFoundStrategy >
-    vec3D getLocallyAveragedPointVelocityInterpolatedInTime(
-        const vec3D&                             point,
-        const double                             age,
-        const LocalAveragingPointWeightProvider& pointWeightProvider,
-        PlateNotFoundStrategy&&                  errorHandler )
-    {
-        // find surrounding plate ages and interpolation factor
-        double ageFloor;
-        double ageCeil;
-        double interpolationFactor;
-        std::tie( ageFloor, ageCeil, interpolationFactor ) = getSurroundingAges( age );
-
-        // call getLocallyAveragedPointVelocity twice
-        vec3D vecFloor = getLocallyAveragedPointVelocity( point, ageFloor, pointWeightProvider, errorHandler );
-        vec3D vecCeil  = getLocallyAveragedPointVelocity( point, ageCeil, pointWeightProvider, errorHandler );
-
-        // linear interpolation in time
-        return vecFloor + interpolationFactor * ( vecCeil - vecFloor );
-    }
-
     /// Query function to obtain a vector of plate stages available in the datafiles
     const std::vector< double >& getListOfPlateStages() const { return plateTopologies_.getListOfPlateStages(); }
 
@@ -400,7 +371,7 @@ class PlateVelocityProvider
     /// Packed data for one prepared age stage, including the device views.
     ///
     /// Exposed so that callers can evaluate velocities inside a Kokkos kernel instead of going through the
-    /// host-only query path; see terra/plates/plate_velocity_device.hpp. The stage must have been prepared
+    /// host-only query path; see terra/plates/plate_velocity_calculator.hpp. The stage must have been prepared
     /// first with prepareEulerVectors(), which is also what fills in its per-plate Euler vectors.
     const PlateStageData& stageFor( const double age ) const { return stages_.at( age ); }
 

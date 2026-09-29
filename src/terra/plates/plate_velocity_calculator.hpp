@@ -16,7 +16,7 @@
 
 /// @file
 ///
-/// Plate surface velocities evaluated on the device.
+/// Plate surface velocities.
 ///
 /// The host path (PlateVelocityProvider::getLocallyAveragedPointVelocity, driven by
 /// extract_plate_velocities) walks the polygon containers and is not device-callable, so it mirrors the mesh
@@ -61,7 +61,7 @@ KOKKOS_INLINE_FUNCTION void tangent_frame( const vec3D& normalCart, vec3D& first
 
 /// @brief The averaging stencil, flattened for the device: 2D tangent-plane offsets and their weights.
 template < typename MemSpace >
-struct DeviceAveragingStencil
+struct AveragingStencil
 {
     /// (offset along the first tangent direction, offset along the second, weight)
     Kokkos::View< double* [3], Kokkos::LayoutRight, MemSpace > offsets;
@@ -73,8 +73,8 @@ struct DeviceAveragingStencil
 };
 
 /// @brief Uploads a UniformCirclesPointWeightProvider's stencil once, for reuse across all points.
-inline DeviceAveragingStencil< typename Kokkos::DefaultExecutionSpace::memory_space >
-    make_device_averaging_stencil( const UniformCirclesPointWeightProvider& provider )
+inline AveragingStencil< typename Kokkos::DefaultExecutionSpace::memory_space >
+    make_averaging_stencil( const UniformCirclesPointWeightProvider& provider )
 {
     using DeviceSpace = typename Kokkos::DefaultExecutionSpace::memory_space;
 
@@ -134,7 +134,7 @@ struct PlateIDInterpolator
 
 /// @brief Fills `plate_id` with the plate under each outermost-shell node, on the device.
 template < typename ScalarType >
-void extract_plate_ids_device(
+void extract_plate_ids(
     const grid::shell::DistributedDomain&                                          domain,
     const grid::Grid3DDataVec< ScalarType, 3 >&                                    coords_shell,
     const grid::Grid2DDataScalar< ScalarType >&                                    coords_radii,
@@ -144,7 +144,7 @@ void extract_plate_ids_device(
     const int surface_r = domain.domain_info().subdomain_num_nodes_radially() - 1;
 
     Kokkos::parallel_for(
-        "extract_plate_ids_device",
+        "extract_plate_ids",
         grid::shell::local_domain_md_range_policy_nodes( domain ),
         PlateIDInterpolator< ScalarType >{ coords_shell, coords_radii, plate_id, stage, surface_r } );
     Kokkos::fence();
@@ -152,17 +152,17 @@ void extract_plate_ids_device(
 
 /// @brief Evaluates the rigid-plate surface velocity at every node of the outermost shell.
 template < typename ScalarType >
-struct DevicePlateVelocityInterpolator
+struct PlateVelocityInterpolator
 {
     using DeviceSpace = Kokkos::DefaultExecutionSpace::memory_space;
 
-    grid::Grid3DDataVec< ScalarType, 3 >  coords_shell;
-    grid::Grid2DDataScalar< ScalarType >  coords_radii;
-    grid::Grid4DDataVec< ScalarType, 3 >  velocity;
-    PlateStageViews< DeviceSpace >        stage;
-    DeviceAveragingStencil< DeviceSpace > stencil;
-    int                                   surface_r;
-    ScalarType                            scale;
+    grid::Grid3DDataVec< ScalarType, 3 > coords_shell;
+    grid::Grid2DDataScalar< ScalarType > coords_radii;
+    grid::Grid4DDataVec< ScalarType, 3 > velocity;
+    PlateStageViews< DeviceSpace >       stage;
+    AveragingStencil< DeviceSpace >      stencil;
+    int                                  surface_r;
+    ScalarType                           scale;
 
     /// Rigid-plate velocity at a lon/lat/radius point, or false if no plate covers it.
     KOKKOS_INLINE_FUNCTION
@@ -272,9 +272,9 @@ struct PlateVelocityInterpolatorInTime
     void operator()( const int sd, const int x, const int y ) const
     {
         for ( int d = 0; d < 3; ++d )
-            velocity( sd, x, y, surface_r, d ) =
-                velocity_floor( sd, x, y, surface_r, d ) +
-                interpolation_factor * ( velocity_ceil( sd, x, y, surface_r, d ) - velocity_floor( sd, x, y, surface_r, d ) );
+            velocity( sd, x, y, surface_r, d ) = velocity_floor( sd, x, y, surface_r, d ) +
+                                                 interpolation_factor * ( velocity_ceil( sd, x, y, surface_r, d ) -
+                                                                          velocity_floor( sd, x, y, surface_r, d ) );
     }
 };
 
@@ -284,13 +284,13 @@ struct PlateVelocityInterpolatorInTime
 /// also what fills in the per-plate Euler vectors this reads.
 template < typename ScalarType >
 void extract_plate_velocities(
-    const grid::shell::DistributedDomain&                                                 domain,
-    const grid::Grid3DDataVec< ScalarType, 3 >&                                           coords_shell,
-    const grid::Grid2DDataScalar< ScalarType >&                                           coords_radii,
-    const PlateStageViews< typename Kokkos::DefaultExecutionSpace::memory_space >&        stage,
-    const DeviceAveragingStencil< typename Kokkos::DefaultExecutionSpace::memory_space >& stencil,
-    grid::Grid4DDataVec< ScalarType, 3 >&                                                 velocity,
-    const ScalarType                                                                      scale )
+    const grid::shell::DistributedDomain&                                           domain,
+    const grid::Grid3DDataVec< ScalarType, 3 >&                                     coords_shell,
+    const grid::Grid2DDataScalar< ScalarType >&                                     coords_radii,
+    const PlateStageViews< typename Kokkos::DefaultExecutionSpace::memory_space >&  stage,
+    const AveragingStencil< typename Kokkos::DefaultExecutionSpace::memory_space >& stencil,
+    grid::Grid4DDataVec< ScalarType, 3 >&                                           velocity,
+    const ScalarType                                                                scale )
 {
     const int num_sub   = static_cast< int >( domain.subdomains().size() );
     const int n_lat     = domain.domain_info().subdomain_num_nodes_per_side_laterally();
@@ -299,23 +299,23 @@ void extract_plate_velocities(
     Kokkos::parallel_for(
         "extract_plate_velocities",
         Kokkos::MDRangePolicy< Kokkos::Rank< 3 > >( { 0, 0, 0 }, { num_sub, n_lat, n_lat } ),
-        DevicePlateVelocityInterpolator< ScalarType >{
+        PlateVelocityInterpolator< ScalarType >{
             coords_shell, coords_radii, velocity, stage, stencil, surface_r, scale } );
     Kokkos::fence();
 }
 
 template < typename ScalarType >
 void extract_plate_velocities_interpolated_in_time(
-    const grid::shell::DistributedDomain&                                                 domain,
-    const grid::Grid3DDataVec< ScalarType, 3 >&                                           coords_shell,
-    const grid::Grid2DDataScalar< ScalarType >&                                           coords_radii,
-    const ScalarType                                                                      plate_age,
-    const PlateStageViews< typename Kokkos::DefaultExecutionSpace::memory_space >&        stage_ceil,
-    const PlateStageViews< typename Kokkos::DefaultExecutionSpace::memory_space >&        stage_floor,
-    const DeviceAveragingStencil< typename Kokkos::DefaultExecutionSpace::memory_space >& stencil,
-    grid::Grid4DDataVec< ScalarType, 3 >&                                                 velocity,
-    const ScalarType                                                                      scale,
-    const ScalarType                                                                      interpolation_factor )
+    const grid::shell::DistributedDomain&                                           domain,
+    const grid::Grid3DDataVec< ScalarType, 3 >&                                     coords_shell,
+    const grid::Grid2DDataScalar< ScalarType >&                                     coords_radii,
+    const ScalarType                                                                plate_age,
+    const PlateStageViews< typename Kokkos::DefaultExecutionSpace::memory_space >&  stage_ceil,
+    const PlateStageViews< typename Kokkos::DefaultExecutionSpace::memory_space >&  stage_floor,
+    const AveragingStencil< typename Kokkos::DefaultExecutionSpace::memory_space >& stencil,
+    grid::Grid4DDataVec< ScalarType, 3 >&                                           velocity,
+    const ScalarType                                                                scale,
+    const ScalarType                                                                interpolation_factor )
 {
     const int num_sub   = static_cast< int >( domain.subdomains().size() );
     const int n_lat     = domain.domain_info().subdomain_num_nodes_per_side_laterally();
@@ -325,27 +325,27 @@ void extract_plate_velocities_interpolated_in_time(
         "velocity_ceil",
         domain.subdomains().size(),
         domain.domain_info().subdomain_num_nodes_per_side_laterally(),
-        domain.domain_info().subdomain_num_nodes_per_side_laterally(), 
+        domain.domain_info().subdomain_num_nodes_per_side_laterally(),
         surface_r );
 
     grid::Grid4DDataVec< ScalarType, 3 > velocity_floor(
         "velocity_floor",
         domain.subdomains().size(),
         domain.domain_info().subdomain_num_nodes_per_side_laterally(),
-        domain.domain_info().subdomain_num_nodes_per_side_laterally(), 
+        domain.domain_info().subdomain_num_nodes_per_side_laterally(),
         surface_r );
 
     Kokkos::parallel_for(
         "extract_plate_velocities",
         Kokkos::MDRangePolicy< Kokkos::Rank< 3 > >( { 0, 0, 0 }, { num_sub, n_lat, n_lat } ),
-        DevicePlateVelocityInterpolator< ScalarType >{
+        PlateVelocityInterpolator< ScalarType >{
             coords_shell, coords_radii, velocity_ceil, stage_ceil, stencil, surface_r, scale } );
     Kokkos::fence();
 
     Kokkos::parallel_for(
         "extract_plate_velocities",
         Kokkos::MDRangePolicy< Kokkos::Rank< 3 > >( { 0, 0, 0 }, { num_sub, n_lat, n_lat } ),
-        DevicePlateVelocityInterpolator< ScalarType >{
+        PlateVelocityInterpolator< ScalarType >{
             coords_shell, coords_radii, velocity_floor, stage_floor, stencil, surface_r, scale } );
     Kokkos::fence();
 

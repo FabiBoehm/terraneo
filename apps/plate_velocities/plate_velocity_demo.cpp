@@ -1,8 +1,6 @@
 /*
  * Copyright (c) 2017-2022 Dominik Thoennes, Nils Kohl, Marcus Mohr, Fatemeh Rezaei.
  *
- * This file is part of HyTeG
- * (see https://i10git.cs.fau.de/hyteg/hyteg).
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -30,6 +28,7 @@
 #include "terra/io/xdmf.hpp"
 #include "terra/kokkos/kokkos_wrapper.hpp"
 #include "terra/plates/plate_velocity_provider.hpp"
+#include "terra/plates/plate_velocity_calculator.hpp"
 #include "terra/plates/types.hpp"
 #include "util/init.hpp"
 #include "util/logging.hpp"
@@ -93,7 +92,7 @@ struct PlateIDInterpolator
 };
 
 template < typename GridType, typename RadiiType, typename DataType >
-struct PlateVelocityInterpolator
+struct PlateVelocityInterpolatorDemo
 {
     GridType  grid_;
     RadiiType radii_;
@@ -101,7 +100,7 @@ struct PlateVelocityInterpolator
 
     std::function< double( const vec3D& ) > computeVelocityComponent;
 
-    PlateVelocityInterpolator(
+    PlateVelocityInterpolatorDemo(
         const GridType&                         grid,
         const RadiiType&                        radii,
         const DataType&                         data,
@@ -189,7 +188,7 @@ void performComputations(
         "Plate Velocity interpolation",
         Kokkos::MDRangePolicy< HostExecSpace, Kokkos::Rank< 3 > >(
             { 0, 0, 0 }, { coords_shell.extent( 0 ), coords_shell.extent( 1 ), coords_shell.extent( 2 ) } ),
-        PlateVelocityInterpolator( coords_shell, coords_radii, ( surfaceVelocity_host ), computeVelocityComponent ) );
+        PlateVelocityInterpolatorDemo( coords_shell, coords_radii, ( surfaceVelocity_host ), computeVelocityComponent ) );
 
     Kokkos::fence();
 

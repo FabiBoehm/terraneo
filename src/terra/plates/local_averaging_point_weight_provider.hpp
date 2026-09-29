@@ -1,8 +1,5 @@
 /*
-* Copyright (c) 2025 Nils Kohl.
- *
- * This file is part of HyTeG
- * (see https://i10git.cs.fau.de/hyteg/hyteg).
+* Copyright (c) 2025 Nils Kohl, Fatemeh Rezaei. 
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -150,7 +147,7 @@ class UniformCirclesPointWeightProvider final : public LocalAveragingPointWeight
 
    /// \brief The precomputed 2D offsets and their weights.
    ///
-   /// Exposed so the stencil can be flattened into device views; see terra/plates/plate_velocity_device.hpp.
+   /// Exposed so the stencil can be flattened into device views; see terra/plates/plate_velocity_calculator.hpp.
    /// The offsets are independent of the point being averaged around -- only the local tangent frame is -- so
    /// they can be uploaded once and reused for every point.
    const std::vector< std::pair< vec3D, double > >& sampleOffsets2DCart() const { return sampleOffsets2DCart_; }

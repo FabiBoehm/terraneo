@@ -1,8 +1,5 @@
 /*
- * Copyright (c) 2022 Berta Vilacis, Marcus Mohr.
- *
- * This file is part of HyTeG
- * (see https://i10git.cs.fau.de/hyteg/hyteg).
+ * Copyright (c) 2022 Berta Vilacis, Marcus Mohr, Fatemeh Rezaei.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
