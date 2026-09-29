@@ -361,6 +361,7 @@ def main(argv=None):
     WORLD = int(os.environ.get("WORLD_SIZE", "1"))
     RANK = int(os.environ.get("RANK", "0"))
     DIST = WORLD > 1
+    _GLOO = True
     if DIST:
         import torch.distributed as dist
         os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
@@ -369,16 +370,21 @@ def main(argv=None):
         if backend == "auto":
             backend = "nccl" if dev.type == "cuda" else "gloo"
         dist.init_process_group(backend, rank=RANK, world_size=WORLD)
+        _GLOO = backend == "gloo"
         torch.manual_seed(args.seed)  # identical init on every rank
     def _is_main():
         return RANK == 0
     def _sync_grads(mod):
         """Average gradients across ranks. Flattened into one buffer so the collective
-        is a single message rather than one per parameter."""
+        is a single message rather than one per parameter. gloo only moves CPU tensors,
+        so with that backend the buffer goes to the host and back; nccl/RCCL reduces on
+        the device and must NOT see a CPU tensor."""
         gs = [q.grad for q in mod.parameters() if q.grad is not None]
         if not gs:
             return
-        flat = torch.cat([g.reshape(-1) for g in gs]).to("cpu")
+        flat = torch.cat([g.reshape(-1) for g in gs])
+        if _GLOO:
+            flat = flat.to("cpu")
         dist.all_reduce(flat, op=dist.ReduceOp.SUM)
         flat /= WORLD
         flat = flat.to(gs[0].device)
