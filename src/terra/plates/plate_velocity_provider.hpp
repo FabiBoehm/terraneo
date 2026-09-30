@@ -291,6 +291,33 @@ class PlateVelocityProvider
         return tangentComponent;
     }
 
+    /// Returns velocity vector for a point determined from the velocity of the associated plate at given age stage
+    ///
+    /// Interpolated linearly in time between the current and next plate age stage. Defaults to the boundaries of
+    /// plateTopologies_.getListOfPlateStages() if age lies out of bounds of plateTopologies_.getListOfPlateStages().
+    ///
+    /// This is the version using a weighted average of the velocity around the given point given a LocalAveragingPointWeightProvider.
+    template < typename PlateNotFoundStrategy >
+    vec3D getLocallyAveragedPointVelocityInterpolatedInTime(
+        const vec3D&                             point,
+        const double                             age,
+        const LocalAveragingPointWeightProvider& pointWeightProvider,
+        PlateNotFoundStrategy&&                  errorHandler )
+    {
+        // find surrounding plate ages and interpolation factor
+        double ageFloor;
+        double ageCeil;
+        double interpolationFactor;
+        std::tie( ageFloor, ageCeil, interpolationFactor ) = getSurroundingAges( age );
+
+        // call getLocallyAveragedPointVelocity twice
+        vec3D vecFloor = getLocallyAveragedPointVelocity( point, ageFloor, pointWeightProvider, errorHandler );
+        vec3D vecCeil  = getLocallyAveragedPointVelocity( point, ageCeil, pointWeightProvider, errorHandler );
+
+        // linear interpolation in time
+        return vecFloor + interpolationFactor * ( vecCeil - vecFloor );
+    }
+
     /// Query function to obtain a vector of plate stages available in the datafiles
     const std::vector< double >& getListOfPlateStages() const { return plateTopologies_.getListOfPlateStages(); }
 

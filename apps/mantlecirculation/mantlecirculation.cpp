@@ -136,13 +136,14 @@ Result<> run( const Parameters& prm )
         const int lat_level = level;
         const int rad_level = level + prm.mesh_parameters.radial_extra_levels;
 
-        domains.push_back( std::make_shared< DistributedDomain >( DistributedDomain::create_uniform_on_comm(
-            agglom.comm( idx ),
-            lat_level,
-            build_shell_radii< double >( prm.mesh_parameters, ( 1 << rad_level ) + 1 ),
-            lat_sdr,
-            rad_sdr,
-            agglom.subdomain_fn( idx ) ) ) );
+        domains.push_back(
+            std::make_shared< DistributedDomain >( DistributedDomain::create_uniform_on_comm(
+                agglom.comm( idx ),
+                lat_level,
+                build_shell_radii< double >( prm.mesh_parameters, ( 1 << rad_level ) + 1 ),
+                lat_sdr,
+                rad_sdr,
+                agglom.subdomain_fn( idx ) ) ) );
         coords_shell.push_back(
             grid::shell::subdomain_unit_sphere_single_shell_coords< ScalarType >( ( *domains[idx] ) ) );
         coords_radii.push_back( grid::shell::subdomain_shell_radii< ScalarType >( ( *domains[idx] ) ) );
@@ -415,8 +416,9 @@ Result<> run( const Parameters& prm )
     ScalarType plate_age_Ma = static_cast< ScalarType >( prm.boundary_parameters.plate_parameters.initial_plate_age );
     int        last_plate_update_time = prm.boundary_parameters.plate_parameters.initial_plate_age;
 
-    const ScalarType plate_velocity_nondim_scale = ScalarType( 1 ) / prm.physics_parameters.characteristic_velocity *
-                                                   ( prm.boundary_parameters.plate_parameters.plate_velocity_scaling );
+    const ScalarType plate_velocity_nondim_scale =
+        ScalarType( 1 ) / ( prm.physics_parameters.characteristic_velocity *
+                            prm.boundary_parameters.plate_parameters.plate_velocity_scaling );
 
     std::shared_ptr< plates::PlateVelocityProvider > oracle;
     std::optional< VectorQ1IsoQ2Q1< ScalarType > >   plate_velocities;
