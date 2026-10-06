@@ -594,7 +594,7 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
 
     add_option_with_default( app, "--radius-surface", parameters.mesh_parameters.radius_surface_m )->group( "Domain" );
     add_option_with_default( app, "--radius-cmb", parameters.mesh_parameters.radius_cmb_m )->group( "Domain" );
-    
+
     if ( parameters.devel_parameters.extended_parameters )
     {
         add_option_with_default( app, "--radial-extra-levels", parameters.mesh_parameters.radial_extra_levels )
@@ -662,7 +662,7 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
         ->group( "Boundary Conditions" );
 
     // Plate parameters
-    add_option_with_default(
+    add_flag_with_default(
         app, "--apply-plate-velocities", parameters.boundary_parameters.plate_parameters.apply_plate_velocities )
         ->group( "Plate Parameters" )
         ->description(

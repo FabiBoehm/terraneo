@@ -99,7 +99,9 @@ class PlateVelocityProvider
     /// - LinearDistanceSmoother{ 0.015 }
     /// - DefaultPlateNotFoundHandler{}
     vec3D getPointVelocity( const vec3D& point, const double age )
-    { return getPointVelocity( point, age, LinearDistanceSmoother{ 0.015 }, DefaultPlateNotFoundHandler{} ); }
+    {
+        return getPointVelocity( point, age, LinearDistanceSmoother{ 0.015 }, DefaultPlateNotFoundHandler{} );
+    }
 
     /// Alternative: Interpolated linearly in time between the current and next plate age stage. Defaults to the boundaries of
     /// plateTopologies_.getListOfPlateStages() if age lies out of bounds of plateTopologies_.getListOfPlateStages().
@@ -426,7 +428,7 @@ class PlateVelocityProvider
         }
 
         const auto p = geometry::lonLatDegToUnit( pointLonLat( 0 ), pointLonLat( 1 ) );
-        const auto r = findPlateInStage( stage->second.host(), p );
+        const auto r = findPlateInStage( stage->second.host_data(), p );
 
         if ( !r.found )
         {

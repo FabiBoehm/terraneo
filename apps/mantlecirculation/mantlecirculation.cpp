@@ -136,14 +136,13 @@ Result<> run( const Parameters& prm )
         const int lat_level = level;
         const int rad_level = level + prm.mesh_parameters.radial_extra_levels;
 
-        domains.push_back(
-            std::make_shared< DistributedDomain >( DistributedDomain::create_uniform_on_comm(
-                agglom.comm( idx ),
-                lat_level,
-                build_shell_radii< double >( prm.mesh_parameters, ( 1 << rad_level ) + 1 ),
-                lat_sdr,
-                rad_sdr,
-                agglom.subdomain_fn( idx ) ) ) );
+        domains.push_back( std::make_shared< DistributedDomain >( DistributedDomain::create_uniform_on_comm(
+            agglom.comm( idx ),
+            lat_level,
+            build_shell_radii< double >( prm.mesh_parameters, ( 1 << rad_level ) + 1 ),
+            lat_sdr,
+            rad_sdr,
+            agglom.subdomain_fn( idx ) ) ) );
         coords_shell.push_back(
             grid::shell::subdomain_unit_sphere_single_shell_coords< ScalarType >( ( *domains[idx] ) ) );
         coords_radii.push_back( grid::shell::subdomain_shell_radii< ScalarType >( ( *domains[idx] ) ) );
@@ -446,7 +445,7 @@ Result<> run( const Parameters& prm )
             coords_radii[velocity_level],
             prm.boundary_parameters.plate_parameters.interpolate_plates_in_time,
             plate_velocity_nondim_scale,
-            domains[velocity_level].get() );
+            *domains[velocity_level] );
     }
 
     // If we start from a checkpoint but it is not supposed to be a continuation of the simulation
@@ -742,7 +741,7 @@ Result<> run( const Parameters& prm )
                     coords_radii[velocity_level],
                     prm.boundary_parameters.plate_parameters.interpolate_plates_in_time,
                     plate_velocity_nondim_scale,
-                    domains[velocity_level].get() );
+                    *domains[velocity_level] );
             }
         }
 

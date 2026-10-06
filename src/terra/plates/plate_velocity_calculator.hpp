@@ -25,7 +25,7 @@
 /// running on the device costs ~8 ms and is flat.
 ///
 /// Everything needed to close that gap is already packed: \ref PlateStageData builds a
-/// `PlateStageViews<DeviceSpace>` holding the boundary vertices, the CSR ring offsets, per-plate bounding caps,
+/// `PlateStageViews<ExecMemSpace>` holding the boundary vertices, the CSR ring offsets, per-plate bounding caps,
 /// a lon/lat bin index **and the per-plate Euler vectors**, and \ref findPlateInStage is device-callable. This
 /// header just uses them.
 ///
@@ -76,12 +76,12 @@ struct AveragingStencil
 inline AveragingStencil< typename Kokkos::DefaultExecutionSpace::memory_space >
     make_averaging_stencil( const UniformCirclesPointWeightProvider& provider )
 {
-    using DeviceSpace = typename Kokkos::DefaultExecutionSpace::memory_space;
+    using ExecMemSpace = typename Kokkos::DefaultExecutionSpace::memory_space;
 
     const auto& offsets = provider.sampleOffsets2DCart();
 
-    Kokkos::View< double* [3], Kokkos::LayoutRight, DeviceSpace > device( "plate_averaging_stencil", offsets.size() );
-    auto                                                          host = Kokkos::create_mirror_view( device );
+    Kokkos::View< double* [3], Kokkos::LayoutRight, ExecMemSpace > exec( "plate_averaging_stencil", offsets.size() );
+    auto                                                           host = Kokkos::create_mirror_view( exec );
 
     for ( size_t i = 0; i < offsets.size(); ++i )
     {
@@ -89,9 +89,9 @@ inline AveragingStencil< typename Kokkos::DefaultExecutionSpace::memory_space >
         host( i, 1 ) = offsets[i].first( 1 );
         host( i, 2 ) = offsets[i].second;
     }
-    Kokkos::deep_copy( device, host );
+    Kokkos::deep_copy( exec, host );
 
-    return { device, provider.maxDistance( vec3D{ 0, 0, 1 } ) };
+    return { exec, provider.maxDistance( vec3D{ 0, 0, 1 } ) };
 }
 
 /// @brief Writes the id of the plate under every node of the outermost shell.
@@ -105,12 +105,12 @@ inline AveragingStencil< typename Kokkos::DefaultExecutionSpace::memory_space >
 template < typename ScalarType >
 struct PlateIDInterpolator
 {
-    using DeviceSpace = Kokkos::DefaultExecutionSpace::memory_space;
+    using ExecMemSpace = Kokkos::DefaultExecutionSpace::memory_space;
 
     grid::Grid3DDataVec< ScalarType, 3 > coords_shell;
     grid::Grid2DDataScalar< ScalarType > coords_radii;
     grid::Grid4DDataScalar< ScalarType > plate_id;
-    PlateStageViews< DeviceSpace >       stage;
+    PlateStageViews< ExecMemSpace >      stage;
     int                                  surface_r;
 
     KOKKOS_INLINE_FUNCTION
@@ -154,13 +154,13 @@ void extract_plate_ids(
 template < typename ScalarType >
 struct PlateVelocityInterpolator
 {
-    using DeviceSpace = Kokkos::DefaultExecutionSpace::memory_space;
+    using ExecMemSpace = Kokkos::DefaultExecutionSpace::memory_space;
 
     grid::Grid3DDataVec< ScalarType, 3 > coords_shell;
     grid::Grid2DDataScalar< ScalarType > coords_radii;
     grid::Grid4DDataVec< ScalarType, 3 > velocity;
-    PlateStageViews< DeviceSpace >       stage;
-    AveragingStencil< DeviceSpace >      stencil;
+    PlateStageViews< ExecMemSpace >      stage;
+    AveragingStencil< ExecMemSpace >     stencil;
     int                                  surface_r;
     ScalarType                           scale;
 
@@ -258,7 +258,7 @@ struct PlateVelocityInterpolator
 template < typename ScalarType >
 struct PlateVelocityInterpolatorInTime
 {
-    using DeviceSpace = Kokkos::DefaultExecutionSpace::memory_space;
+    using ExecMemSpace = Kokkos::DefaultExecutionSpace::memory_space;
 
     grid::Grid3DDataVec< ScalarType, 3 > coords_shell;
     grid::Grid2DDataScalar< ScalarType > coords_radii;
@@ -385,7 +385,8 @@ long long surface_points_needing_averaging(
             const auto  unit      = geometry::lonLatDegToUnit( lonLatRad( 0 ), lonLatRad( 1 ) );
 
             const auto hit = findPlateInStage( stage, unit );
-            if ( hit.found && max_distance_km >= hit.distanceRad * plates::constants::earthRadiusInKm )
+            if ( hit.found && stage.hasRotation( hit.plateIndex ) != 0 &&
+                 max_distance_km >= hit.distanceRad * plates::constants::earthRadiusInKm )
                 acc += 1;
         },
         count );

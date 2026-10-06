@@ -57,11 +57,9 @@ void extract_plate_velocities(
     const Grid2DDataScalar< ScalarType >& coords_radii,
     const bool                            interpolate_in_time,
     const ScalarType                      scale_factor,
-    const grid::shell::DistributedDomain* domain_for_plates = nullptr )
+    const grid::shell::DistributedDomain& domain )
 {
     util::Timer timer_plates( "plate_velocities" );
-
-    using HostExecSpace = Kokkos::DefaultHostExecutionSpace;
 
     plates::StatisticsPlateNotFoundHandler errorHandler;
 
@@ -95,10 +93,10 @@ void extract_plate_velocities(
     if ( !interpolate_in_time || remainder == 0 )
     {
         plates::extract_plate_velocities< ScalarType >(
-            *domain_for_plates,
+            domain,
             coords_shell,
             coords_radii,
-            oracle.stageFor( plate_age ).device(),
+            oracle.stageFor( plate_age ).data(),
             stencil,
             plate_velocities,
             scale_factor );
@@ -109,12 +107,12 @@ void extract_plate_velocities(
     else
     {
         plates::extract_plate_velocities_interpolated_in_time< ScalarType >(
-            *domain_for_plates,
+            domain,
             coords_shell,
             coords_radii,
             plate_age,
-            oracle.stageFor( plate_age_ceil ).device(),
-            oracle.stageFor( plate_age_floor ).device(),
+            oracle.stageFor( plate_age_ceil ).data(),
+            oracle.stageFor( plate_age_floor ).data(),
             stencil,
             plate_velocities,
             scale_factor,
