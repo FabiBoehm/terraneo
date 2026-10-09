@@ -23,17 +23,20 @@
 /// Needs the plate reconstruction data, which is not in the repository. Pass a directory holding one .geojson
 /// and one .rot, or the two files explicitly, or set TERRA_PLATE_DATA_DIR; without it the test skips (77).
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <mpi.h>
+#include <sstream>
 #include <string>
 
 #include "grid/bit_masks.hpp"
 #include "grid/grid_types.hpp"
 #include "grid/shell/spherical_shell.hpp"
 #include "linalg/vector_q1.hpp"
+#include "terra/io/xdmf.hpp"
 #include "terra/kokkos/kokkos_wrapper.hpp"
 #include "terra/plates/local_averaging_point_weight_provider.hpp"
 #include "terra/plates/plate_velocity_calculator.hpp"
@@ -51,6 +54,10 @@ namespace {
 constexpr int kSkipExitCode = 77;
 
 int g_failures = 0;
+
+/// XDMF output controls (set in main from the environment).
+std::string g_xdmf_dir    = "test_plate_velocities_xdmf"; // empty => no output
+int         g_xdmf_stride = 50;                           // write every Nth age; ages with mismatches always written
 
 void check( const bool ok, const std::string& what )
 {
@@ -188,7 +195,22 @@ void compare_at_level( plates::PlateVelocityProvider& oracle, const int level, c
             << "    averaged   nodes " << n_avg << ", max rel diff " << rel_avg << std::defaultfloat << std::endl;
 
     // ---- plate id comparison at ALL surface nodes ----------------------------------------------------------
-    // Device: run findPlateInStage on every surface node (owned or not) and store the plate id.
+    using Field = grid::Grid4DDataScalar< ScalarType >;
+
+    // Plate id fields (device views + host mirrors) so the ids can be written to XDMF.
+    // Interior nodes stay 0; only the surface layer is meaningful. Not-found is kNoPlate (-1).
+    Field host_pid( "host_plate_id", num_sub, n_lat, n_lat, n_rad );
+    Field dev_pid( "device_plate_id", num_sub, n_lat, n_lat, n_rad );
+    Field pid_diff( "plate_id_differs", num_sub, n_lat, n_lat, n_rad );
+
+    auto host_pid_m = Kokkos::create_mirror_view( host_pid );
+    auto dev_pid_m  = Kokkos::create_mirror_view( dev_pid );
+    auto diff_pid_m = Kokkos::create_mirror_view( pid_diff );
+    Kokkos::deep_copy( host_pid_m, ScalarType( 0 ) );
+    Kokkos::deep_copy( dev_pid_m, ScalarType( 0 ) );
+    Kokkos::deep_copy( diff_pid_m, ScalarType( 0 ) );
+
+    // Device: run findPlateInStage on every surface node (owned or not).
     Kokkos::View< long long***, Kokkos::DefaultExecutionSpace > dev_ids( "dev_plate_ids", num_sub, n_lat, n_lat );
 
     const int r_surf = n_rad - 1;
@@ -223,7 +245,7 @@ void compare_at_level( plates::PlateVelocityProvider& oracle, const int level, c
             for ( int x = 0; x < n_lat; ++x )
                 for ( int y = 0; y < n_lat; ++y )
                 {
-                    const auto                    c = grid::shell::coords( sd, x, y, r_surf, coords_h, radii_h );
+                    const auto          c = grid::shell::coords( sd, x, y, r_surf, coords_h, radii_h );
                     const dense::Vec< double, 3 > cart{ c( 0 ), c( 1 ), c( 2 ) };
 
                     const auto      raw = oracle.findPlateID( cart, age );
@@ -231,9 +253,13 @@ void compare_at_level( plates::PlateVelocityProvider& oracle, const int level, c
                         ( raw == oracle.idWhenNoPlateFound ) ? kNoPlate : static_cast< long long >( raw );
                     const long long id_dev = dev_ids_h( sd, x, y );
 
+                    host_pid_m( sd, x, y, r_surf ) = static_cast< ScalarType >( id_host );
+                    dev_pid_m( sd, x, y, r_surf )  = static_cast< ScalarType >( id_dev );
+
                     ++n_id_total;
                     if ( id_host != id_dev )
                     {
+                        diff_pid_m( sd, x, y, r_surf ) = ScalarType( 1 );
                         ++n_id_mismatch;
                         if ( ( id_host == kNoPlate ) != ( id_dev == kNoPlate ) )
                             ++n_id_found_mismatch;
@@ -249,11 +275,80 @@ void compare_at_level( plates::PlateVelocityProvider& oracle, const int level, c
                 }
     }
 
+    Kokkos::deep_copy( host_pid, host_pid_m );
+    Kokkos::deep_copy( dev_pid, dev_pid_m );
+    Kokkos::deep_copy( pid_diff, diff_pid_m );
+
     logroot << "    plate ids: " << n_id_total << " nodes, " << n_id_mismatch << " mismatches (" << n_id_found_mismatch
             << " found/not-found disagreements)" << std::endl;
 
     check( n_id_total > 0, "no nodes were compared for plate ids" );
     check( n_id_mismatch == 0, "device and host disagree on the plate id at some surface nodes" );
+
+    // ---- XDMF output of host vs device velocities and plate ids -------------------------------------------
+    {
+        // All ranks must agree on whether to write (the write may be collective).
+        int local_bad = ( rel_plain >= 1e-10 || rel_avg >= 1e-10 || n_id_mismatch > 0 ) ? 1 : 0;
+        int any_bad   = 0;
+        MPI_Allreduce( &local_bad, &any_bad, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD );
+
+        const bool periodic = g_xdmf_stride > 0 && ( static_cast< int >( age ) % g_xdmf_stride ) == 0;
+
+        if ( !g_xdmf_dir.empty() && ( periodic || any_bad ) )
+        {
+            Field host_vx( "host_vel_x", num_sub, n_lat, n_lat, n_rad );
+            Field host_vy( "host_vel_y", num_sub, n_lat, n_lat, n_rad );
+            Field host_vz( "host_vel_z", num_sub, n_lat, n_lat, n_rad );
+            Field dev_vx( "device_vel_x", num_sub, n_lat, n_lat, n_rad );
+            Field dev_vy( "device_vel_y", num_sub, n_lat, n_lat, n_rad );
+            Field dev_vz( "device_vel_z", num_sub, n_lat, n_lat, n_rad );
+            Field vel_diff( "vel_diff_magnitude", num_sub, n_lat, n_lat, n_rad );
+
+            Kokkos::parallel_for(
+                "fill_xdmf_velocity_fields",
+                grid::shell::local_domain_md_range_policy_nodes( domain ),
+                KOKKOS_LAMBDA( const int sd, const int x, const int y, const int r ) {
+                    const ScalarType hx = host_v( sd, x, y, r, 0 );
+                    const ScalarType hy = host_v( sd, x, y, r, 1 );
+                    const ScalarType hz = host_v( sd, x, y, r, 2 );
+                    const ScalarType dx = device_v( sd, x, y, r, 0 );
+                    const ScalarType dy = device_v( sd, x, y, r, 1 );
+                    const ScalarType dz = device_v( sd, x, y, r, 2 );
+
+                    host_vx( sd, x, y, r ) = hx;
+                    host_vy( sd, x, y, r ) = hy;
+                    host_vz( sd, x, y, r ) = hz;
+                    dev_vx( sd, x, y, r )  = dx;
+                    dev_vy( sd, x, y, r )  = dy;
+                    dev_vz( sd, x, y, r )  = dz;
+
+                    vel_diff( sd, x, y, r ) = Kokkos::sqrt(
+                        ( hx - dx ) * ( hx - dx ) + ( hy - dy ) * ( hy - dy ) + ( hz - dz ) * ( hz - dz ) );
+                } );
+            Kokkos::fence();
+
+            std::ostringstream dir;
+            dir << g_xdmf_dir << "/level" << level << "_age" << std::setw( 3 ) << std::setfill( '0' )
+                << static_cast< int >( age );
+            std::filesystem::create_directories( dir.str() );
+
+            io::XDMFOutput xdmf_output( dir.str(), domain, coords, radii_grid );
+            xdmf_output.add( host_vx );
+            xdmf_output.add( host_vy );
+            xdmf_output.add( host_vz );
+            xdmf_output.add( dev_vx );
+            xdmf_output.add( dev_vy );
+            xdmf_output.add( dev_vz );
+            xdmf_output.add( vel_diff );
+            xdmf_output.add( host_pid );
+            xdmf_output.add( dev_pid );
+            xdmf_output.add( pid_diff );
+            xdmf_output.write( age );
+
+            logroot << "    wrote XDMF to " << dir.str() << std::endl;
+        }
+    }
+
     check( max_mag > 0, "host produced an all-zero velocity field, so the comparison is vacuous" );
     check( n_plain > 0, "no nodes exercised the unaveraged path" );
     check( n_avg > 0, "no nodes exercised the averaged path, so the stencil is untested" );
@@ -309,6 +404,11 @@ int main( int argc, char** argv )
             << "reconstructions : " << reconstructions << std::endl;
 
     plates::PlateVelocityProvider oracle( topologies, reconstructions );
+
+    if ( const char* env = std::getenv( "TERRA_TEST_XDMF_DIR" ) )
+        g_xdmf_dir = env; // set to an empty string to disable output
+    if ( const char* env = std::getenv( "TERRA_TEST_XDMF_STRIDE" ) )
+        g_xdmf_stride = std::max( 1, std::atoi( env ) );
 
     // Two resolutions: the coarse one is quick, the finer one puts many more nodes near plate boundaries and
     // so exercises the averaged branch harder.
