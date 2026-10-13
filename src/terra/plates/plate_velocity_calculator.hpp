@@ -42,17 +42,25 @@ namespace terra::plates {
 KOKKOS_INLINE_FUNCTION void tangent_frame( const vec3D& normalCart, vec3D& first, vec3D& second )
 {
     // Start from whichever axis is least aligned with the normal, so the cross product is well conditioned.
-    double smallest = Kokkos::abs( normalCart( 0 ) );
-    vec3D  u1{ 1, 0, 0 };
+    vec3D u1{ 1, 0, 0 };
 
-    if ( Kokkos::abs( normalCart( 1 ) ) < smallest )
+    // At the poles x and y are zero up to rounding, and the choice below is decided by noise. The host
+    // builds its frame from sph2cart(cart2sph(p)), which has x ~ 6e-17 and y = 0, and so picks the y axis.
+    // Do the same explicitly here.
+    if ( Kokkos::abs( normalCart( 0 ) ) < 1e-12 && Kokkos::abs( normalCart( 1 ) ) < 1e-12 )
     {
-        smallest = Kokkos::abs( normalCart( 1 ) );
-        u1       = vec3D{ 0, 1, 0 };
+        u1 = vec3D{ 0, 1, 0 };
     }
-    if ( Kokkos::abs( normalCart( 2 ) ) < smallest )
+    else
     {
-        u1 = vec3D{ 0, 0, 1 };
+        double smallest = Kokkos::abs( normalCart( 0 ) );
+        if ( Kokkos::abs( normalCart( 1 ) ) < smallest )
+        {
+            smallest = Kokkos::abs( normalCart( 1 ) );
+            u1       = vec3D{ 0, 1, 0 };
+        }
+        if ( Kokkos::abs( normalCart( 2 ) ) < smallest )
+            u1 = vec3D{ 0, 0, 1 };
     }
 
     first  = normalCart.cross( u1 ).normalized();

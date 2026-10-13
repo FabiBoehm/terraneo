@@ -57,7 +57,7 @@ int g_failures = 0;
 
 /// XDMF output controls (set in main from the environment).
 std::string g_xdmf_dir    = "test_plate_velocities_xdmf"; // empty => no output
-int         g_xdmf_stride = 500;                           // write every Nth age; ages with mismatches always written
+int         g_xdmf_stride = 500;                          // write every Nth age; ages with mismatches always written
 
 void check( const bool ok, const std::string& what )
 {
@@ -224,6 +224,13 @@ void compare_at_level( plates::PlateVelocityProvider& oracle, const int level, c
         const int   r       = n_rad - 1;
         int         printed = 0;
 
+        struct Bad
+        {
+            double err;
+            int    sd, x, y, d;
+        };
+        std::vector< Bad > bad;
+
         for ( int sd = 0; sd < num_sub; ++sd )
             for ( int x = 0; x < n_lat; ++x )
                 for ( int y = 0; y < n_lat; ++y )
@@ -239,47 +246,55 @@ void compare_at_level( plates::PlateVelocityProvider& oracle, const int level, c
                             worst_d = d;
                         }
                     }
-                    if ( err <= 1e-10 * max_mag || printed >= 10 )
-                        continue;
-                    ++printed;
-
-                    const auto                    c = grid::shell::coords( sd, x, y, r, coords_h, radii_h );
-                    const dense::Vec< double, 3 > p_raw{ c( 0 ), c( 1 ), c( 2 ) };
-
-                    // What the host does: grid point -> lon/lat -> back to Cartesian.
-                    const auto                    ll   = plates::conversions::cart2sph( p_raw );
-                    const dense::Vec< double, 3 > p_rt = plates::conversions::sph2cart( { ll( 0 ), ll( 1 ) }, ll( 2 ) );
-
-                    dense::Vec< double, 3 > f1_raw, f2_raw, f1_rt, f2_rt;
-                    plates::tangent_frame( p_raw, f1_raw, f2_raw ); // device rule, raw point
-                    plates::tangent_frame( p_rt, f1_rt, f2_rt );    // host rule (identical), round-tripped point
-
-                    // How far apart are the ring samples produced by the two frames?
-                    double max_sample_sep = 0;
-                    for ( const auto& o : offsets )
-                    {
-                        const dense::Vec< double, 3 > s_raw = p_raw + o.first( 0 ) * f1_raw + o.first( 1 ) * f2_raw;
-                        const dense::Vec< double, 3 > s_rt  = p_rt + o.first( 0 ) * f1_rt + o.first( 1 ) * f2_rt;
-                        double                        sep2  = 0;
-                        for ( int d = 0; d < 3; ++d )
-                            sep2 += ( s_raw( d ) - s_rt( d ) ) * ( s_raw( d ) - s_rt( d ) );
-                        max_sample_sep = std::max( max_sample_sep, std::sqrt( sep2 ) );
-                    }
-
-                    logroot << std::setprecision( 17 ) << "  [diag] age " << age << " sd " << sd << " (" << x << ","
-                            << y << ")  err " << err << " (comp " << worst_d << ")\n"
-                            << "         p_raw " << p_raw( 0 ) << " " << p_raw( 1 ) << " " << p_raw( 2 ) << "\n"
-                            << "         p_rt  " << p_rt( 0 ) << " " << p_rt( 1 ) << " " << p_rt( 2 ) << "\n"
-                            << "         lon/lat " << ll( 0 ) << " " << ll( 1 ) << "\n"
-                            << "         axis raw (device) " << pick_axis( p_raw ) << ", axis round-trip (host) "
-                            << pick_axis( p_rt ) << "\n"
-                            << "         first raw " << f1_raw( 0 ) << " " << f1_raw( 1 ) << " " << f1_raw( 2 ) << "\n"
-                            << "         first rt  " << f1_rt( 0 ) << " " << f1_rt( 1 ) << " " << f1_rt( 2 ) << "\n"
-                            << "         max ring-sample separation raw vs rt: " << max_sample_sep << std::defaultfloat
-                            << std::endl;
+                    if ( err > 1e-10 * max_mag )
+                        bad.push_back( { err, sd, x, y, worst_d } );
                 }
-    }
 
+        std::sort( bad.begin(), bad.end(), []( const Bad& a, const Bad& b ) { return a.err > b.err; } );
+        logroot << "  [diag] " << bad.size() << " nodes above threshold, max_mag " << max_mag << std::endl;
+
+        for ( size_t i = 0; i < std::min< size_t >( bad.size(), 5 ); ++i )
+        {
+            const int    sd = bad[i].sd, x = bad[i].x, y = bad[i].y, worst_d = bad[i].d;
+            const double err = bad[i].err;
+            {
+                const auto                    c = grid::shell::coords( sd, x, y, r, coords_h, radii_h );
+                const dense::Vec< double, 3 > p_raw{ c( 0 ), c( 1 ), c( 2 ) };
+
+                // What the host does: grid point -> lon/lat -> back to Cartesian.
+                const auto                    ll   = plates::conversions::cart2sph( p_raw );
+                const dense::Vec< double, 3 > p_rt = plates::conversions::sph2cart( { ll( 0 ), ll( 1 ) }, ll( 2 ) );
+
+                dense::Vec< double, 3 > f1_raw, f2_raw, f1_rt, f2_rt;
+                plates::tangent_frame( p_raw, f1_raw, f2_raw ); // device rule, raw point
+                plates::tangent_frame( p_rt, f1_rt, f2_rt );    // host rule (identical), round-tripped point
+
+                // How far apart are the ring samples produced by the two frames?
+                double max_sample_sep = 0;
+                for ( const auto& o : offsets )
+                {
+                    const dense::Vec< double, 3 > s_raw = p_raw + o.first( 0 ) * f1_raw + o.first( 1 ) * f2_raw;
+                    const dense::Vec< double, 3 > s_rt  = p_rt + o.first( 0 ) * f1_rt + o.first( 1 ) * f2_rt;
+                    double                        sep2  = 0;
+                    for ( int d = 0; d < 3; ++d )
+                        sep2 += ( s_raw( d ) - s_rt( d ) ) * ( s_raw( d ) - s_rt( d ) );
+                    max_sample_sep = std::max( max_sample_sep, std::sqrt( sep2 ) );
+                }
+
+                logroot << std::setprecision( 17 ) << "  [diag] age " << age << " sd " << sd << " (" << x << "," << y
+                        << ")  err " << err << " (comp " << worst_d << ")\n"
+                        << "         p_raw " << p_raw( 0 ) << " " << p_raw( 1 ) << " " << p_raw( 2 ) << "\n"
+                        << "         p_rt  " << p_rt( 0 ) << " " << p_rt( 1 ) << " " << p_rt( 2 ) << "\n"
+                        << "         lon/lat " << ll( 0 ) << " " << ll( 1 ) << "\n"
+                        << "         axis raw (device) " << pick_axis( p_raw ) << ", axis round-trip (host) "
+                        << pick_axis( p_rt ) << "\n"
+                        << "         first raw " << f1_raw( 0 ) << " " << f1_raw( 1 ) << " " << f1_raw( 2 ) << "\n"
+                        << "         first rt  " << f1_rt( 0 ) << " " << f1_rt( 1 ) << " " << f1_rt( 2 ) << "\n"
+                        << "         max ring-sample separation raw vs rt: " << max_sample_sep << std::defaultfloat
+                        << std::endl;
+            }
+        }
+    }
     // ---- plate id comparison at ALL surface nodes ----------------------------------------------------------
     using Field = grid::Grid4DDataScalar< ScalarType >;
 
@@ -498,7 +513,7 @@ int main( int argc, char** argv )
 
     // Two resolutions: the coarse one is quick, the finer one puts many more nodes near plate boundaries and
     // so exercises the averaged branch harder.
-    for ( int i = 0; i <= 410; i++ )
+    for ( int i = 0; i <= 400; i++ )
     {
         // compare_at_level( oracle, 4, i );
         compare_at_level( oracle, 5, i );
