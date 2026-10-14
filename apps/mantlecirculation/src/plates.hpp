@@ -18,37 +18,6 @@ using grid::Grid2DDataScalar;
 using grid::Grid3DDataVec;
 using grid::Grid4DDataVec;
 
-template < typename GridType, typename RadiiType, typename DataType, typename VelocityFn >
-struct Compute_plate_velocities
-{
-    GridType   grid_;
-    RadiiType  radii_;
-    DataType   plate_data_;
-    VelocityFn computeVelocity;
-
-    Compute_plate_velocities(
-        const GridType&  grid,
-        const RadiiType& radii,
-        const DataType&  plate_data,
-        VelocityFn       velocityFn )
-    : grid_( grid )
-    , radii_( radii )
-    , plate_data_( plate_data )
-    , computeVelocity( std::move( velocityFn ) )
-    {}
-
-    KOKKOS_INLINE_FUNCTION
-    void operator()( const int id, const int x, const int y ) const
-    {
-        const dense::Vec< ScalarType, 3 > coords =
-            grid::shell::coords( id, x, y, radii_.extent( 1 ) - 1, grid_, radii_ );
-
-        const vec3D v = computeVelocity( coords );
-        for ( int d = 0; d < 3; ++d )
-            plate_data_( id, x, y, radii_.extent( 1 ) - 1, d ) = v( d );
-    }
-};
-
 void extract_plate_velocities(
     ScalarType                            plate_age,
     Grid4DDataVec< ScalarType, 3 >&       plate_velocities,
