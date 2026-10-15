@@ -32,6 +32,7 @@
 #include "terra/plates/plate_rotation_provider.hpp"
 #include "terra/plates/plate_storage.hpp"
 #include "terra/plates/spherical_predicates.hpp"
+#include "terra/plates/types.hpp"
 
 namespace terra {
 namespace plates {
@@ -98,8 +99,6 @@ KOKKOS_INLINE_FUNCTION int binIndexOf( const PlateStageViews< MemSpace >& s, con
     {
         return -1;
     }
-
-    constexpr double pi = 3.14159265358979323846;
 
     const double lon = Kokkos::atan2( p( 1 ), p( 0 ) ); // [-pi, pi]
     const double lat = Kokkos::asin( p( 2 ) > 1.0 ? 1.0 : ( p( 2 ) < -1.0 ? -1.0 : p( 2 ) ) );
@@ -333,11 +332,10 @@ class PlateStageData
             return;
         }
 
-        constexpr double pi     = 3.14159265358979323846;
-        const int        nBins  = nLonBins * nLatBins;
-        const double     dLon   = 2.0 * pi / nLonBins;
-        const double     dLat   = pi / nLatBins;
-        const double     margin = 0.5 * std::sqrt( dLon * dLon + dLat * dLat );
+        const int    nBins  = nLonBins * nLatBins;
+        const double dLon   = 2.0 * pi / nLonBins;
+        const double dLat   = pi / nLatBins;
+        const double margin = 0.5 * std::sqrt( dLon * dLon + dLat * dLat );
 
         std::vector< std::vector< int > > candidates( nBins );
 
