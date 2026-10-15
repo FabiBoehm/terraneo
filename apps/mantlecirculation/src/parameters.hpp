@@ -246,8 +246,8 @@ struct PhysicsParameters
     std::string cp_profile_value_key      = "Cp (J/kg K)";
 
     // PDA parameters
-    std::string pda_mintable_path = "";
-    std::string pda_pressure_profile_csv_path = "";
+    std::string pda_mintable_path              = "";
+    std::string pda_pressure_profile_csv_path  = "";
     std::string pda_pressure_profile_value_key = "pressure (Pa)";
 
     ViscosityParameters          viscosity_parameters{};
@@ -359,7 +359,6 @@ struct TimeSteppingParameters
     double dt_min     = 1.0;
 
     int max_timesteps         = 10;
-    int timestep_initial      = 0;
     int initial_dt_ramp_steps = 20;
 
     int picard_iterations = 1;
@@ -380,7 +379,8 @@ struct IOParameters
     int         checkpoint_step     = -1;
     bool        continue_simulation = true;
 
-    int output_frequency = 1;
+    int  output_frequency = 1;
+    bool output_per_Ma    = true;
 
     bool no_xdmf            = false;
     bool no_radial_profiles = false;
@@ -977,6 +977,9 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
     add_option_with_default( app, "--output-frequency", parameters.io_parameters.output_frequency )
         ->group( "I/O" )
         ->description( "Write XDMF and radial profile output every N timesteps. Default: 1 (every timestep)." );
+    add_flag_with_default( app, "--output-per-Ma", parameters.io_parameters.output_per_Ma )
+        ->group( "I/O" )
+        ->description( "If true, write output every [output-frequency] Ma instead of timesteps." );
 
     add_flag_with_default( app, "--no-xdmf", parameters.io_parameters.no_xdmf )
         ->group( "I/O" )
@@ -1071,12 +1074,6 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
 
     // Nondimensionalise all relevant input parameters
     nondimensionalise( parameters );
-
-    // Determine timestep_initial from checkpointing parameters
-    if ( parameters.io_parameters.load_checkpoint && parameters.io_parameters.continue_simulation )
-    {
-        parameters.time_stepping_parameters.timestep_initial = parameters.io_parameters.checkpoint_step;
-    }
 
     util::logroot << "=========================================\n";
     util::logroot << "     Starting mantle circulation app     \n";
