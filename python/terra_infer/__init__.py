@@ -251,7 +251,16 @@ def cband_preconditioner(fields):
         # absorb the ~5e-5 volume constant into the conversion and under-scale
         # the returned solution by that same factor (measured: the champion's
         # "inert" initial guess and IR steps were exactly this).
-        wv = torch.from_numpy(node_quadrature(coords, normalized=False)).float()[..., None]
+        wv_np = node_quadrature(coords, normalized=False)
+        # node_quadrature splits a seam node's volume among its copies so that the copies
+        # SUM to the physical volume; the solver's lumped mass gives every copy the FULL
+        # volume. Dividing the load by the split volume inflated seam nodes 4-7x and left
+        # 55% of a thermal forcing outside the harmonic truncation. The grid is continuous
+        # across diamond edges, so the inward neighbour's (never split) volume is the full
+        # one: round-trip loss 0.545 -> 0.014, seam/interior ratio 6.1 -> 1.2 (measured).
+        wv_np[:, 0, :, :] = wv_np[:, 1, :, :]; wv_np[:, -1, :, :] = wv_np[:, -2, :, :]
+        wv_np[:, :, 0, :] = wv_np[:, :, 1, :]; wv_np[:, :, -1, :] = wv_np[:, :, -2, :]
+        wv = torch.from_numpy(wv_np).float()[..., None]
         wp = torch.nn.functional.avg_pool3d(
             wv[..., 0].unsqueeze(1), kernel_size=1, stride=2).squeeze(1)[..., None]             if False else wv[:, ::2, ::2, ::2] * 8.0  # coarse cell is 8 fine cells
         # Two-stage composition: $TERRA_CBAND_STAGE2 names a second (linear)
