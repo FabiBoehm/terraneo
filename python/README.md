@@ -531,8 +531,25 @@ The tensor pipeline, with `B` the batch size and `S = 10` diamonds:
 - **Head.** Multiply by `gate_out`, `Linear(128 -> 4)`, then the seam-mean projection
   $\Pi$.
 
-Cost per forward pass at level 6, by operation count: ~4.4 TFLOP for the three cores'
-spectral transforms, ~0.2 TFLOP for the patch attention.
+Measured forward pass, one sample, PVC tile and one 48-thread CPU socket:
+
+| level | GPU | CPU | solver iteration | CPU cost in iterations |
+|---|---|---|---|---|
+| L3 | 14 ms | 13 ms | 66 ms | 0.2 |
+| L4 | 23 ms | 60 ms | 83 ms | 0.7 |
+| L5 | 77 ms | 318 ms | 110 ms | 2.9 |
+| L6 | 396 ms | 2 082 ms | 162 ms | 12.8 |
+
+The cost is dominated by the two spectral transforms in each of the three cores, not by
+the parameter count: ~4.4 TFLOP against ~0.2 TFLOP for the patch attention. That is why
+the model is only about five times faster than its 81 M-parameter predecessor despite
+having 160 times fewer weights.
+
+**This matters for deployment.** The solver glue runs on CPU, and at level 6 a CPU
+forward pass costs about 13 solver iterations, which is the same order as the 12-15
+iterations the warm start saves. At levels 3-5 the CPU cost is 0.2-2.9 iterations and
+the net gain is clear. Level 6 needs GPU inference, where the pass costs 2.4 iterations,
+or the benefit is cancelled by the prediction itself.
 
 ### Discretisation convergence: what holds and what does not
 
