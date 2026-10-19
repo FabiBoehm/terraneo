@@ -662,7 +662,11 @@ can        // Serial backend: always use slow path (fast paths require shared me
         const size_t nscalars =
             size_t( nxy ) * 3 + size_t( nxy ) * 3 + size_t( nxy ) * 3 * nlev + size_t( nxy ) * nlev + size_t( nlev ) + 1;
 
-        return sizeof( ScalarType ) * nscalars;
+        // The team scratch tiles (coords_sh/src_sh/k_sh/r_sh) are stored in DOUBLE
+        // regardless of ScalarType, so the byte size must use sizeof(double). Using
+        // sizeof(ScalarType) under-allocates by 2x in a single-precision build, so the
+        // double tiles overrun/overlap and the operator apply reads garbage -> NaN.
+        return sizeof( double ) * nscalars;
     }
 
     KOKKOS_INLINE_FUNCTION
@@ -676,7 +680,11 @@ can        // Serial backend: always use slow path (fast paths require shared me
         const size_t nscalars =
             size_t( nxy ) * 3 + size_t( nxy ) * 3 * nlev + size_t( nxy ) * nlev + size_t( nlev );
 
-        return sizeof( ScalarType ) * nscalars;
+        // The team scratch tiles (coords_sh/src_sh/k_sh/r_sh) are stored in DOUBLE
+        // regardless of ScalarType, so the byte size must use sizeof(double). Using
+        // sizeof(ScalarType) under-allocates by 2x in a single-precision build, so the
+        // double tiles overrun/overlap and the operator apply reads garbage -> NaN.
+        return sizeof( double ) * nscalars;
     }
 
   private:
