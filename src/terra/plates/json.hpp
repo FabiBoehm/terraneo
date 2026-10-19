@@ -2863,7 +2863,9 @@ struct has_from_json : std::false_type {};
 
 template <typename BasicJsonType, typename T>
 struct has_from_json<BasicJsonType, T,
-           enable_if_t<not is_basic_json<T>::value>>
+           // `and not is_void` added for nvc++ (EDG): it rejects the `T&` here as a
+           // hard error when T=void instead of an SFINAE soft-failure as GCC/Clang do.
+           enable_if_t<not is_basic_json<T>::value and not std::is_void<T>::value>>
 {
     using serializer = typename BasicJsonType::template json_serializer<T, void>;
 
@@ -2878,7 +2880,7 @@ template <typename BasicJsonType, typename T, typename = void>
 struct has_non_default_from_json : std::false_type {};
 
 template<typename BasicJsonType, typename T>
-struct has_non_default_from_json<BasicJsonType, T, enable_if_t<not is_basic_json<T>::value>>
+struct has_non_default_from_json<BasicJsonType, T, enable_if_t<not is_basic_json<T>::value and not std::is_void<T>::value>>
 {
     using serializer = typename BasicJsonType::template json_serializer<T, void>;
 
@@ -2893,7 +2895,7 @@ template <typename BasicJsonType, typename T, typename = void>
 struct has_to_json : std::false_type {};
 
 template <typename BasicJsonType, typename T>
-struct has_to_json<BasicJsonType, T, enable_if_t<not is_basic_json<T>::value>>
+struct has_to_json<BasicJsonType, T, enable_if_t<not is_basic_json<T>::value and not std::is_void<T>::value>>
 {
     using serializer = typename BasicJsonType::template json_serializer<T, void>;
 

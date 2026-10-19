@@ -275,19 +275,6 @@ enum class MGPrecision
 
 struct StokesSolverParameters
 {
-    /// When non-empty, replace the block-triangular MG/Schur preconditioner of the
-    /// outer Stokes FGMRES with terra::ml::NeuralSolver running the named registered
-    /// model (e.g. "cband"; the checkpoint comes from $TERRA_NEURAL_CHECKPOINT).
-    /// Needs a build with -DTERRA_ENABLE_PYTHON=ON.
-    std::string neural_precon = "";
-
-    /// When non-empty, run terra::ml::NeuralSolver with the named registered model
-    /// ONCE on the Stokes rhs before the (unchanged) FGMRES solve, overwriting the
-    /// initial guess. The rhs-trained operators are in-distribution for exactly
-    /// this deployment -- predicting the solution from the physical rhs -- unlike
-    /// the preconditioner slot, which feeds them Krylov residuals.
-    std::string neural_guess = "";
-
     /// Initial-guess policy for warm-start benchmarks. guess_extrap = N uses a
     /// polynomial time-extrapolation of the stored solution history (1 linear,
     /// 2 quadratic, 3 cubic); 0 keeps the default persistence warm start.
@@ -303,37 +290,6 @@ struct StokesSolverParameters
     /// reduction from the warm-started residual, so a good initial guess buys
     /// nothing; this one fixes the absolute accuracy of every solve.
     bool tolerance_relative_to_rhs = false;
-    /// Write (r = f - K u_guess, e = u - u_guess, eta) of every solve as raw
-    /// float64 into this directory (single-rank; warm-start training pairs).
-    std::string dump_pairs_dir;
-
-    /// Replace the outer FGMRES by damped iterative refinement
-    /// x <- x + ir_damping * M (f - K x), with M the configured preconditioner
-    /// (block MG/Schur, or the neural model when --stokes-neural-precon is set).
-    /// The per-step contraction directly measures M's quality as an approximate
-    /// inverse -- no Krylov line search or orthogonalisation in the way.
-    bool   iterative_refinement = false;
-    double ir_damping           = 1.0;
-    /// Auto-damped refinement: after z = M r, one matvec w = K z and the step
-    /// x += alpha * z with alpha = <r,w>/<w,w> -- the residual minimiser along
-    /// z. Overshooting directions are scaled down instead of amplified; costs
-    /// one extra operator application per step, still no Krylov basis.
-    bool ir_linesearch = false;
-    /// Hybrid refinement: alternate the neural preconditioner and the block
-    /// MG/Schur preconditioner step by step. Measures whether the learned
-    /// operator adds per-iteration value on top of MG's own contraction.
-    bool ir_hybrid = false;
-    /// Heavy-ball acceleration of the refinement:
-    /// x <- x + ir_damping * M r + ir_momentum * (x - x_prev).
-    /// For a stationary contraction with rate rho, the optimal momentum
-    /// accelerates the asymptotic rate to ~(1-sqrt(1-rho))/(1+sqrt(1-rho)).
-    double ir_momentum = 0.0;
-    /// Self-tuning acceleration: estimate the contraction rate rho online from
-    /// the residual ratios (EMA after a short plain warmup), set the momentum
-    /// to the heavy-ball optimum ((1-sqrt(1-rho))/(1+sqrt(1-rho)))^2 for that
-    /// rho, and reset the momentum memory whenever the residual rises.
-    /// Level- and model-independent, unlike a fixed --stokes-ir-momentum.
-    bool ir_auto_momentum = false;
 
     int    krylov_restart            = 10;
     int    krylov_max_iterations     = 10;
@@ -1159,35 +1115,15 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
 
     add_option_with_default( app, "--stokes-krylov-restart", parameters.stokes_solver_parameters.krylov_restart )
         ->group( "Stokes Solver" );
-    add_option_with_default( app, "--stokes-neural-precon", parameters.stokes_solver_parameters.neural_precon )
-        ->group( "Stokes Solver" );
-    add_option_with_default( app, "--stokes-neural-guess", parameters.stokes_solver_parameters.neural_guess )
-        ->group( "Stokes Solver" );
     add_option_with_default( app, "--stokes-guess-extrap", parameters.stokes_solver_parameters.guess_extrap )
         ->group( "Stokes Solver" );
     add_flag_with_default( app, "--stokes-guess-zero", parameters.stokes_solver_parameters.guess_zero )
         ->group( "Stokes Solver" );
     add_option_with_default( app, "--stokes-guess-proj", parameters.stokes_solver_parameters.guess_proj )
         ->group( "Stokes Solver" );
-    add_option_with_default( app, "--stokes-dump-pairs", parameters.stokes_solver_parameters.dump_pairs_dir )
-        ->group( "Stokes Solver" );
     add_flag_with_default( app,
                            "--stokes-krylov-tolerance-relative-to-rhs",
                            parameters.stokes_solver_parameters.tolerance_relative_to_rhs )
-        ->group( "Stokes Solver" );
-    add_flag_with_default(
-        app, "--stokes-iterative-refinement", parameters.stokes_solver_parameters.iterative_refinement )
-        ->group( "Stokes Solver" );
-    add_option_with_default( app, "--stokes-ir-damping", parameters.stokes_solver_parameters.ir_damping )
-        ->group( "Stokes Solver" );
-    add_flag_with_default( app, "--stokes-ir-linesearch", parameters.stokes_solver_parameters.ir_linesearch )
-        ->group( "Stokes Solver" );
-    add_flag_with_default( app, "--stokes-ir-hybrid", parameters.stokes_solver_parameters.ir_hybrid )
-        ->group( "Stokes Solver" );
-    add_option_with_default( app, "--stokes-ir-momentum", parameters.stokes_solver_parameters.ir_momentum )
-        ->group( "Stokes Solver" );
-    add_flag_with_default(
-        app, "--stokes-ir-auto-momentum", parameters.stokes_solver_parameters.ir_auto_momentum )
         ->group( "Stokes Solver" );
     add_option_with_default(
         app, "--stokes-krylov-max-iterations", parameters.stokes_solver_parameters.krylov_max_iterations )

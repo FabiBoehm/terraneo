@@ -1273,11 +1273,9 @@ class EVSolver : public EnergySolver< ScalarType >
     ///   Φ = (Di/Ra) · ∫ 2η ε̇_dev:ε̇_dev dV      (total viscous dissipation)
     ///   W = Di · ∫ ρ̄ · (u·n) · T dV              (total adiabatic work)
     ///
-    /// For an energetically consistent formulation ⟨Φ⟩ = ⟨W⟩, so Φ/W → 1 (exact
-    /// in ALA; a systematic few-percent offset in TALA). This is the primary,
-    /// reference-free correctness gate for the shear + adiabatic heating terms:
-    /// a ratio far from 1 flags a wrong sign, Di/Ra scaling, or viscosity
-    /// normalisation. (α is folded into Di, matching the buoyancy Ra·δT·n.)
+    /// Consistency requires ⟨Φ⟩ = ⟨W⟩, so Φ/W → 1 (exact in ALA, a few-% offset in
+    /// TALA). A reference-free correctness gate: a ratio far from 1 flags a wrong
+    /// sign, Di/Ra scaling, or viscosity normalisation (α is folded into Di).
     void log_dissipation_balance()
     {
         const ScalarType Di = static_cast< ScalarType >( prm_.physics_parameters.dissipation_number );
@@ -1291,14 +1289,10 @@ class EVSolver : public EnergySolver< ScalarType >
         const ScalarType phi_int = linalg::dot( diag_ones_, heating_scratch_ );
         const ScalarType Phi     = ( Ra != ScalarType( 0 ) ) ? ( Di / Ra ) * phi_int : ScalarType( 0 );
 
-        // W: nodal integrand Di·ρ̄·(u·n)·T, integrated via the lumped mass
-        // (∫w dV = dot(w, M_lumped)). AdiabaticHeatingSource builds the ρ̄-FREE
-        // Di·(u·n)·T — the form used in the SOLVED energy equation (divided by
-        // ρ̄c̄ₚ, so ρ̄ cancels). The dissipation theorem compares the UN-divided
-        // volumetric rates, so re-apply the reference density ρ̄ here (diagnostic
-        // only) to put W in the same convention as Φ = (Di/Ra)·∫2η ε̇:ε̇ (which is
-        // likewise the un-divided form). Without this weighting Φ/W is biased by
-        // the mean ρ̄ (~0.86 in a Di≈0.45 shell) even when the physics is correct.
+        // W: nodal integrand Di·ρ̄·(u·n)·T via the lumped mass (∫w dV = dot(w, M_lumped)).
+        // AdiabaticHeatingSource builds the ρ̄-FREE Di·(u·n)·T used in the solved equation (÷ρ̄c̄ₚ), so
+        // re-apply ρ̄ here (diagnostic only) to match Φ's un-divided convention; without it Φ/W is biased
+        // by the mean ρ̄ (~0.86 at Di≈0.45) even when the physics is correct.
         Kokkos::parallel_for(
             "ev_dissip_W",
             local_domain_md_range_policy_nodes( *domain_ ),
@@ -1427,21 +1421,16 @@ void fill_dirichlet_temperature(
 
 /// Semi-Lagrangian (MMOC) energy solve with split implicit diffusion.
 ///
-/// Ported from branch mmoc-transport-v1 (commits d82bc2ee..61ca361b) onto the compressible branch.
-/// One step is  A(dt) -> D(dt), where A is the modified method of characteristics
-/// (\ref terra::fe::wedge::operators::shell::MMOCTransport, RK4 foot-point tracing, quintic reconstruction)
-/// and D is the implicit Galerkin diffusion solve (the SUPG operator at zero velocity, i.e. M + dt*K_diff).
-/// Lie splitting on purpose: the diffusion solve is backward Euler, so Strang would double the Krylov cost
-/// without raising the order. Diffusion runs last so the Dirichlet values are the ones imposed at the end of
-/// the step.
+/// One step is A(dt) -> D(dt): A is the modified method of characteristics
+/// (\ref terra::fe::wedge::operators::shell::MMOCTransport, RK4 tracing, quintic reconstruction); D is the
+/// implicit Galerkin diffusion solve (the SUPG operator at zero velocity, M + dt*K_diff). Lie splitting is
+/// deliberate -- diffusion is backward Euler, so Strang would double the Krylov cost without raising the order;
+/// it runs last so the Dirichlet values hold at the end of the step.
 ///
-/// Compressible (TALA) heating is added to the diffusion right-hand side exactly as in the EV solver:
-/// q += dt * M * F with F = gamma_internal + (Di/Ra) * Phi_shear + S_adiabatic, built from the velocity and
-/// temperature after the transport step. Incompressible runs keep the constant internal heating gamma only.
-///
-/// The characteristic tracing has no stability limit of its own; the timestep is bounded by the requirement
-/// that a departure point stays inside the ghost layer, i.e. a Courant number below
-/// \ref MMOCTransport::max_courant (0.9 * ghost width).
+/// Compressible (TALA) heating is added to the diffusion RHS as in the EV solver: q += dt * M * F, with
+/// F = gamma_internal + (Di/Ra)*Phi_shear + S_adiabatic from the post-transport fields (incompressible keeps
+/// gamma only). The timestep is bounded only by keeping the departure point inside the ghost layer (Courant
+/// below \ref MMOCTransport::max_courant).
 template < typename ScalarType >
 class MMOCSolver : public EnergySolver< ScalarType >
 {
@@ -1722,7 +1711,9 @@ class MMOCSolver : public EnergySolver< ScalarType >
         table_->clear();
     }
 
+  public:
     /// Dissipation balance Phi/W (see EVSolver::log_dissipation_balance for the derivation).
+    /// Public because nvc++ forbids extended device lambdas in private/protected methods.
     void log_dissipation_balance()
     {
         const ScalarType Di = static_cast< ScalarType >( prm_.physics_parameters.dissipation_number );
@@ -1758,6 +1749,7 @@ class MMOCSolver : public EnergySolver< ScalarType >
                       << "  (expect ->1 for ALA; few-% off for TALA)" << std::endl;
     }
 
+  private:
     std::shared_ptr< grid::shell::DistributedDomain >               domain_;
     const grid::Grid3DDataVec< ScalarType, 3 >&                     coords_shell_;
     const grid::Grid2DDataScalar< ScalarType >&                     coords_radii_;
