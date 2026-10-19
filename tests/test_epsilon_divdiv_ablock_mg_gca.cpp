@@ -43,6 +43,7 @@
 
 #include "gca_fixed.hpp"  // copy of gca.hpp with a searchable crossover-DoF remap (gcafix::TwoGridGCA)
 #include "linalg/solvers/multigrid.hpp"
+#include "linalg/solvers/velocity_prec_handle.hpp"
 #include "terra/linalg/solvers/chebyshev.hpp"
 #include "terra/linalg/solvers/diagonal_solver.hpp"
 
@@ -259,6 +260,165 @@ struct InverseDiagonalPreconditioner
     }
 };
 
+
+// =============================================================================
+// Reduced-precision A-block V-cycle (the velocity preconditioner).
+// =============================================================================
+
+/// Working precision of the velocity-block V-cycle. The outer FGMRES and the Stokes
+/// operator always stay in double; only this hierarchy changes.
+enum class ABlockPrec { DOUBLE, FLOAT, FP16, BF16 };
+
+inline const char* ablock_prec_name( ABlockPrec p )
+{
+    switch ( p )
+    {
+    case ABlockPrec::FLOAT: return "float";
+    case ABlockPrec::FP16:  return "fp16";
+    case ABlockPrec::BF16:  return "bf16";
+    default:                return "double";
+    }
+}
+
+/// Kokkos substitutes float for a 16-bit type when the backend has no native one, so
+/// report which case this build got rather than let a 4-byte run read as 2-byte.
+inline const char* ablock_prec_note( ABlockPrec p )
+{
+#if defined( KOKKOS_HALF_T_IS_FLOAT ) && KOKKOS_HALF_T_IS_FLOAT
+    if ( p == ABlockPrec::FP16 ) return " [EMULATED: half_t is float on this backend]";
+#endif
+#if defined( KOKKOS_BHALF_T_IS_FLOAT ) && KOKKOS_BHALF_T_IS_FLOAT
+    if ( p == ABlockPrec::BF16 ) return " [EMULATED: bhalf_t is float on this backend]";
+#endif
+    return "";
+}
+
+/// @brief The entire velocity-block V-cycle built in precision M, driven by the
+///        double-precision outer solver through VelocityPrecHandle.
+///
+/// Geometry stays double in every operator (CoordScalarT = double), so M governs only
+/// the stored fields: the level vectors, the viscosity coefficient, the inverse
+/// diagonals and the coarse solver's Krylov workspace. convert() runs at the
+/// double<->M boundary on entry and exit, which is two passes over one fine-level
+/// vector per application -- the V-cycle itself never leaves M.
+template < typename M >
+class LowPrecABlock final
+: public linalg::solvers::VelocityPrecHandle<
+      fe::wedge::operators::shell::EpsilonDivDivKerngen< double > >::Impl
+{
+  public:
+    using OuterOp  = fe::wedge::operators::shell::EpsilonDivDivKerngen< double >;
+    using OuterVec = linalg::VectorQ1Vec< double, 3 >;
+
+    using ViscM  = fe::wedge::operators::shell::EpsilonDivDivKerngen< M, 3, double >;
+    using ProlM  = fe::wedge::operators::shell::ProlongationVecConstant< M >;
+    using RestM  = fe::wedge::operators::shell::RestrictionVecConstant< M >;
+    using SmooM  = linalg::solvers::Chebyshev< ViscM >;
+    using CPrecM = InverseDiagonalPreconditioner< ViscM >;
+    using CSolvM = linalg::solvers::FGMRES< ViscM, CPrecM >;
+    using MGM    = linalg::solvers::Multigrid< ViscM, ProlM, RestM, SmooM, CSolvM >;
+    using VecM   = linalg::VectorQ1Vec< M, 3 >;
+    using ScalM  = linalg::VectorQ1Scalar< M >;
+
+    LowPrecABlock(
+        const std::vector< DistributedDomain >&                                  domains,
+        const std::vector< Grid3DDataVec< double, 3 > >&                         coords_shell,
+        const std::vector< Grid2DDataScalar< double > >&                         coords_radii,
+        const std::vector< Grid4DDataScalar< grid::NodeOwnershipFlag > >&        mask_data,
+        const std::vector< Grid4DDataScalar< grid::shell::ShellBoundaryFlag > >& boundary_mask_data,
+        const std::vector< VectorQ1Scalar< double > >&                           eta,
+        const std::vector< VectorQ1Vec< double, 3 > >&                           inverse_diagonals,
+        BoundaryConditions&                                                      bcs,
+        int                                                                      cheby_order,
+        int                                                                      chebyshev_prepost,
+        double                                                                   coarse_tol )
+    {
+        const size_t num_levels = domains.size();
+        const size_t fine       = num_levels - 1;
+
+        // Viscosity and inverse diagonals converted once, down to M.
+        for ( size_t l = 0; l < num_levels; ++l )
+        {
+            eta_m_.emplace_back( "eta_m_" + std::to_string( l ), domains[l], mask_data[l] );
+            linalg::convert( eta[l], eta_m_.back() );
+            inv_diag_m_.emplace_back( "inv_diag_m_" + std::to_string( l ), domains[l], mask_data[l] );
+            linalg::convert( inverse_diagonals[l], inv_diag_m_.back() );
+        }
+
+        // Coarse operators and transfers in M; coordinates handed over as double.
+        for ( size_t l = 0; l < num_levels; ++l )
+        {
+            tmp_.emplace_back( "mp_tmp_" + std::to_string( l ), domains[l], mask_data[l] );
+            if ( l < num_levels - 1 )
+            {
+                tmp_r_.emplace_back( "mp_tmp_r_" + std::to_string( l ), domains[l], mask_data[l] );
+                tmp_e_.emplace_back( "mp_tmp_e_" + std::to_string( l ), domains[l], mask_data[l] );
+                a_c_.emplace_back( domains[l], coords_shell[l], coords_radii[l],
+                                   boundary_mask_data[l], eta_m_[l].grid_data(), bcs, false );
+                p_.emplace_back( linalg::OperatorApplyMode::Add );
+                r_.emplace_back( domains[l] );
+            }
+        }
+
+        // Finest-level operator in M: Multigrid takes the fine operator at solve time,
+        // and the one the outer solver passes is double, so this hierarchy owns its own.
+        a_fine_ = std::make_unique< ViscM >( domains[fine], coords_shell[fine], coords_radii[fine],
+                                             boundary_mask_data[fine], eta_m_[fine].grid_data(), bcs, false );
+
+        for ( size_t l = 0; l < num_levels; ++l )
+        {
+            std::vector< VecM > cheby_tmps;
+            cheby_tmps.emplace_back( "mp_cheby_0_" + std::to_string( l ), domains[l], mask_data[l] );
+            cheby_tmps.emplace_back( "mp_cheby_1_" + std::to_string( l ), domains[l], mask_data[l] );
+            smoothers_.emplace_back( cheby_order, inv_diag_m_[l], cheby_tmps, chebyshev_prepost );
+        }
+
+        constexpr int coarse_restart = 30;
+        for ( int i = 0; i < 2 * coarse_restart + 4; ++i )
+            coarse_tmps_.emplace_back( "mp_coarse_tmp", domains[0], mask_data[0] );
+        linalg::solvers::FGMRESOptions< M > copts;
+        copts.restart                     = coarse_restart;
+        copts.max_iterations              = ( coarse_tol < 1e-7 ) ? 300 : 50;
+        copts.relative_residual_tolerance = static_cast< M >( coarse_tol );
+        copts.absolute_residual_tolerance = static_cast< M >( 1e-16 );
+        coarse_table_  = std::make_shared< util::Table >();
+        coarse_solver_ = std::make_unique< CSolvM >( coarse_tmps_, copts, coarse_table_,
+                                                     CPrecM( inv_diag_m_[0] ) );
+        coarse_solver_->set_tag( "mp_coarse_fgmres" );
+
+        // One V-cycle per application, no internal residual check.
+        mg_ = std::make_unique< MGM >( p_, r_, a_c_, tmp_r_, tmp_e_, tmp_, smoothers_, smoothers_,
+                                       *coarse_solver_, 1, static_cast< M >( 1e-16 ) );
+
+        x_m_ = std::make_unique< VecM >( "mp_x", domains[fine], mask_data[fine] );
+        b_m_ = std::make_unique< VecM >( "mp_b", domains[fine], mask_data[fine] );
+    }
+
+    void solve_impl( OuterOp& /*A_double*/, OuterVec& x, const OuterVec& b ) override
+    {
+        linalg::convert( b, *b_m_ );
+        linalg::assign( *x_m_, static_cast< M >( 0 ) );
+        linalg::solvers::solve( *mg_, *a_fine_, *x_m_, *b_m_ );
+        linalg::convert( *x_m_, x );
+    }
+
+  private:
+    std::vector< ScalM > eta_m_;
+    std::vector< VecM >  inv_diag_m_;
+    std::vector< VecM >  tmp_, tmp_r_, tmp_e_;
+    std::vector< ViscM > a_c_;
+    std::vector< ProlM > p_;
+    std::vector< RestM > r_;
+    std::vector< SmooM > smoothers_;
+    std::vector< VecM >  coarse_tmps_;
+
+    std::shared_ptr< util::Table > coarse_table_;
+    std::unique_ptr< ViscM >       a_fine_;
+    std::unique_ptr< CSolvM >      coarse_solver_;
+    std::unique_ptr< MGM >         mg_;
+    std::unique_ptr< VecM >        x_m_, b_m_;
+};
+
 enum class BCKind { DIRICHLET, FREESLIP };
 
 struct RunResult
@@ -285,7 +445,8 @@ RunResult run_ablock_mg( int    min_level,
                          int    visc_profile,   // 0 = Frank-Kamenetskii (smooth), 1 = sharp radial layer
                          double coarse_tol,     // coarse FGMRES relative tolerance
                          bool   full_stokes,    // false = solve A-block with MG; true = full Stokes outer FGMRES
-                         KrylovPrec krylov_prec ) // Krylov-basis precision for the full-Stokes outer FGMRES
+                         KrylovPrec krylov_prec, // Krylov-basis precision for the full-Stokes outer FGMRES
+                         ABlockPrec ablock_prec ) // working precision of the A-block V-cycle preconditioner
 {
     using ScalarType = double;
 
@@ -610,11 +771,39 @@ RunResult run_ablock_mg( int    min_level,
         K_op.block_11(), K_op_neumann.block_12(), K_op_neumann.block_21(), kw_solver, c_w.inv_diag_velocity(),
         domains[velocity_level], domains[pressure_level], mask_data[velocity_level], mask_data[pressure_level] ) );
 
-    using PrecStokes = linalg::solvers::BlockTriangularPreconditioner2x2<
-        Stokes, Viscous, PressureMass, Gradient, MG, PrecSchur >;
+    // The (1,1) velocity preconditioner is type-erased so its internal precision --
+    // the whole V-cycle hierarchy -- can be chosen at runtime via --ablock-prec, while
+    // the outer FGMRES, the Stokes operator and the Schur block stay in double.
+    using VelPrecHandle = linalg::solvers::VelocityPrecHandle< Viscous >;
+    using PrecStokes    = linalg::solvers::BlockTriangularPreconditioner2x2<
+        Stokes, Viscous, PressureMass, Gradient, VelPrecHandle, PrecSchur >;
     VectorQ1IsoQ2Q1< ScalarType > tri_tmp(
         "tri_tmp", domains[velocity_level], domains[pressure_level], mask_data[velocity_level], mask_data[pressure_level] );
-    PrecStokes prec_stokes( K_op.block_11(), pmass, K_op.block_12(), tri_tmp, mg, prec_schur );
+    std::shared_ptr< typename VelPrecHandle::Impl > vel_impl;
+    switch ( ablock_prec )
+    {
+    case ABlockPrec::FLOAT:
+        vel_impl = std::make_shared< LowPrecABlock< float > >(
+            domains, coords_shell, coords_radii, mask_data, boundary_mask_data, eta,
+            inverse_diagonals, bcs, cheby_order, 3, coarse_tol );
+        break;
+    case ABlockPrec::FP16:
+        vel_impl = std::make_shared< LowPrecABlock< Kokkos::Experimental::half_t > >(
+            domains, coords_shell, coords_radii, mask_data, boundary_mask_data, eta,
+            inverse_diagonals, bcs, cheby_order, 3, coarse_tol );
+        break;
+    case ABlockPrec::BF16:
+        vel_impl = std::make_shared< LowPrecABlock< Kokkos::Experimental::bhalf_t > >(
+            domains, coords_shell, coords_radii, mask_data, boundary_mask_data, eta,
+            inverse_diagonals, bcs, cheby_order, 3, coarse_tol );
+        break;
+    case ABlockPrec::DOUBLE:
+    default:
+        vel_impl = std::make_shared< linalg::solvers::ForwardingPrecImpl< Viscous, MG > >( mg );
+        break;
+    }
+    VelPrecHandle vel_prec( vel_impl );
+    PrecStokes prec_stokes( K_op.block_11(), pmass, K_op.block_12(), tri_tmp, vel_prec, prec_schur );
 
     constexpr int outer_restart = 50;
     linalg::solvers::FGMRESOptions< ScalarType > outer_opts;
@@ -939,6 +1128,7 @@ int main( int argc, char** argv )
     double coarse_tol   = 1e-6;  // coarse FGMRES relative tolerance
     bool   full_stokes  = false; // --solve stokes: outer FGMRES on full saddle point
     KrylovPrec krylov_prec = KrylovPrec::DOUBLE; // --krylov-precision double|single|bf16|fp16 (full-Stokes only)
+    ABlockPrec ablock_prec = ABlockPrec::DOUBLE; // --ablock-prec double|float|fp16|bf16 (full-Stokes only)
     for ( int i = 1; i + 1 < argc; ++i )
     {
         const std::string a = argv[i];
@@ -961,6 +1151,14 @@ int main( int argc, char** argv )
                                                                         : 0;
         else if ( a == "--coarse-tol" )    coarse_tol  = std::atof( argv[i + 1] );
         else if ( a == "--solve" )         full_stokes = ( std::string( argv[i + 1] ) == "stokes" );
+        else if ( a == "--ablock-prec" )
+        {
+            const std::string q = argv[i + 1];
+            ablock_prec = ( q == "fp16" || q == "half" )                  ? ABlockPrec::FP16
+                          : ( q == "bf16" || q == "bfloat16" )            ? ABlockPrec::BF16
+                          : ( q == "float" || q == "single" )             ? ABlockPrec::FLOAT
+                                                                          : ABlockPrec::DOUBLE;
+        }
         else if ( a == "--krylov-precision" )
         {
             const std::string p = argv[i + 1];
@@ -1012,6 +1210,8 @@ int main( int argc, char** argv )
                   << "    solve = " << ( full_stokes ? "stokes (cycles = outer FGMRES iters)" : "ablock (cycles = MG V-cycles)" )
                   << ( full_stokes ? std::string( ", krylov-basis = " ) + krylov_prec_name( krylov_prec )
                                            + krylov_prec_storage_note( krylov_prec )
+                                           + ", A-block prec = " + ablock_prec_name( ablock_prec )
+                                           + ablock_prec_note( ablock_prec )
                                    : std::string() )
                   << ", BC = " << bc_name
                   << ", viscosity = "
@@ -1035,12 +1235,13 @@ int main( int argc, char** argv )
 
             const auto res =
                 run_ablock_mg( min_level, max_level, cheby_order, perturb_amp, rmu, s.gca, max_cycles, bc, s.interp,
-                               visc_profile, coarse_tol, full_stokes, krylov_prec );
+                               visc_profile, coarse_tol, full_stokes, krylov_prec, ablock_prec );
 
             summary->add_row(
                 { { "rmu", rmu },
                   { "gca", s.gca },
                   { "krylov", std::string( krylov_prec_name( krylov_prec ) ) },
+                  { "ablock_prec", std::string( ablock_prec_name( ablock_prec ) ) },
                   { "scheme", std::string( s.name ) },
                   { "cycles", res.cycles },
                   { "final_rel_res", res.rel_residual_final },
