@@ -3,6 +3,8 @@
 #include <iostream>
 #include <mpi.h>
 
+#include <Kokkos_Core.hpp>
+
 namespace terra::mpi {
 
 using MPIRank = int;
@@ -202,6 +204,45 @@ template <>
 inline MPI_Datatype mpi_datatype< long double >()
 {
     return MPI_LONG_DOUBLE;
+}
+
+// MPI defines no 16-bit floating-point datatype. half_t and bhalf_t are therefore
+// transported as opaque 2-byte words, which is correct for the halo exchange because
+// that is a pure copy: the additive reduction of ghost contributions happens in a
+// Kokkos kernel after the receive, not inside MPI.
+//
+// These must never be handed to MPI_Allreduce with an arithmetic op -- MPI would add
+// 16-bit patterns as unsigned integers. Reduce scalars with allreduce_scalar() below,
+// which promotes to double.
+// Guarded: where a backend has no native 16-bit type Kokkos aliases half_t/bhalf_t to
+// float, and the float specialisation above already covers them.
+#if !( defined( KOKKOS_HALF_T_IS_FLOAT ) && KOKKOS_HALF_T_IS_FLOAT )
+template <>
+inline MPI_Datatype mpi_datatype< Kokkos::Experimental::half_t >()
+{
+    return MPI_UINT16_T;
+}
+#endif
+
+#if !( defined( KOKKOS_BHALF_T_IS_FLOAT ) && KOKKOS_BHALF_T_IS_FLOAT )
+template <>
+inline MPI_Datatype mpi_datatype< Kokkos::Experimental::bhalf_t >()
+{
+    return MPI_UINT16_T;
+}
+#endif
+
+/// @brief Allreduce a single scalar, promoting to double for the reduction itself.
+///
+/// Needed because MPI has no 16-bit float datatype, and desirable anyway: a global
+/// sum of per-rank partials accumulated in double loses nothing, whereas reducing in
+/// the field precision would.
+template < typename T >
+inline void allreduce_scalar( T& value, MPI_Op op, MPI_Comm comm = MPI_COMM_WORLD )
+{
+    double promoted = static_cast< double >( value );
+    MPI_Allreduce( MPI_IN_PLACE, &promoted, 1, MPI_DOUBLE, op, comm );
+    value = static_cast< T >( promoted );
 }
 
 template <>

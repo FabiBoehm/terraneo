@@ -331,7 +331,7 @@ ScalarType min_entry( const grid::Grid4DDataScalar< ScalarType >& x )
 
     Kokkos::fence();
 
-    MPI_Allreduce( MPI_IN_PLACE, &min_val, 1, mpi::mpi_datatype< ScalarType >(), MPI_MIN, MPI_COMM_WORLD );
+    mpi::allreduce_scalar( min_val, MPI_MIN );
 
     return min_val;
 }
@@ -351,7 +351,7 @@ ScalarType min_abs_entry( const grid::Grid4DDataScalar< ScalarType >& x )
 
     Kokkos::fence();
 
-    MPI_Allreduce( MPI_IN_PLACE, &min_mag, 1, mpi::mpi_datatype< ScalarType >(), MPI_MIN, MPI_COMM_WORLD );
+    mpi::allreduce_scalar( min_mag, MPI_MIN );
 
     return min_mag;
 }
@@ -371,7 +371,7 @@ ScalarType max_abs_entry( const grid::Grid4DDataScalar< ScalarType >& x )
 
     Kokkos::fence();
 
-    MPI_Allreduce( MPI_IN_PLACE, &max_mag, 1, mpi::mpi_datatype< ScalarType >(), MPI_MAX, MPI_COMM_WORLD );
+    mpi::allreduce_scalar( max_mag, MPI_MAX );
 
     return max_mag;
 }
@@ -411,7 +411,7 @@ ScalarType max_abs_entry(
 
     Kokkos::fence();
 
-    MPI_Allreduce( MPI_IN_PLACE, &max_mag, 1, mpi::mpi_datatype< ScalarType >(), MPI_MAX, MPI_COMM_WORLD );
+    mpi::allreduce_scalar( max_mag, MPI_MAX );
 
     return max_mag;
 }
@@ -436,7 +436,7 @@ ScalarType max_abs_entry_subset(
 
     Kokkos::fence();
 
-    MPI_Allreduce( MPI_IN_PLACE, &max_mag, 1, mpi::mpi_datatype< ScalarType >(), MPI_MAX, MPI_COMM_WORLD );
+    mpi::allreduce_scalar( max_mag, MPI_MAX );
 
     return max_mag;
 }
@@ -461,7 +461,7 @@ ScalarType max_vector_magnitude( const grid::Grid4DDataVec< ScalarType, VecDim >
 
     Kokkos::fence();
 
-    MPI_Allreduce( MPI_IN_PLACE, &max_mag, 1, mpi::mpi_datatype< ScalarType >(), MPI_MAX, MPI_COMM_WORLD );
+    mpi::allreduce_scalar( max_mag, MPI_MAX );
 
     return max_mag;
 }
@@ -559,7 +559,7 @@ ScalarType sum_of_absolutes( const grid::Grid4DDataScalar< ScalarType >& x )
 
     Kokkos::fence();
 
-    MPI_Allreduce( MPI_IN_PLACE, &sum_abs, 1, mpi::mpi_datatype< ScalarType >(), MPI_SUM, MPI_COMM_WORLD );
+    mpi::allreduce_scalar( sum_abs, MPI_SUM );
 
     return sum_abs;
 }
@@ -583,7 +583,7 @@ ScalarType count_masked( const grid::Grid4DDataScalar< FlagType >& mask, const F
 
     Kokkos::fence();
 
-    MPI_Allreduce( MPI_IN_PLACE, &count, 1, mpi::mpi_datatype< ScalarType >(), MPI_SUM, MPI_COMM_WORLD );
+    mpi::allreduce_scalar( count, MPI_SUM );
 
     return count;
 }
@@ -608,7 +608,7 @@ ScalarType masked_sum(
 
     Kokkos::fence();
 
-    MPI_Allreduce( MPI_IN_PLACE, &sum, 1, mpi::mpi_datatype< ScalarType >(), MPI_SUM, MPI_COMM_WORLD );
+    mpi::allreduce_scalar( sum, MPI_SUM );
 
     return sum;
 }
@@ -637,7 +637,7 @@ ScalarType masked_sum(
 
     Kokkos::fence();
 
-    MPI_Allreduce( MPI_IN_PLACE, &sum, 1, mpi::mpi_datatype< ScalarType >(), MPI_SUM, MPI_COMM_WORLD );
+    mpi::allreduce_scalar( sum, MPI_SUM );
 
     return sum;
 }
@@ -658,7 +658,7 @@ ScalarType dot_product( const grid::Grid4DDataScalar< ScalarType >& x, const gri
 
     Kokkos::fence( "dot_product" );
 
-    MPI_Allreduce( MPI_IN_PLACE, &dot_prod, 1, mpi::mpi_datatype< ScalarType >(), MPI_SUM, MPI_COMM_WORLD );
+    mpi::allreduce_scalar( dot_prod, MPI_SUM );
 
     return dot_prod;
 }
@@ -684,7 +684,7 @@ ScalarType masked_dot_product(
 
     Kokkos::fence( "masked_dot_product" );
 
-    MPI_Allreduce( MPI_IN_PLACE, &dot_prod, 1, mpi::mpi_datatype< ScalarType >(), MPI_SUM, MPI_COMM_WORLD );
+    mpi::allreduce_scalar( dot_prod, MPI_SUM );
 
     return dot_prod;
 }
@@ -728,7 +728,7 @@ ScalarType dot_product_subset(
 
     Kokkos::fence( "masked_dot_product" );
 
-    MPI_Allreduce( MPI_IN_PLACE, &dot_prod, 1, mpi::mpi_datatype< ScalarType >(), MPI_SUM, MPI_COMM_WORLD );
+    mpi::allreduce_scalar( dot_prod, MPI_SUM );
 
     return dot_prod;
 }
