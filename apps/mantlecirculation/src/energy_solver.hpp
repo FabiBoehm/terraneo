@@ -413,65 +413,6 @@ class SUPGSolver : public EnergySolver< ScalarType >
 /// Implicit Galerkin energy solve with explicit lagged entropy-viscosity
 /// stabilization (KHB / ASPECT recipe).  LHS is pure-Galerkin AD (SUPG OFF);
 /// stabilization is added to the RHS as `-dt · DivKGrad(ν_h) · T^n`.
-/// Composite LHS operator making the entropy-viscosity artificial diffusion
-/// IMPLICIT:   C*x = A_*x  +  dt * P_int( A_evdiff_*x ),
-/// where P_int zeros the nu_h contribution at Dirichlet boundary nodes so the
-/// composite keeps A_'s diagonalized boundary rows.  Mirrors ASPECT (LHS assembly)
-/// instead of the explicit RHS lag.  Enabled via --ev-implicit-nu-h.
-template < typename ScalarT, typename BaseOp, typename EVOp >
-class ImplicitEVAdvDiffOperator
-{
-  public:
-    using SrcVectorType = linalg::VectorQ1Scalar< ScalarT >;
-    using DstVectorType = linalg::VectorQ1Scalar< ScalarT >;
-    using ScalarType    = ScalarT;
-
-    ImplicitEVAdvDiffOperator(
-        BaseOp&                                                         base,
-        EVOp&                                                           ev,
-        const grid::shell::DistributedDomain&                          domain,
-        const grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag >& boundary_mask,
-        SrcVectorType&                                                  scratch )
-    : base_( base ), ev_( ev ), domain_( domain ), boundary_mask_( boundary_mask ), scratch_( scratch )
-    {
-    }
-
-    ScalarT& dt() { return dt_; }
-
-    void apply_impl( const SrcVectorType& src, DstVectorType& dst )
-    {
-        linalg::apply( base_, src, dst );      // dst     = A_*src
-        linalg::apply( ev_, src, scratch_ );   // scratch = A_evdiff_*src
-
-        // Zero the nu_h contribution at Dirichlet boundary node rows so the
-        // composite keeps A_'s diagonalized boundary rows (A_evdiff_ has none).
-        {
-            auto       s    = scratch_.grid_data();
-            const auto mask = boundary_mask_;
-            Kokkos::parallel_for(
-                "impl_ev_zero_boundary_rows",
-                grid::shell::local_domain_md_range_policy_nodes( domain_ ),
-                KOKKOS_LAMBDA( const int sd, const int x, const int y, const int r ) {
-                    const auto f = mask( sd, x, y, r );
-                    if ( f == grid::shell::ShellBoundaryFlag::CMB ||
-                         f == grid::shell::ShellBoundaryFlag::SURFACE )
-                        s( sd, x, y, r ) = ScalarT( 0 );
-                } );
-            Kokkos::fence();
-        }
-
-        linalg::lincomb( dst, { ScalarT( 1 ), dt_ }, { dst, scratch_ } );  // dst += dt*scratch
-    }
-
-  private:
-    BaseOp&                                                         base_;
-    EVOp&                                                           ev_;
-    const grid::shell::DistributedDomain&                          domain_;
-    const grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag >& boundary_mask_;
-    SrcVectorType&                                                 scratch_;
-    ScalarT                                                        dt_ = ScalarT( 1 );
-};
-
 template < typename ScalarType >
 class EVSolver : public EnergySolver< ScalarType >
 {
