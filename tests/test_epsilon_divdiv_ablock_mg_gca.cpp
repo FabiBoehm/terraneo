@@ -88,13 +88,51 @@ using terra::grid::shell::BoundaryConditions;
 namespace mc = terra::mantlecirculation;
 
 // Krylov-basis storage precision for the full-Stokes outer FGMRES. DOUBLE = plain
-// FGMRES (basis in solution precision); FLOAT/BF16 = FGMRESLowMem with the basis
-// stored in single / bfloat16 (mirrors the mc app's float/bf16 Krylov-basis path).
-enum class KrylovPrec { DOUBLE, FLOAT, BF16 };
+// FGMRES (basis in solution precision); FLOAT/BF16/FP16 = FGMRESLowMem with the
+// basis stored in single / bfloat16 / binary16 (mirrors the mc app's reduced-
+// precision Krylov-basis path in stokes_solver.hpp).
+//
+// BF16 and FP16 are both 2 B/dof; they differ in where they fail.
+//   bhalf_t (8 exp / 7 mant): range of float, unit roundoff 3.9e-3.
+//   half_t  (5 exp / 10 mant): unit roundoff 4.9e-4 -- 8x finer -- but min normal
+//           6.1e-5, and a unit-2-norm basis vector over N dofs has entries of
+//           order 1/sqrt(N) (~1.8e-4 at 3e7 dofs), so its smaller entries land in
+//           half_t's denormals. Which of the two wins is the measurement.
+// The basis is store-only (converted to and from the double scratch vectors and
+// never operated on), so neither type instantiates 16-bit arithmetic and neither
+// needs the half reduction identities that only exist in Kokkos >= 5.1.0.
+enum class KrylovPrec { DOUBLE, FLOAT, BF16, FP16 };
 
 inline const char* krylov_prec_name( KrylovPrec p )
 {
-    return p == KrylovPrec::BF16 ? "bf16" : ( p == KrylovPrec::FLOAT ? "single" : "double" );
+    switch ( p )
+    {
+    case KrylovPrec::FP16:  return "fp16";
+    case KrylovPrec::BF16:  return "bf16";
+    case KrylovPrec::FLOAT: return "single";
+    default:                return "double";
+    }
+}
+
+// Kokkos maps half_t/bhalf_t to the backend's native type where one exists and
+// silently falls back to float otherwise (e.g. bhalf_t on HIP before Kokkos
+// 5.1.0). In the fallback case a nominally 16-bit basis has the same footprint as
+// single and the run measures something else entirely, so state it in the header.
+inline const char* krylov_prec_storage_note( KrylovPrec p )
+{
+    if ( p == KrylovPrec::FP16 )
+#if defined( KOKKOS_HALF_T_IS_FLOAT ) && KOKKOS_HALF_T_IS_FLOAT
+        return " [EMULATED: half_t falls back to float on this backend, 4 B/dof]";
+#else
+        return " [native half_t, 2 B/dof]";
+#endif
+    if ( p == KrylovPrec::BF16 )
+#if defined( KOKKOS_BHALF_T_IS_FLOAT ) && KOKKOS_BHALF_T_IS_FLOAT
+        return " [EMULATED: bhalf_t falls back to float on this backend, 4 B/dof]";
+#else
+        return " [native bhalf_t, 2 B/dof]";
+#endif
+    return "";
 }
 
 // A7 benchmark geometry + buoyancy parameters.  rmu (viscosity contrast) is now
@@ -590,10 +628,12 @@ RunResult run_ablock_mg( int    min_level,
         "u_stokes", domains[velocity_level], domains[pressure_level], mask_data[velocity_level], mask_data[pressure_level] );
     linalg::assign( u_stokes, 0.0 );
 
-    // Outer FGMRES with the Krylov basis stored in double / single / bf16.
-    //   double      -> plain FGMRES (basis == solution precision),
-    //   float/bf16  -> FGMRESLowMem (3 full-precision scratch + 2*restart+1 reduced-precision basis),
-    // mirroring the mc app's float/bf16 Krylov-basis workspace in stokes_solver.hpp.
+    // Outer FGMRES with the Krylov basis stored in double / single / bf16 / fp16.
+    //   double           -> plain FGMRES (basis == solution precision),
+    //   float/bf16/fp16  -> FGMRESLowMem (3 full-precision scratch + 2*restart+1
+    //                       reduced-precision basis vectors),
+    // mirroring the mc app's reduced-precision Krylov-basis workspace in
+    // stokes_solver.hpp.
     if ( krylov_prec == KrylovPrec::DOUBLE )
     {
         std::vector< VectorQ1IsoQ2Q1< ScalarType > > tmp_fgmres;
@@ -610,30 +650,27 @@ RunResult run_ablock_mg( int    min_level,
         for ( int i = 0; i < 3; ++i )
             work.emplace_back( "work_fgmres_" + std::to_string( i ),
                 domains[velocity_level], domains[pressure_level], mask_data[velocity_level], mask_data[pressure_level] );
+        // One instantiation per basis scalar; the solve is otherwise identical, so
+        // the body lives in a templated lambda rather than three copies.
+        auto solve_lowmem = [&]< typename BasisScalar >()
+        {
+            using Basis = VectorQ1IsoQ2Q1< BasisScalar >;
+            std::vector< Basis > basis;
+            for ( int i = 0; i < 2 * outer_restart + 1; ++i )
+                basis.emplace_back( "basis_fgmres_" + std::to_string( i ),
+                    domains[velocity_level], domains[pressure_level], mask_data[velocity_level], mask_data[pressure_level] );
+            linalg::solvers::FGMRESLowMem< Stokes, Basis, PrecStokes > fgmres(
+                work, basis, outer_opts, outer_table, prec_stokes );
+            fgmres.set_tag( "stokes_fgmres" );
+            linalg::solvers::solve( fgmres, K_op, u_stokes, f_full );
+        };
+
         if ( krylov_prec == KrylovPrec::FLOAT )
-        {
-            using BasisF = VectorQ1IsoQ2Q1< float >;
-            std::vector< BasisF > basis;
-            for ( int i = 0; i < 2 * outer_restart + 1; ++i )
-                basis.emplace_back( "basis_fgmres_" + std::to_string( i ),
-                    domains[velocity_level], domains[pressure_level], mask_data[velocity_level], mask_data[pressure_level] );
-            linalg::solvers::FGMRESLowMem< Stokes, BasisF, PrecStokes > fgmres(
-                work, basis, outer_opts, outer_table, prec_stokes );
-            fgmres.set_tag( "stokes_fgmres" );
-            linalg::solvers::solve( fgmres, K_op, u_stokes, f_full );
-        }
-        else  // BF16
-        {
-            using BasisH = VectorQ1IsoQ2Q1< Kokkos::Experimental::bhalf_t >;
-            std::vector< BasisH > basis;
-            for ( int i = 0; i < 2 * outer_restart + 1; ++i )
-                basis.emplace_back( "basis_fgmres_" + std::to_string( i ),
-                    domains[velocity_level], domains[pressure_level], mask_data[velocity_level], mask_data[pressure_level] );
-            linalg::solvers::FGMRESLowMem< Stokes, BasisH, PrecStokes > fgmres(
-                work, basis, outer_opts, outer_table, prec_stokes );
-            fgmres.set_tag( "stokes_fgmres" );
-            linalg::solvers::solve( fgmres, K_op, u_stokes, f_full );
-        }
+            solve_lowmem.template operator()< float >();
+        else if ( krylov_prec == KrylovPrec::BF16 )
+            solve_lowmem.template operator()< Kokkos::Experimental::bhalf_t >();
+        else  // FP16
+            solve_lowmem.template operator()< Kokkos::Experimental::half_t >();
     }
 
     outer_table->query_rows_equals( "tag", "stokes_fgmres" )
@@ -901,7 +938,7 @@ int main( int argc, char** argv )
     int    visc_profile = 0;  // 0 = Frank-Kamenetskii (smooth), 1 = sharp radial layer
     double coarse_tol   = 1e-6;  // coarse FGMRES relative tolerance
     bool   full_stokes  = false; // --solve stokes: outer FGMRES on full saddle point
-    KrylovPrec krylov_prec = KrylovPrec::DOUBLE; // --krylov-precision double|single|bf16 (full-Stokes only)
+    KrylovPrec krylov_prec = KrylovPrec::DOUBLE; // --krylov-precision double|single|bf16|fp16 (full-Stokes only)
     for ( int i = 1; i + 1 < argc; ++i )
     {
         const std::string a = argv[i];
@@ -927,9 +964,12 @@ int main( int argc, char** argv )
         else if ( a == "--krylov-precision" )
         {
             const std::string p = argv[i + 1];
-            krylov_prec = ( p == "bf16" || p == "half" )                 ? KrylovPrec::BF16
-                          : ( p == "single" || p == "float" )           ? KrylovPrec::FLOAT
-                                                                        : KrylovPrec::DOUBLE;
+            // NOTE: "half" now means binary16 (half_t), not bfloat16. It used to
+            // alias bf16, which was misleading once both types are selectable.
+            krylov_prec = ( p == "bf16" || p == "bfloat16" || p == "bhalf" ) ? KrylovPrec::BF16
+                          : ( p == "fp16" || p == "half" || p == "half_t" )  ? KrylovPrec::FP16
+                          : ( p == "single" || p == "float" )                ? KrylovPrec::FLOAT
+                                                                             : KrylovPrec::DOUBLE;
         }
     }
     bool verify_gca = false;
@@ -970,7 +1010,9 @@ int main( int argc, char** argv )
     util::logroot << "=== " << ( full_stokes ? "FULL STOKES outer-FGMRES (w-BFBT Schur) " : "A-block (viscous) MG " )
                   << "convergence vs viscosity contrast ===\n"
                   << "    solve = " << ( full_stokes ? "stokes (cycles = outer FGMRES iters)" : "ablock (cycles = MG V-cycles)" )
-                  << ( full_stokes ? std::string( ", krylov-basis = " ) + krylov_prec_name( krylov_prec ) : std::string() )
+                  << ( full_stokes ? std::string( ", krylov-basis = " ) + krylov_prec_name( krylov_prec )
+                                           + krylov_prec_storage_note( krylov_prec )
+                                   : std::string() )
                   << ", BC = " << bc_name
                   << ", viscosity = "
                   << ( visc_profile == 3   ? "Lin et al. 2022 radial profile (contrast ~1057)"
