@@ -147,7 +147,7 @@ class EpsilonDivDivKerngen
      */
     void update_kernel_path_flag_host_only()
     {
-can        // Serial backend: always use slow path (fast paths require shared memory / larger teams).
+        // Serial backend: always use slow path (fast paths require shared memory / larger teams).
         if constexpr ( std::is_same_v< Kokkos::DefaultExecutionSpace, Kokkos::Serial > )
         {
             kernel_path_ = KernelPath::Slow;
