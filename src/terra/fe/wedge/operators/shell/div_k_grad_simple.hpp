@@ -14,7 +14,12 @@
 
 namespace terra::fe::wedge::operators::shell {
 
-template < typename ScalarT >
+// CoordScalarT is the precision of the STORED node coordinates and radii. It
+// defaults to ScalarT, so existing instantiations are unchanged. Pass double to
+// decouple it: the Jacobian is formed by differencing coordinates, which loses the
+// geometry entirely in 16-bit and is already marginal in single. ScalarT governs
+// the stored fields src/dst and the coefficient -- where the memory traffic is.
+template < typename ScalarT, typename CoordScalarT = ScalarT >
 class DivKGradSimple
 {
   public:
@@ -34,8 +39,8 @@ class DivKGradSimple
 
     grid::shell::DistributedDomain domain_;
 
-    grid::Grid3DDataVec< ScalarT, 3 > grid_;
-    grid::Grid2DDataScalar< ScalarT > radii_;
+    grid::Grid3DDataVec< CoordScalarT, 3 > grid_;
+    grid::Grid2DDataScalar< CoordScalarT > radii_;
     grid::Grid4DDataScalar< ScalarType > k_;
 
     bool treat_boundary_;
@@ -59,8 +64,8 @@ class DivKGradSimple
   public:
     DivKGradSimple(
         const grid::shell::DistributedDomain&       domain,
-        const grid::Grid3DDataVec< ScalarT, 3 >&    grid,
-        const grid::Grid2DDataScalar< ScalarT >&    radii,
+        const grid::Grid3DDataVec< CoordScalarT, 3 >&    grid,
+        const grid::Grid2DDataScalar< CoordScalarT >&    radii,
         const grid::Grid4DDataScalar< ScalarType >& k,
         bool                                        treat_boundary,
         bool                                        diagonal,
@@ -89,10 +94,10 @@ class DivKGradSimple
     const grid::shell::DistributedDomain& get_domain() const { return domain_; }
 
     /// @brief Getter for radii member
-    grid::Grid2DDataScalar< ScalarT > get_radii() const { return radii_; }
+    grid::Grid2DDataScalar< CoordScalarT > get_radii() const { return radii_; }
 
     /// @brief Getter for grid member
-    grid::Grid3DDataVec< ScalarT, 3 > get_grid() const { return grid_; }
+    grid::Grid3DDataVec< CoordScalarT, 3 > get_grid() const { return grid_; }
 
     /// @brief S/Getter for diagonal member
     void set_diagonal( bool v ) { diagonal_ = v; }

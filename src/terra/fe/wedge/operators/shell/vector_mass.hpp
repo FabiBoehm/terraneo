@@ -1,6 +1,8 @@
 
 #pragma once
 
+#include <type_traits>
+
 #include "communication/shell/communication.hpp"
 #include "dense/vec.hpp"
 #include "fe/wedge/integrands.hpp"
@@ -11,7 +13,12 @@
 
 namespace terra::fe::wedge::operators::shell {
 
-template < typename ScalarT, int VecDim = 3 >
+// CoordScalarT is the precision of the STORED node coordinates and radii. It
+// defaults to ScalarT, so existing instantiations are unchanged. Pass double to
+// decouple it: the Jacobian is formed by differencing coordinates, which loses the
+// geometry entirely in 16-bit and is already marginal in single. ScalarT governs
+// the stored fields src/dst and the coefficient -- where the memory traffic is.
+template < typename ScalarT, int VecDim = 3, typename CoordScalarT = ScalarT >
 class VectorMass
 {
   public:
@@ -22,8 +29,8 @@ class VectorMass
   private:
     grid::shell::DistributedDomain domain_;
 
-    grid::Grid3DDataVec< ScalarT, 3 > grid_;
-    grid::Grid2DDataScalar< ScalarT > radii_;
+    grid::Grid3DDataVec< CoordScalarT, 3 > grid_;
+    grid::Grid2DDataScalar< CoordScalarT > radii_;
 
     bool diagonal_;
 
@@ -39,8 +46,8 @@ class VectorMass
   public:
     VectorMass(
         const grid::shell::DistributedDomain&   domain,
-        const grid::Grid3DDataVec< ScalarT, 3 >& grid,
-        const grid::Grid2DDataScalar< ScalarT >& radii,
+        const grid::Grid3DDataVec< CoordScalarT, 3 >& grid,
+        const grid::Grid2DDataScalar< CoordScalarT >& radii,
         const bool                              diagonal,
         linalg::OperatorApplyMode               operator_apply_mode = linalg::OperatorApplyMode::Replace,
         linalg::OperatorCommunicationMode       operator_communication_mode =
@@ -82,44 +89,50 @@ class VectorMass
         // First all the r-independent stuff.
         // Gather surface points for each wedge.
 
-        dense::Vec< ScalarT, 3 > wedge_phy_surf[num_wedges_per_hex_cell][num_nodes_per_wedge_surface] = {};
+        // Geometry and the whole local-matrix assembly run in GeomT (= CoordScalarT):
+        // the Jacobian is formed by differencing coordinates, so it must not inherit a
+        // reduced ScalarT. Only the contraction with the stored fields below uses
+        // ScalarT, which is where the memory traffic -- and the saving -- actually is.
+        using GeomT = CoordScalarT;
+
+        dense::Vec< GeomT, 3 > wedge_phy_surf[num_wedges_per_hex_cell][num_nodes_per_wedge_surface] = {};
         wedge_surface_physical_coords( wedge_phy_surf, grid_, local_subdomain_id, x_cell, y_cell );
 
         // Compute lateral part of Jacobian.
 
         constexpr auto num_quad_points = quadrature::quad_felippa_3x2_num_quad_points;
 
-        dense::Vec< ScalarT, 3 > quad_points[num_quad_points];
-        ScalarT                  quad_weights[num_quad_points];
+        dense::Vec< GeomT, 3 > quad_points[num_quad_points];
+        GeomT                  quad_weights[num_quad_points];
 
         quadrature::quad_felippa_3x2_quad_points( quad_points );
         quadrature::quad_felippa_3x2_quad_weights( quad_weights );
 
-        ScalarT det_jac_lat[num_wedges_per_hex_cell][num_quad_points] = {};
+        GeomT det_jac_lat[num_wedges_per_hex_cell][num_quad_points] = {};
 
         jacobian_lat_determinant( det_jac_lat, wedge_phy_surf, quad_points );
 
         // Only now we introduce radially dependent terms.
-        const ScalarT r_1 = radii_( local_subdomain_id, r_cell );
-        const ScalarT r_2 = radii_( local_subdomain_id, r_cell + 1 );
+        const GeomT r_1 = radii_( local_subdomain_id, r_cell );
+        const GeomT r_2 = radii_( local_subdomain_id, r_cell + 1 );
 
         // For now, compute the local element matrix. We'll improve that later.
-        dense::Mat< ScalarT, 6, 6 > A[num_wedges_per_hex_cell] = {};
+        dense::Mat< GeomT, 6, 6 > A[num_wedges_per_hex_cell] = {};
 
-        const ScalarT grad_r = grad_forward_map_rad( r_1, r_2 );
+        const GeomT grad_r = grad_forward_map_rad( r_1, r_2 );
 
         for ( int wedge = 0; wedge < num_wedges_per_hex_cell; wedge++ )
         {
             for ( int q = 0; q < num_quad_points; q++ )
             {
-                const ScalarT r = forward_map_rad( r_1, r_2, quad_points[q]( 2 ) );
+                const GeomT r = forward_map_rad( r_1, r_2, quad_points[q]( 2 ) );
 
                 for ( int i = 0; i < num_nodes_per_wedge; i++ )
                 {
                     for ( int j = 0; j < num_nodes_per_wedge; j++ )
                     {
-                        const ScalarT shape_i = shape( i, quad_points[q] );
-                        const ScalarT shape_j = shape( j, quad_points[q] );
+                        const GeomT shape_i = shape( i, quad_points[q] );
+                        const GeomT shape_j = shape( j, quad_points[q] );
 
                         A[wedge]( i, j ) +=
                             quad_weights[q] * ( shape_i * shape_j * r * r * grad_r * det_jac_lat[wedge][q] );
@@ -134,6 +147,23 @@ class VectorMass
             A[1] = A[1].diagonal();
         }
 
+        // Narrow the assembled 6x6 blocks to the field precision once per cell (36
+        // values), so the contraction below and the extract/accumulate helpers all
+        // operate in ScalarT without any mixed-type matrix-vector product.
+        dense::Mat< ScalarT, 6, 6 > A_s[num_wedges_per_hex_cell] = {};
+        if constexpr ( std::is_same_v< ScalarT, GeomT > )
+        {
+            for ( int w = 0; w < num_wedges_per_hex_cell; w++ )
+                A_s[w] = A[w];
+        }
+        else
+        {
+            for ( int w = 0; w < num_wedges_per_hex_cell; w++ )
+                for ( int i = 0; i < num_nodes_per_wedge; i++ )
+                    for ( int j = 0; j < num_nodes_per_wedge; j++ )
+                        A_s[w]( i, j ) = static_cast< ScalarT >( A[w]( i, j ) );
+        }
+
         for ( int d = 0; d < VecDim; d++ )
         {
             dense::Vec< ScalarT, 6 > src[num_wedges_per_hex_cell];
@@ -141,8 +171,8 @@ class VectorMass
 
             dense::Vec< ScalarT, 6 > dst[num_wedges_per_hex_cell];
 
-            dst[0] = A[0] * src[0];
-            dst[1] = A[1] * src[1];
+            dst[0] = A_s[0] * src[0];
+            dst[1] = A_s[1] * src[1];
 
             atomically_add_local_wedge_vector_coefficients( dst_, local_subdomain_id, x_cell, y_cell, r_cell, d, dst );
         }
@@ -150,5 +180,7 @@ class VectorMass
 };
 
 static_assert( linalg::OperatorLike< VectorMass< double, 3 > > );
+// Reduced field precision over double-precision geometry.
+static_assert( linalg::OperatorLike< VectorMass< float, 3, double > > );
 
 } // namespace terra::fe::wedge::operators::shell

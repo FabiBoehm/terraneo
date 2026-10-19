@@ -28,7 +28,12 @@ using grid::shell::ShellBoundaryFlag::SURFACE;
 using grid::shell::ShellBoundaryFlag;
 using grid::shell::BoundaryConditionFlag;
 
-template < typename ScalarT, int VecDim = 3 >
+// CoordScalarT is the precision of the STORED node coordinates and radii. It
+// defaults to ScalarT, so existing instantiations are unchanged. Pass double to
+// decouple it: the Jacobian is formed by differencing coordinates, which loses the
+// geometry entirely in 16-bit and is already marginal in single. ScalarT governs
+// the stored fields src/dst and the coefficient -- where the memory traffic is.
+template < typename ScalarT, int VecDim = 3, typename CoordScalarT = ScalarT >
 class VectorLaplace
 {
   public:
@@ -39,8 +44,8 @@ class VectorLaplace
   private:
     grid::shell::DistributedDomain domain_;
 
-    grid::Grid3DDataVec< ScalarT, 3 >                        grid_;
-    grid::Grid2DDataScalar< ScalarT >                        radii_;
+    grid::Grid3DDataVec< CoordScalarT, 3 >                        grid_;
+    grid::Grid2DDataScalar< CoordScalarT >                        radii_;
     grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag > boundary_mask_data_;
 
     BoundaryConditions bcs_;
@@ -58,8 +63,8 @@ class VectorLaplace
   public:
     VectorLaplace(
         const grid::shell::DistributedDomain&                           domain,
-        const grid::Grid3DDataVec< ScalarT, 3 >&                        grid,
-        const grid::Grid2DDataScalar< ScalarT >&                        radii,
+        const grid::Grid3DDataVec< CoordScalarT, 3 >&                        grid,
+        const grid::Grid2DDataScalar< CoordScalarT >&                        radii,
         const grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag >& boundary_mask_data,
         BoundaryConditions                                              bcs,
         bool                                                            diagonal,

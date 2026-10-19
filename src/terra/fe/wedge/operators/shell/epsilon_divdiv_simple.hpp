@@ -13,7 +13,12 @@
 
 namespace terra::fe::wedge::operators::shell {
 
-template < typename ScalarT, int VecDim = 3 >
+// CoordScalarT is the precision of the STORED node coordinates and radii. It
+// defaults to ScalarT, so existing instantiations are unchanged. Pass double to
+// decouple it: the Jacobian is formed by differencing coordinates, which loses the
+// geometry entirely in 16-bit and is already marginal in single. ScalarT governs
+// the stored fields src/dst and the coefficient -- where the memory traffic is.
+template < typename ScalarT, int VecDim = 3, typename CoordScalarT = ScalarT >
 class EpsilonDivDivSimple
 {
   public:
@@ -28,8 +33,8 @@ class EpsilonDivDivSimple
 
     grid::shell::DistributedDomain domain_;
 
-    grid::Grid3DDataVec< ScalarT, 3 >    grid_;
-    grid::Grid2DDataScalar< ScalarT >    radii_;
+    grid::Grid3DDataVec< CoordScalarT, 3 >    grid_;
+    grid::Grid2DDataScalar< CoordScalarT >    radii_;
     grid::Grid4DDataScalar< ScalarType > k_;
     grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag > mask_;
 
@@ -49,8 +54,8 @@ class EpsilonDivDivSimple
   public:
     EpsilonDivDivSimple(
         const grid::shell::DistributedDomain&    domain,
-        const grid::Grid3DDataVec< ScalarT, 3 >  grid,
-        const grid::Grid2DDataScalar< ScalarT >  radii,
+        const grid::Grid3DDataVec< CoordScalarT, 3 >  grid,
+        const grid::Grid2DDataScalar< CoordScalarT >  radii,
         const grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag >& mask,
         const grid::Grid4DDataScalar< ScalarT >  k,
         bool                                     treat_boundary,
@@ -77,10 +82,10 @@ class EpsilonDivDivSimple
     const grid::shell::DistributedDomain& get_domain() const { return domain_; }
 
     /// @brief Getter for radii member
-    grid::Grid2DDataScalar< ScalarT > get_radii() const { return radii_; }
+    grid::Grid2DDataScalar< CoordScalarT > get_radii() const { return radii_; }
 
     /// @brief Getter for grid member
-    grid::Grid3DDataVec< ScalarT, 3 > get_grid() const { return grid_; }
+    grid::Grid3DDataVec< CoordScalarT, 3 > get_grid() const { return grid_; }
 
    
 

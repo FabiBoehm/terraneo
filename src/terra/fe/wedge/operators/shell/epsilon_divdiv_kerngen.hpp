@@ -55,13 +55,22 @@ using terra::linalg::trafo::trafo_mat_cartesian_to_normal_tangential;
  * `apply_impl()` dispatches to a different kernel launch per path.
  * This avoids a runtime branch inside the hot device kernel.
  */
-template < typename ScalarT, int VecDim = 3 >
+// CoordScalarT is the precision of the STORED node coordinates and radii. It
+// defaults to ScalarT, so existing instantiations are unchanged. Pass double to
+// decouple it: the Jacobian is formed by differencing coordinates, which loses the
+// geometry entirely in 16-bit and is already marginal in single. ScalarT governs
+// the stored fields src/dst and the coefficient -- where the memory traffic is.
+template < typename ScalarT, int VecDim = 3, typename CoordScalarT = ScalarT >
 class EpsilonDivDivKerngen
 {
   public:
     using SrcVectorType                 = linalg::VectorQ1Vec< ScalarT, VecDim >;
     using DstVectorType                 = linalg::VectorQ1Vec< ScalarT, VecDim >;
     using ScalarType                    = ScalarT;
+    /// Precision of geometry: stored coordinates, radii, quadrature, Jacobians and
+    /// everything derived from them. Decoupled from ScalarType so a reduced field
+    /// precision never reaches the coordinate differencing in the Jacobian.
+    using GeomT                         = CoordScalarT;
     static constexpr int LocalMatrixDim = 18;
     using Grid4DDataLocalMatrices = terra::grid::Grid4DDataMatrices< ScalarType, LocalMatrixDim, LocalMatrixDim, 2 >;
     using LocalMatrixStorage      = linalg::solvers::LocalMatrixStorage< ScalarType, LocalMatrixDim >;
@@ -73,8 +82,8 @@ class EpsilonDivDivKerngen
 
     // Domain and geometry / coefficients
     grid::shell::DistributedDomain                           domain_;
-    grid::Grid3DDataVec< ScalarT, 3 >                        grid_;   ///< Lateral shell geometry (unit sphere coords)
-    grid::Grid2DDataScalar< ScalarT >                        radii_;  ///< Radial coordinates per local subdomain
+    grid::Grid3DDataVec< CoordScalarT, 3 >                        grid_;   ///< Lateral shell geometry (unit sphere coords)
+    grid::Grid2DDataScalar< CoordScalarT >                        radii_;  ///< Radial coordinates per local subdomain
     grid::Grid4DDataScalar< ScalarType >                     k_;      ///< Scalar coefficient field
     grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag > mask_;   ///< Boundary flags per cell/node
     BoundaryConditions                                       bcs_;    ///< CMB and SURFACE boundary conditions
@@ -94,8 +103,8 @@ class EpsilonDivDivKerngen
 
     // Quadrature (Felippa 1x1 on wedge)
     const int                num_quad_points = quadrature::quad_felippa_1x1_num_quad_points;
-    dense::Vec< ScalarT, 3 > quad_points[quadrature::quad_felippa_1x1_num_quad_points];
-    ScalarT                  quad_weights[quadrature::quad_felippa_1x1_num_quad_points];
+    dense::Vec< GeomT, 3 > quad_points[quadrature::quad_felippa_1x1_num_quad_points];
+    GeomT                  quad_weights[quadrature::quad_felippa_1x1_num_quad_points];
 
     // Local subdomain extents (in cells)
     int local_subdomains_;
@@ -172,8 +181,8 @@ class EpsilonDivDivKerngen
   public:
     EpsilonDivDivKerngen(
         const grid::shell::DistributedDomain&                           domain,
-        const grid::Grid3DDataVec< ScalarT, 3 >&                        grid,
-        const grid::Grid2DDataScalar< ScalarT >&                        radii,
+        const grid::Grid3DDataVec< CoordScalarT, 3 >&                        grid,
+        const grid::Grid2DDataScalar< CoordScalarT >&                        radii,
         const grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag >& mask,
         const grid::Grid4DDataScalar< ScalarT >&                        k,
         BoundaryConditions                                              bcs,
@@ -403,8 +412,8 @@ class EpsilonDivDivKerngen
 
     const grid::Grid4DDataScalar< ScalarType >& k_grid_data() { return k_; }
     const grid::shell::DistributedDomain&       get_domain() const { return domain_; }
-    grid::Grid2DDataScalar< ScalarT >           get_radii() const { return radii_; }
-    grid::Grid3DDataVec< ScalarT, 3 >           get_grid() { return grid_; }
+    grid::Grid2DDataScalar< CoordScalarT >           get_radii() const { return radii_; }
+    grid::Grid3DDataVec< CoordScalarT, 3 >           get_grid() { return grid_; }
 
     KOKKOS_INLINE_FUNCTION
     bool has_flag(
@@ -2012,25 +2021,26 @@ class EpsilonDivDivKerngen
     }
 
     KOKKOS_INLINE_FUNCTION void assemble_trial_test_vecs(
-        const int                               wedge,
-        const dense::Vec< ScalarType, VecDim >& quad_point,
-        const ScalarType                        quad_weight,
-        const ScalarT                           r_1,
-        const ScalarT                           r_2,
-        dense::Vec< ScalarT, 3 > ( *wedge_phy_surf )[3],
-        const dense::Vec< ScalarT, 6 >*           k_local_hex,
-        const int                                 dimi,
-        const int                                 dimj,
-        dense::Mat< ScalarType, VecDim, VecDim >* sym_grad_i,
-        dense::Mat< ScalarType, VecDim, VecDim >* sym_grad_j,
-        ScalarType&                               jdet_keval_quadweight ) const
+        const int                            wedge,
+        const dense::Vec< GeomT, VecDim >&   quad_point,
+        const GeomT                          quad_weight,
+        const GeomT                          r_1,
+        const GeomT                          r_2,
+        dense::Vec< GeomT, 3 > ( *wedge_phy_surf )[3],
+        const dense::Vec< ScalarT, 6 >*   k_local_hex,
+        const int                         dimi,
+        const int                         dimj,
+        dense::Mat< GeomT, VecDim, VecDim >* sym_grad_i,
+        dense::Mat< GeomT, VecDim, VecDim >* sym_grad_j,
+        GeomT&                               jdet_keval_quadweight ) const
     {
-        dense::Mat< ScalarType, VecDim, VecDim >       J       = jac( wedge_phy_surf[wedge], r_1, r_2, quad_point );
-        const auto                                     det     = J.det();
-        const auto                                     abs_det = Kokkos::abs( det );
-        const dense::Mat< ScalarType, VecDim, VecDim > J_inv_transposed = J.inv_transposed( det );
+        dense::Mat< GeomT, VecDim, VecDim >       J       = jac( wedge_phy_surf[wedge], r_1, r_2, quad_point );
+        const auto                                det     = J.det();
+        const auto                                abs_det = Kokkos::abs( det );
+        const dense::Mat< GeomT, VecDim, VecDim > J_inv_transposed = J.inv_transposed( det );
 
-        ScalarType k_eval = 0.0;
+        // The coefficient is a stored field, so it is read in ScalarT and promoted.
+        GeomT k_eval = 0.0;
         for ( int k = 0; k < num_nodes_per_wedge; k++ )
         {
             k_eval += shape( k, quad_point ) * k_local_hex[wedge]( k );
@@ -2056,11 +2066,11 @@ class EpsilonDivDivKerngen
         const int r_cell,
         const int wedge ) const
     {
-        dense::Vec< ScalarT, 3 > wedge_phy_surf[num_wedges_per_hex_cell][num_nodes_per_wedge_surface] = {};
+        dense::Vec< GeomT, 3 > wedge_phy_surf[num_wedges_per_hex_cell][num_nodes_per_wedge_surface] = {};
         wedge_surface_physical_coords( wedge_phy_surf, grid_, local_subdomain_id, x_cell, y_cell );
 
-        const ScalarT r_1 = radii_( local_subdomain_id, r_cell );
-        const ScalarT r_2 = radii_( local_subdomain_id, r_cell + 1 );
+        const GeomT r_1 = radii_( local_subdomain_id, r_cell );
+        const GeomT r_2 = radii_( local_subdomain_id, r_cell + 1 );
 
         dense::Vec< ScalarT, 6 > k_local_hex[num_wedges_per_hex_cell];
         extract_local_wedge_scalar_coefficients( k_local_hex, local_subdomain_id, x_cell, y_cell, r_cell, k_ );
@@ -2073,9 +2083,10 @@ class EpsilonDivDivKerngen
             {
                 for ( int q = 0; q < num_quad_points; q++ )
                 {
-                    dense::Mat< ScalarType, VecDim, VecDim > sym_grad_i[num_nodes_per_wedge];
-                    dense::Mat< ScalarType, VecDim, VecDim > sym_grad_j[num_nodes_per_wedge];
-                    ScalarType                               jdet_keval_quadweight = 0;
+                    dense::Mat< GeomT, VecDim, VecDim > sym_grad_i[num_nodes_per_wedge];
+                    dense::Mat< GeomT, VecDim, VecDim > sym_grad_j[num_nodes_per_wedge];
+                    // Assembly runs in GeomT; the accumulation into A narrows to ScalarT.
+                    GeomT                               jdet_keval_quadweight = 0;
 
                     assemble_trial_test_vecs(
                         wedge,
@@ -2111,5 +2122,9 @@ class EpsilonDivDivKerngen
 
 static_assert( linalg::GCACapable< EpsilonDivDivKerngen< float > > );
 static_assert( linalg::GCACapable< EpsilonDivDivKerngen< double > > );
+// Reduced field precision over double-precision geometry. GCA is intentionally not
+// claimed for these: the assembled-matrix path stores in ScalarT, which is a
+// separate question from the matrix-free apply.
+static_assert( linalg::OperatorLike< EpsilonDivDivKerngen< float, 3, double > > );
 
 } // namespace terra::fe::wedge::operators::shell

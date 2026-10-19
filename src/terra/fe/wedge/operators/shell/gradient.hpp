@@ -24,7 +24,12 @@ using terra::grid::shell::BoundaryConditionFlag;
 using terra::grid::shell::BoundaryConditions;
 using terra::grid::shell::ShellBoundaryFlag;
 using terra::linalg::trafo::trafo_mat_cartesian_to_normal_tangential;
-template < typename ScalarT >
+// CoordScalarT is the precision of the STORED node coordinates and radii. It
+// defaults to ScalarT, so existing instantiations are unchanged. Pass double to
+// decouple it: the Jacobian is formed by differencing coordinates, which loses the
+// geometry entirely in 16-bit and is already marginal in single. ScalarT governs
+// the stored fields src/dst and the coefficient -- where the memory traffic is.
+template < typename ScalarT, typename CoordScalarT = ScalarT >
 class Gradient
 {
   public:
@@ -36,8 +41,8 @@ class Gradient
     grid::shell::DistributedDomain domain_fine_;
     grid::shell::DistributedDomain domain_coarse_;
 
-    grid::Grid3DDataVec< ScalarT, 3 >                        grid_fine_;
-    grid::Grid2DDataScalar< ScalarT >                        radii_;
+    grid::Grid3DDataVec< CoordScalarT, 3 >                        grid_fine_;
+    grid::Grid2DDataScalar< CoordScalarT >                        radii_;
     grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag > boundary_mask_fine_;
     BoundaryConditions                                       bcs_;
 
@@ -54,8 +59,8 @@ class Gradient
     Gradient(
         const grid::shell::DistributedDomain&                           domain_fine,
         const grid::shell::DistributedDomain&                           domain_coarse,
-        const grid::Grid3DDataVec< ScalarT, 3 >&                        grid_fine,
-        const grid::Grid2DDataScalar< ScalarT >&                        radii_fine,
+        const grid::Grid3DDataVec< CoordScalarT, 3 >&                        grid_fine,
+        const grid::Grid2DDataScalar< CoordScalarT >&                        radii_fine,
         const grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag >& boundary_mask_fine,
         BoundaryConditions                                              bcs,
         linalg::OperatorApplyMode         operator_apply_mode = linalg::OperatorApplyMode::Replace,

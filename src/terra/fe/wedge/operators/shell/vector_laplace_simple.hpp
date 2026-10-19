@@ -13,7 +13,12 @@
 
 namespace terra::fe::wedge::operators::shell {
 
-template < typename ScalarT, int VecDim = 3 >
+// CoordScalarT is the precision of the STORED node coordinates and radii. It
+// defaults to ScalarT, so existing instantiations are unchanged. Pass double to
+// decouple it: the Jacobian is formed by differencing coordinates, which loses the
+// geometry entirely in 16-bit and is already marginal in single. ScalarT governs
+// the stored fields src/dst and the coefficient -- where the memory traffic is.
+template < typename ScalarT, int VecDim = 3, typename CoordScalarT = ScalarT >
 class VectorLaplaceSimple
 {
   public:
@@ -24,8 +29,8 @@ class VectorLaplaceSimple
   private:
     grid::shell::DistributedDomain domain_;
 
-    grid::Grid3DDataVec< ScalarT, 3 > grid_;
-    grid::Grid2DDataScalar< ScalarT > radii_;
+    grid::Grid3DDataVec< CoordScalarT, 3 > grid_;
+    grid::Grid2DDataScalar< CoordScalarT > radii_;
 
     bool treat_boundary_;
     bool diagonal_;
@@ -42,8 +47,8 @@ class VectorLaplaceSimple
   public:
     VectorLaplaceSimple(
         const grid::shell::DistributedDomain&    domain,
-        const grid::Grid3DDataVec< ScalarT, 3 >& grid,
-        const grid::Grid2DDataScalar< ScalarT >& radii,
+        const grid::Grid3DDataVec< CoordScalarT, 3 >& grid,
+        const grid::Grid2DDataScalar< CoordScalarT >& radii,
         bool                                     treat_boundary,
         bool                                     diagonal,
         linalg::OperatorApplyMode                operator_apply_mode = linalg::OperatorApplyMode::Replace,
