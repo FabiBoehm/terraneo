@@ -645,6 +645,7 @@ RunResult run_ablock_mg( int    min_level,
                          double perturb_amp,
                          double rmu,
                          int    gca,
+                         bool   no_stokes_prec, // --no-stokes-prec: bypass PrecStokes entirely
                          int    max_cycles,
                          BCKind bc,
                          linalg::solvers::InterpolationMode gca_interp,
@@ -1106,9 +1107,25 @@ RunResult run_ablock_mg( int    min_level,
         for ( int i = 0; i < 2 * outer_restart + 4; ++i )
             tmp_fgmres.emplace_back( "tmp_fgmres_" + std::to_string( i ),
                 domains[velocity_level], domains[pressure_level], mask_data[velocity_level], mask_data[pressure_level] );
-        linalg::solvers::FGMRES< Stokes, PrecStokes > fgmres( tmp_fgmres, outer_opts, outer_table, prec_stokes );
-        fgmres.set_tag( "stokes_fgmres" );
-        linalg::solvers::solve( fgmres, K_op, u_stokes, f_full );
+        if ( no_stokes_prec )
+        {
+            // Genuinely unpreconditioned: FGMRES's default preconditioner is
+            // IdentitySolver, so the whole block-triangular operator is bypassed.
+            // Distinct from --ablock-prec none, which keeps the Schur block and only
+            // makes the velocity block identity.
+            linalg::solvers::FGMRES< Stokes > fgmres( tmp_fgmres, outer_opts, outer_table );
+            // Same tag as the preconditioned branch: the table is printed and
+            // reduced via query_rows_equals( "tag", "stokes_fgmres" ), so a
+            // distinct tag here silently yields an empty convergence table.
+            fgmres.set_tag( "stokes_fgmres" );
+            linalg::solvers::solve( fgmres, K_op, u_stokes, f_full );
+        }
+        else
+        {
+            linalg::solvers::FGMRES< Stokes, PrecStokes > fgmres( tmp_fgmres, outer_opts, outer_table, prec_stokes );
+            fgmres.set_tag( "stokes_fgmres" );
+            linalg::solvers::solve( fgmres, K_op, u_stokes, f_full );
+        }
     }
     else
     {
@@ -1408,6 +1425,7 @@ int main( int argc, char** argv )
     ABlockPrec  ablock_prec  = ABlockPrec::DOUBLE;  // --ablock-prec double|float|fp16|bf16 (full-Stokes only)
     ABlockArith ablock_arith = ABlockArith::LOW; // --ablock-arith low|double (low = follow --ablock-prec)
     double      hourglass_c  = 0.0;              // --hourglass C (0 = off, 0.3 as in EpsDivDivSimpleStab)
+    bool        no_stokes_prec = false;         // --no-stokes-prec (unpreconditioned control)
     double      outer_tol    = 1e-6;             // --outer-tol T
     OuterSolver outer_solver = OuterSolver::FGMRES; // --outer-solver fgmres|ir
     int         outer_restart_in = 0;               // --outer-restart N (0 = default 50)
@@ -1467,6 +1485,11 @@ int main( int argc, char** argv )
                                                                              : KrylovPrec::DOUBLE;
         }
     }
+    // Valueless flag, so it gets its own scan: the loop above advances by one and
+    // stops at i + 1 < argc, which would miss it in the final argument position.
+    for ( int i = 1; i < argc; ++i )
+        if ( std::string( argv[i] ) == "--no-stokes-prec" ) no_stokes_prec = true;
+
     bool verify_gca = false;
     for ( int i = 1; i < argc; ++i )
         if ( std::string( argv[i] ) == "--verify-gca" ) verify_gca = true;
@@ -1508,6 +1531,8 @@ int main( int argc, char** argv )
                   << ( full_stokes ? std::string( ", outer = " ) + outer_solver_name( outer_solver )
                                            + ", krylov-basis = " + krylov_prec_name( krylov_prec )
                                            + krylov_prec_storage_note( krylov_prec )
+                                           + ( no_stokes_prec ? std::string( ", UNPRECONDITIONED (PrecStokes bypassed)" )
+                                                              : std::string() )
                                            + ", A-block prec = " + ablock_prec_name( ablock_prec )
                                            + ablock_prec_note( ablock_prec )
                                            + ", A-block arith = " + ablock_arith_name( ablock_arith )
@@ -1537,7 +1562,8 @@ int main( int argc, char** argv )
             util::logroot << "\n--- rmu = " << rmu << ", " << s.name << " ---\n";
 
             const auto res =
-                run_ablock_mg( min_level, max_level, cheby_order, perturb_amp, rmu, s.gca, max_cycles, bc, s.interp,
+                run_ablock_mg( min_level, max_level, cheby_order, perturb_amp, rmu, s.gca, no_stokes_prec,
+                               max_cycles, bc, s.interp,
                                visc_profile, coarse_tol, full_stokes, krylov_prec, ablock_prec, ablock_arith,
                                hourglass_c, outer_tol, outer_solver, outer_restart_in );
 
@@ -1545,7 +1571,9 @@ int main( int argc, char** argv )
                 { { "rmu", rmu },
                   { "gca", s.gca },
                   { "krylov", std::string( krylov_prec_name( krylov_prec ) ) },
-                  { "ablock_prec", std::string( ablock_prec_name( ablock_prec ) ) },
+                  { "ablock_prec",
+                    no_stokes_prec ? std::string( "unpreconditioned" )
+                                   : std::string( ablock_prec_name( ablock_prec ) ) },
                   { "ablock_arith", std::string( ablock_arith_name( ablock_arith ) ) },
                   { "hourglass", hourglass_c },
                   { "outer_solver", std::string( outer_solver_name( outer_solver ) ) },
