@@ -64,10 +64,6 @@
 #include "terra/linalg/solvers/diagonal_solver.hpp"
 
 // Full-Stokes outer solve: w-BFBT Schur preconditioner (from the mc app).
-#include "../apps/mantlecirculation/src/polymorphic_schur_preconditioner.hpp"
-#include "../apps/mantlecirculation/src/wbfbt_pressure_poisson_explicit_kw.hpp"
-#include "../apps/mantlecirculation/src/wbfbt_schur_preconditioner.hpp"
-#include "../apps/mantlecirculation/src/wbfbt_weighted_lumped_velocity_mass.hpp"
 
 #include "terra/dense/mat.hpp"
 #include "terra/grid/grid_types.hpp"
@@ -101,8 +97,6 @@ using linalg::VectorQ1Scalar;
 using linalg::VectorQ1Vec;
 using linalg::solvers::TwoGridGCA;
 using terra::grid::shell::BoundaryConditions;
-
-namespace mc = terra::mantlecirculation;
 
 // Krylov-basis storage precision for the full-Stokes outer FGMRES. DOUBLE = plain
 // FGMRES (basis in solution precision); FLOAT/BF16/FP16 = FGMRESLowMem with the
@@ -913,40 +907,31 @@ RunResult run_ablock_mg( int    min_level,
         domains[pressure_level], coords_shell[pressure_level], coords_radii[pressure_level], k_pm.grid_data(), false );
     pmass.set_lumped_diagonal( true );
 
-    auto solver_table = std::make_shared< util::Table >();
-
-    // w-BFBT Schur: explicit K_w (Neumann B/B^T) + lumped C_w(sqrt eta).
-    VectorQ1Scalar< ScalarType > sqrt_eta_velocity(
-        "sqrt_eta_velocity", domains[velocity_level], mask_data[velocity_level] );
-    linalg::assign( sqrt_eta_velocity, eta[velocity_level] );
+    // Schur approximation: the inverse of the lumped pressure mass, whose coefficient
+    // is already 1/eta (k_pm above). The lumped matrix applied to a vector of ones is
+    // its own diagonal, so one apply gives it.
+    //
+    // This replaces the w-BFBT Schur preconditioner, which was a second complete
+    // solver -- an explicit K_w pressure Poisson solve capped at 200 iterations plus a
+    // weighted lumped velocity mass -- running in double on every outer iteration. It
+    // is a better Schur approximation under strong viscosity contrast, but it is not
+    // what this test measures, and its cost and its own precision would confound the
+    // A-block comparison.
+    VectorQ1Scalar< ScalarType > pmass_inv_diag(
+        "pmass_inv_diag", domains[pressure_level], mask_data[pressure_level] );
     {
-        auto v = sqrt_eta_velocity.grid_data();
-        Kokkos::parallel_for( "sqrt_eta", local_domain_md_range_policy_nodes( domains[velocity_level] ),
-            KOKKOS_LAMBDA( const int sd, const int x, const int y, const int r ) {
-                v( sd, x, y, r ) = Kokkos::sqrt( v( sd, x, y, r ) );
-            } );
-        Kokkos::fence();
+        VectorQ1Scalar< ScalarType > ones_p( "ones_p", domains[pressure_level], mask_data[pressure_level] );
+        linalg::assign( ones_p, 1.0 );
+        linalg::apply( pmass, ones_p, pmass_inv_diag );
+        linalg::invert_entries( pmass_inv_diag );
     }
-    using WBFBTCw = mc::WBFBTWeightedLumpedVelocityMass< ScalarType, 3 >;
-    WBFBTCw c_w( domains[velocity_level], coords_shell[velocity_level], coords_radii[velocity_level],
-                 mask_data[velocity_level] );
-    c_w.refresh( sqrt_eta_velocity );
 
-    using WBFBTKw = mc::ExplicitKwPressurePoissonSolver< ScalarType, Gradient, Divergence >;
-    auto kw_solver = std::make_shared< WBFBTKw >(
-        K_op_neumann.block_12(), K_op_neumann.block_21(), c_w.inv_diag_velocity(),
-        domains[velocity_level], domains[pressure_level], mask_data[velocity_level], mask_data[pressure_level],
-        /*max_iterations=*/200, /*relative_tol=*/static_cast< ScalarType >( 1e-6 ), solver_table );
-
-    using PrecSchur  = mc::PolymorphicSchurPreconditioner< PressureMass >;
-    using WBFBTSchur = mc::WBFBTSchurPreconditioner< Viscous, Gradient, Divergence, PressureMass >;
-    PrecSchur prec_schur = PrecSchur::make( WBFBTSchur(
-        K_op.block_11(), K_op_neumann.block_12(), K_op_neumann.block_21(), kw_solver, c_w.inv_diag_velocity(),
-        domains[velocity_level], domains[pressure_level], mask_data[velocity_level], mask_data[pressure_level] ) );
+    using PrecSchur = InverseDiagonalPreconditioner< PressureMass >;
+    PrecSchur prec_schur( pmass_inv_diag );
 
     // The (1,1) velocity preconditioner is type-erased so its internal precision --
     // the whole V-cycle hierarchy -- can be chosen at runtime via --ablock-prec, while
-    // the outer FGMRES, the Stokes operator and the Schur block stay in double.
+    // the outer FGMRES, the Stokes operator and the Schur approximation stay in double.
     using VelPrecHandle = linalg::solvers::VelocityPrecHandle< Viscous >;
     using PrecStokes    = linalg::solvers::BlockTriangularPreconditioner2x2<
         Stokes, Viscous, PressureMass, Gradient, VelPrecHandle, PrecSchur >;

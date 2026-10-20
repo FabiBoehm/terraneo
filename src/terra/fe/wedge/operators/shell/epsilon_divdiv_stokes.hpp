@@ -15,7 +15,11 @@
 using terra::grid::shell::BoundaryConditions;
 namespace terra::fe::wedge::operators::shell {
 
-template < typename ScalarT, int VecDim = 3 >
+// CoordScalarT is the precision of the STORED node coordinates and radii, forwarded
+// to every block. It defaults to ScalarT, so existing instantiations are unchanged.
+// Pass double to decouple it: the Jacobian is formed by differencing coordinates,
+// which loses the geometry entirely in 16-bit. ScalarT governs the stored fields.
+template < typename ScalarT, int VecDim = 3, typename CoordScalarT = ScalarT >
 class EpsDivDivStokes
 {
   public:
@@ -23,16 +27,16 @@ class EpsDivDivStokes
     using DstVectorType = linalg::VectorQ1IsoQ2Q1< ScalarT, VecDim >;
     using ScalarType    = ScalarT;
 
-    using Block11Type = EpsilonDivDivKerngen< ScalarType, VecDim >;
-    using Block12Type = Gradient< ScalarType >;
-    using Block21Type = Divergence< ScalarType >;
+    using Block11Type = EpsilonDivDivKerngen< ScalarType, VecDim, CoordScalarT >;
+    using Block12Type = Gradient< ScalarType, CoordScalarT >;
+    using Block21Type = Divergence< ScalarType, CoordScalarT >;
     using Block22Type = Zero< ScalarType >;
 
   private:
-    Block11Type              A_;
-    Gradient< ScalarType >   B_T_;
-    Divergence< ScalarType > B_;
-    Zero< ScalarType >       O_;
+    Block11Type        A_;
+    Block12Type        B_T_;
+    Block21Type        B_;
+    Zero< ScalarType > O_;
 
     bool diagonal_;
 
@@ -40,8 +44,8 @@ class EpsDivDivStokes
     EpsDivDivStokes(
         const grid::shell::DistributedDomain&                           domain_fine,
         const grid::shell::DistributedDomain&                           domain_coarse,
-        const grid::Grid3DDataVec< ScalarType, 3 >&                     grid,
-        const grid::Grid2DDataScalar< ScalarType >&                     radii,
+        const grid::Grid3DDataVec< CoordScalarT, 3 >&                    grid,
+        const grid::Grid2DDataScalar< CoordScalarT >&                   radii,
         const grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag >& mask,
         const grid::Grid4DDataScalar< ScalarType >&                     k,
         BoundaryConditions                                              bcs,
