@@ -28,6 +28,7 @@
 #include "terra/kokkos/kokkos_wrapper.hpp"
 #include "util/cli11_helper.hpp"
 #include "util/info.hpp"
+#include "util/floating_point.hpp"
 #include "util/table.hpp"
 
 using namespace terra;
@@ -135,8 +136,10 @@ struct Parameters
 {
     int min_level                   = 1;
     int max_level                   = 6;
-    int executions                  = 5;
-    int refinement_level_subdomains = 0;
+    int  executions                  = 5;
+    int  refinement_level_subdomains = 0;
+    bool precision_sweep             = false;
+    bool precision_matrix            = false;
 };
 
 template < OperatorLike OperatorT >
@@ -442,6 +445,190 @@ BenchmarkData
     return BenchmarkData{ level, dofs, duration };
 }
 
+
+// =============================================================================
+// Precision sweep over the EpsDivDivKerngen fast path.
+// =============================================================================
+//
+// The enum-driven benchmarks above pin each arm to one scalar type, with the
+// field vectors built up front in run(). A 16-bit arm cannot reuse that: the
+// storage type decides the vectors, the coefficient and the operator's own
+// arithmetic, so each precision gets its own domain and its own fields here.
+//
+// The configuration deliberately mirrors the mixed-precision A-block study
+// (--ablock-prec M --ablock-arith low): geometry stays in double while the
+// stored fields AND the fast-path contraction follow M. That is
+// EpsilonDivDivKerngen< M, 3, double, M >.
+//
+// What this measures is throughput of one matvec, so it answers the question the
+// end-to-end solve timings could not: whether the operator is bandwidth-bound at
+// a given level. If it is, halving the bytes per node should show up as nearly
+// double the DoF rate; if the kernel is launch- or latency-bound, the precisions
+// collapse onto one another.
+
+/// Traffic model for one application: read src (3 components), write dst (3),
+/// read the coefficient (1), all in M. Geometry is double and largely cached
+/// across the tile, so it is excluded rather than guessed at.
+template < typename M >
+double modelled_bytes( long dofs_scalar )
+{
+    return static_cast< double >( dofs_scalar ) * ( 3.0 + 3.0 + 1.0 ) * sizeof( M );
+}
+
+/// @tparam S storage precision of the fields (src, dst, coefficient)
+/// @tparam A arithmetic precision of the fast-path contraction
+///
+/// Keeping these separate is what attributes the cost: S alone changes the bytes
+/// moved and the load/store path, A alone changes the arithmetic. Kokkos' 16-bit
+/// scalar operators convert to float per operation, so an A = half arm pays a
+/// conversion on every multiply-add whether or not the storage is narrow.
+template < typename S, typename A = S >
+BenchmarkData run_precision( const int level, const int executions, const int refinement_level_subdomains )
+{
+    const auto domain = grid::shell::DistributedDomain::create_uniform(
+        level, level, 0.5, 1.0, refinement_level_subdomains, refinement_level_subdomains );
+
+    // Geometry in double, as in the solver: CoordScalarT = double.
+    const auto coords_shell = grid::shell::subdomain_unit_sphere_single_shell_coords< double >( domain );
+    const auto coords_radii = grid::shell::subdomain_shell_radii< double >( domain );
+
+    auto mask_data          = grid::setup_node_ownership_mask_data( domain );
+    auto boundary_mask_data = grid::shell::setup_boundary_mask_data( domain );
+
+    const auto dofs_scalar = kernels::common::count_masked< long >( mask_data, grid::NodeOwnershipFlag::OWNED );
+    const auto dofs_vec    = 3 * dofs_scalar;
+
+    VectorQ1Vec< S >    src( "src_prec", domain, mask_data );
+    VectorQ1Vec< S >    dst( "dst_prec", domain, mask_data );
+    VectorQ1Scalar< S > coeff( "coeff_prec", domain, mask_data );
+
+    linalg::assign( coeff, util::narrow< S >( 1.0 ) );
+    linalg::randomize( src );
+
+    BoundaryConditions bcs = {
+        { CMB, DIRICHLET },
+        { SURFACE, DIRICHLET },
+    };
+
+    // Storage S, fast-path arithmetic A, geometry double.
+    EpsilonDivDivKerngen< S, 3, double, A > op(
+        domain, coords_shell, coords_radii, boundary_mask_data, coeff.grid_data(), bcs, false );
+
+    const double duration = measure_run_time( executions, op, src, dst );
+
+    return BenchmarkData{ level, dofs_vec, duration };
+}
+
+template < typename S, typename A = S >
+void sweep_one_precision( const char* name,
+                          const int   min_level,
+                          const int   max_level,
+                          const int   executions,
+                          const int   refinement_level_subdomains,
+                          const int   world_size )
+{
+    logroot << "EpsDivDivKerngen precision sweep: " << name << " (storage " << sizeof( S )
+            << " B, arithmetic " << sizeof( A ) << " B, geometry in double)" << std::endl;
+
+    util::Table table;
+
+    for ( int level = min_level; level <= max_level; ++level )
+    {
+        const auto data = run_precision< S, A >( level, executions, refinement_level_subdomains );
+        const double gdofs = data.dofs / data.duration / 1e9;
+        const double gbs   = modelled_bytes< S >( data.dofs / 3 ) / data.duration / 1e9;
+
+        table.add_row( { { "precision", std::string( name ) },
+                         { "bytes", static_cast< long >( sizeof( S ) ) },
+                         { "arith_bytes", static_cast< long >( sizeof( A ) ) },
+                         { "level", level },
+                         { "dofs", data.dofs },
+                         { "duration (s)", data.duration },
+                         { "GDoF/s", gdofs },
+                         { "modelled GB/s", gbs } } );
+    }
+
+    table.print_pretty();
+
+    if ( mpi::rank() == 0 )
+    {
+        std::ofstream out( "./csv/prec_" + std::string( name ) + "_np" + std::to_string( world_size ) + "_ml" +
+                           std::to_string( max_level ) + ".csv" );
+        table.print_csv( out );
+    }
+    table.print_csv( logroot );
+    logroot << std::endl << std::endl;
+}
+
+void run_precision_sweep( const int min_level,
+                          const int max_level,
+                          const int executions,
+                          const int refinement_level_subdomains )
+{
+    logroot << "Running the EpsDivDivKerngen precision sweep." << std::endl;
+    logroot << "min_level:            " << min_level << std::endl;
+    logroot << "max_level:            " << max_level << std::endl;
+    logroot << "executions per level: " << executions << std::endl;
+    logroot << std::endl;
+
+    // Kokkos falls back to float when a backend has no native 16-bit type, which
+    // would make a 4-byte run read as 2-byte. Say so rather than let it pass.
+#if defined( KOKKOS_HALF_T_IS_FLOAT ) && KOKKOS_HALF_T_IS_FLOAT
+    logroot << "WARNING: half_t is float on this backend; the fp16 arm is emulated." << std::endl;
+#endif
+#if defined( KOKKOS_BHALF_T_IS_FLOAT ) && KOKKOS_BHALF_T_IS_FLOAT
+    logroot << "WARNING: bhalf_t is float on this backend; the bf16 arm is emulated." << std::endl;
+#endif
+
+    int world_size = 0;
+    MPI_Comm_size( MPI_COMM_WORLD, &world_size );
+
+    sweep_one_precision< double >( "double", min_level, max_level, executions, refinement_level_subdomains, world_size );
+    sweep_one_precision< float >( "float", min_level, max_level, executions, refinement_level_subdomains, world_size );
+    sweep_one_precision< Kokkos::Experimental::bhalf_t >(
+        "bf16", min_level, max_level, executions, refinement_level_subdomains, world_size );
+    sweep_one_precision< Kokkos::Experimental::half_t >(
+        "fp16", min_level, max_level, executions, refinement_level_subdomains, world_size );
+}
+
+
+/// Storage / arithmetic breakdown. Each 16-bit precision appears three times:
+/// matched (both narrow), storage-only (narrow fields, double arithmetic) and
+/// arithmetic-only (double fields, narrow arithmetic). The differences separate
+/// the cost of the narrow load/store path from the cost of the narrow arithmetic.
+void run_precision_matrix( const int min_level,
+                           const int max_level,
+                           const int executions,
+                           const int refinement_level_subdomains )
+{
+    using half  = Kokkos::Experimental::half_t;
+    using bhalf = Kokkos::Experimental::bhalf_t;
+
+    logroot << "Storage / arithmetic breakdown for the EpsDivDivKerngen fast path." << std::endl;
+    logroot << "min_level: " << min_level << ", max_level: " << max_level
+            << ", executions per level: " << executions << std::endl
+            << std::endl;
+
+    int world_size = 0;
+    MPI_Comm_size( MPI_COMM_WORLD, &world_size );
+
+    const int mn = min_level, mx = max_level, ex = executions, r = refinement_level_subdomains;
+
+    sweep_one_precision< double, double >( "double", mn, mx, ex, r, world_size );
+
+    sweep_one_precision< float, float >( "float_matched", mn, mx, ex, r, world_size );
+    sweep_one_precision< float, double >( "float_store_only", mn, mx, ex, r, world_size );
+    sweep_one_precision< double, float >( "float_arith_only", mn, mx, ex, r, world_size );
+
+    sweep_one_precision< bhalf, bhalf >( "bf16_matched", mn, mx, ex, r, world_size );
+    sweep_one_precision< bhalf, double >( "bf16_store_only", mn, mx, ex, r, world_size );
+    sweep_one_precision< double, bhalf >( "bf16_arith_only", mn, mx, ex, r, world_size );
+
+    sweep_one_precision< half, half >( "fp16_matched", mn, mx, ex, r, world_size );
+    sweep_one_precision< half, double >( "fp16_store_only", mn, mx, ex, r, world_size );
+    sweep_one_precision< double, half >( "fp16_arith_only", mn, mx, ex, r, world_size );
+}
+
 void run_all( const int min_level, const int max_level, const int executions, const int refinement_level_subdomains )
 {
     logroot << "Running operator (matvec) benchmarks." << std::endl;
@@ -518,6 +705,12 @@ int main( int argc, char** argv )
         "Refinement level applied to form the subdomains." );
     util::add_option_with_default(
         app, "--executions", parameters.executions, "Number of matrix-vector multiplications to be executed." );
+    app.add_flag( "--precision-matrix",
+                  parameters.precision_matrix,
+                  "Separate storage precision from arithmetic precision for each narrow type." );
+    app.add_flag( "--precision-sweep",
+                  parameters.precision_sweep,
+                  "Instead of the operator list, sweep EpsDivDivKerngen over double/float/bf16/fp16 per level." );
 
     CLI11_PARSE( app, argc, argv );
 
@@ -532,8 +725,21 @@ int main( int argc, char** argv )
     util::print_cli_summary( app, logroot );
     logroot << "\n\n";
 
-    run_all(
-        parameters.min_level, parameters.max_level, parameters.executions, parameters.refinement_level_subdomains );
+    if ( parameters.precision_matrix )
+    {
+        run_precision_matrix(
+            parameters.min_level, parameters.max_level, parameters.executions, parameters.refinement_level_subdomains );
+    }
+    else if ( parameters.precision_sweep )
+    {
+        run_precision_sweep(
+            parameters.min_level, parameters.max_level, parameters.executions, parameters.refinement_level_subdomains );
+    }
+    else
+    {
+        run_all(
+            parameters.min_level, parameters.max_level, parameters.executions, parameters.refinement_level_subdomains );
+    }
 
     MPI_Finalize();
 }
