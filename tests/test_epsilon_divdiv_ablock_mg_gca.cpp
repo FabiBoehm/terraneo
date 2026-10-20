@@ -458,6 +458,30 @@ class LowPrecABlock final
                           << ( linalg::has_nan_or_inf( v ) ? "   <-- NaN/Inf" : "" ) << std::endl;
         };
 
+        // Separate "the 16-bit field cannot hold the value" from "the reduction over it
+        // is wrong": write a known constant, read one entry back on the host, and
+        // max-reduce the same view once in M (what norm_inf does) and once in double.
+        {
+            linalg::assign( *x_m_, static_cast< M >( 3.5 ) );
+            const auto& view = x_m_->grid_data().comp_[0];
+            auto host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace{}, view );
+            double mx_double = 0.0;
+            Kokkos::parallel_reduce(
+                "probe_max",
+                Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >(
+                    { 0, 0, 0, 0 }, { view.extent( 0 ), view.extent( 1 ), view.extent( 2 ), view.extent( 3 ) } ),
+                KOKKOS_LAMBDA( int a, int b2, int c, int d, double& acc ) {
+                    const double v = Kokkos::abs( static_cast< double >( view( a, b2, c, d ) ) );
+                    acc            = v > acc ? v : acc;
+                },
+                Kokkos::Max< double >( mx_double ) );
+            Kokkos::fence();
+            util::logroot << "[probe] assign 3.5: host[0,1,1,1] = " << static_cast< double >( host( 0, 1, 1, 1 ) )
+                          << ", norm_inf (reduced in M) = " << static_cast< double >( linalg::norm_inf( *x_m_ ) )
+                          << ", Max<double> over the same view = " << mx_double << std::endl;
+            linalg::assign( *x_m_, static_cast< M >( 0 ) );
+        }
+
         rep( "b (converted to M)       ", *b_m_ );
         rep( "diag^-1 (fine, in M)     ", inv_diag_m_[fine] );
 
