@@ -656,7 +656,8 @@ RunResult run_ablock_mg( int    min_level,
                          ABlockArith ablock_arith, // fast-path arithmetic precision in that V-cycle
                          double      hourglass_c, // rank-6 hourglass stabilization coefficient (0 = off)
                          double      outer_tol,   // outer relative residual tolerance
-                         OuterSolver outer_solver ) // fgmres or pure iterative refinement
+                         OuterSolver outer_solver, // fgmres or pure iterative refinement
+                         int         outer_restart_in ) // outer FGMRES restart length (<=0 = default 50)
 {
     using ScalarType = double;
 
@@ -1028,7 +1029,11 @@ RunResult run_ablock_mg( int    min_level,
     VelPrecHandle vel_prec( vel_impl );
     PrecStokes prec_stokes( K_op.block_11(), pmass, K_op.block_12(), tri_tmp, vel_prec, prec_schur );
 
-    constexpr int outer_restart = 50;
+    // Restart length of the outer FGMRES. Setting it to max_cycles disables restarting
+    // entirely (full GMRES), which costs 2*restart+4 Stokes vectors of workspace but
+    // keeps the whole Krylov space -- the way to tell a genuine preconditioner floor
+    // from a restart artifact.
+    const int outer_restart = ( outer_restart_in > 0 ) ? outer_restart_in : 50;
     linalg::solvers::FGMRESOptions< ScalarType > outer_opts;
     outer_opts.restart                     = outer_restart;
     outer_opts.max_iterations              = max_cycles;  // reuse --max-cycles as outer iteration cap
@@ -1405,6 +1410,7 @@ int main( int argc, char** argv )
     double      hourglass_c  = 0.0;              // --hourglass C (0 = off, 0.3 as in EpsDivDivSimpleStab)
     double      outer_tol    = 1e-6;             // --outer-tol T
     OuterSolver outer_solver = OuterSolver::FGMRES; // --outer-solver fgmres|ir
+    int         outer_restart_in = 0;               // --outer-restart N (0 = default 50)
     for ( int i = 1; i + 1 < argc; ++i )
     {
         const std::string a = argv[i];
@@ -1434,6 +1440,7 @@ int main( int argc, char** argv )
         }
         else if ( a == "--hourglass" )      hourglass_c = std::atof( argv[i + 1] );
         else if ( a == "--outer-tol" )      outer_tol   = std::atof( argv[i + 1] );
+        else if ( a == "--outer-restart" )  outer_restart_in = std::atoi( argv[i + 1] );
         else if ( a == "--ablock-arith" )
         {
             const std::string q = argv[i + 1];
@@ -1506,6 +1513,8 @@ int main( int argc, char** argv )
                                            + ", A-block arith = " + ablock_arith_name( ablock_arith )
                                            + ", hourglass = " + std::to_string( hourglass_c )
                                            + ", outer tol = " + std::to_string( outer_tol )
+                                           + ", outer restart = "
+                                           + std::to_string( outer_restart_in > 0 ? outer_restart_in : 50 )
                                    : std::string() )
                   << ", BC = " << bc_name
                   << ", viscosity = "
@@ -1530,7 +1539,7 @@ int main( int argc, char** argv )
             const auto res =
                 run_ablock_mg( min_level, max_level, cheby_order, perturb_amp, rmu, s.gca, max_cycles, bc, s.interp,
                                visc_profile, coarse_tol, full_stokes, krylov_prec, ablock_prec, ablock_arith,
-                               hourglass_c, outer_tol, outer_solver );
+                               hourglass_c, outer_tol, outer_solver, outer_restart_in );
 
             summary->add_row(
                 { { "rmu", rmu },
