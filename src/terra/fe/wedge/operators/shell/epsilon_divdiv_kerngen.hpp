@@ -1229,8 +1229,7 @@ class EpsilonDivDivKerngen
 
         Kokkos::parallel_for( Kokkos::TeamThreadRange( team, nlev ), [&]( int lvl ) {
             const int rr = r0 + lvl;
-            r_sh( lvl )  = ( rr <= hex_rad_ ) ? static_cast< GeomT >( radii_( local_subdomain_id, rr ) )
-                                              : static_cast< GeomT >( 0.0 );
+            r_sh( lvl )  = ( rr <= hex_rad_ ) ? static_cast< double >( radii_( local_subdomain_id, rr ) ) : 0.0;
         } );
 
         const int total_pairs = nxy * nlev;
@@ -1723,33 +1722,34 @@ class EpsilonDivDivKerngen
 
             if ( xi <= hex_lat_ && yi <= hex_lat_ )
             {
-                // grid_ is GeomT, which may be a 16-bit wrapper with no implicit
-                // conversion to double, so every hop between the two is spelled out.
-                // The normalisation itself stays in double whatever GeomT is.
+                // This free-slip path stages into double scratch whatever the
+                // template precisions are, so the only conversion needed is widening
+                // the GeomT grid values on the way in -- the 16-bit wrappers have no
+                // implicit conversion to double.
                 const double cx = static_cast< double >( grid_( local_subdomain_id, xi, yi, 0 ) );
                 const double cy = static_cast< double >( grid_( local_subdomain_id, xi, yi, 1 ) );
                 const double cz = static_cast< double >( grid_( local_subdomain_id, xi, yi, 2 ) );
-                coords_sh( n, 0 ) = static_cast< GeomT >( cx );
-                coords_sh( n, 1 ) = static_cast< GeomT >( cy );
-                coords_sh( n, 2 ) = static_cast< GeomT >( cz );
+                coords_sh( n, 0 ) = cx;
+                coords_sh( n, 1 ) = cy;
+                coords_sh( n, 2 ) = cz;
 
                 const double n2 = cx * cx + cy * cy + cz * cz;
                 if ( n2 > 0.0 )
                 {
                     const double invn = 1.0 / Kokkos::sqrt( n2 );
-                    normals_sh( n, 0 ) = static_cast< GeomT >( cx * invn );
-                    normals_sh( n, 1 ) = static_cast< GeomT >( cy * invn );
-                    normals_sh( n, 2 ) = static_cast< GeomT >( cz * invn );
+                    normals_sh( n, 0 ) = cx * invn;
+                    normals_sh( n, 1 ) = cy * invn;
+                    normals_sh( n, 2 ) = cz * invn;
                 }
                 else
                 {
-                    normals_sh( n, 0 ) = normals_sh( n, 1 ) = normals_sh( n, 2 ) = static_cast< GeomT >( 0.0 );
+                    normals_sh( n, 0 ) = normals_sh( n, 1 ) = normals_sh( n, 2 ) = 0.0;
                 }
             }
             else
             {
-                coords_sh( n, 0 ) = coords_sh( n, 1 ) = coords_sh( n, 2 ) = static_cast< GeomT >( 0.0 );
-                normals_sh( n, 0 ) = normals_sh( n, 1 ) = normals_sh( n, 2 ) = static_cast< GeomT >( 0.0 );
+                coords_sh( n, 0 ) = coords_sh( n, 1 ) = coords_sh( n, 2 ) = 0.0;
+                normals_sh( n, 0 ) = normals_sh( n, 1 ) = normals_sh( n, 2 ) = 0.0;
             }
         } );
 
