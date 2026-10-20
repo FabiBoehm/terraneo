@@ -390,16 +390,51 @@ class LowPrecABlock final
         mg_ = std::make_unique< MGM >( p_, r_, a_c_, tmp_r_, tmp_e_, tmp_, smoothers_, smoothers_,
                                        *coarse_solver_, 1, static_cast< M >( 1e-16 ) );
 
-        x_m_ = std::make_unique< VecM >( "mp_x", domains[fine], mask_data[fine] );
-        b_m_ = std::make_unique< VecM >( "mp_b", domains[fine], mask_data[fine] );
+        x_m_      = std::make_unique< VecM >( "mp_x", domains[fine], mask_data[fine] );
+        b_m_      = std::make_unique< VecM >( "mp_b", domains[fine], mask_data[fine] );
+        b_scaled_ = std::make_unique< OuterVec >( "mp_b_scaled", domains[fine], mask_data[fine] );
+
+        // Report the two coefficient fields against what M can represent. Anything
+        // that overflows on conversion becomes an inf and the V-cycle returns NaN, so
+        // this is the first thing to look at when a low-precision arm diverges.
+        double eta_max = 0.0, inv_diag_max = 0.0;
+        bool   eta_overflow = false, inv_diag_overflow = false;
+        for ( size_t l = 0; l < num_levels; ++l )
+        {
+            eta_max      = std::max( eta_max, static_cast< double >( linalg::norm_inf( eta[l] ) ) );
+            inv_diag_max = std::max( inv_diag_max, static_cast< double >( linalg::norm_inf( inverse_diagonals[l] ) ) );
+            eta_overflow      = eta_overflow || linalg::has_nan_or_inf( eta_m_[l] );
+            inv_diag_overflow = inv_diag_overflow || linalg::has_nan_or_inf( inv_diag_m_[l] );
+        }
+        util::logroot << "[LowPrecABlock] M finite_max = "
+                      << static_cast< double >( Kokkos::Experimental::finite_max_v< M > )
+                      << ", norm_min = " << static_cast< double >( Kokkos::Experimental::norm_min_v< M > )
+                      << "\n                max|eta| = " << eta_max << ( eta_overflow ? "  [OVERFLOWS M]" : "" )
+                      << ", max|diag^-1| = " << inv_diag_max << ( inv_diag_overflow ? "  [OVERFLOWS M]" : "" )
+                      << std::endl;
     }
 
     void solve_impl( OuterOp& /*A_double*/, OuterVec& x, const OuterVec& b ) override
     {
-        linalg::convert( b, *b_m_ );
+        // The preconditioner is applied to whatever Krylov vector the outer FGMRES
+        // hands it, whose magnitude follows the outer residual -- here O(1e2) at the
+        // start. fp16 saturates at 65504 and has no normals below 6.1e-5, so the
+        // input is normalized to unit max-norm before it is narrowed and the result is
+        // scaled back afterwards. A V-cycle is linear, so this is exact up to the two
+        // double multiplications.
+        const double scale = static_cast< double >( linalg::norm_inf( b ) );
+        if ( !( scale > 0.0 ) )
+        {
+            linalg::assign( x, 0.0 );
+            return;
+        }
+
+        linalg::lincomb( *b_scaled_, { 1.0 / scale }, { b } );
+        linalg::convert( *b_scaled_, *b_m_ );
         linalg::assign( *x_m_, static_cast< M >( 0 ) );
         linalg::solvers::solve( *mg_, *a_fine_, *x_m_, *b_m_ );
         linalg::convert( *x_m_, x );
+        linalg::lincomb( x, { scale }, { x } );
     }
 
   private:
@@ -417,6 +452,7 @@ class LowPrecABlock final
     std::unique_ptr< CSolvM >      coarse_solver_;
     std::unique_ptr< MGM >         mg_;
     std::unique_ptr< VecM >        x_m_, b_m_;
+    std::unique_ptr< OuterVec >    b_scaled_;
 };
 
 enum class BCKind { DIRICHLET, FREESLIP };
