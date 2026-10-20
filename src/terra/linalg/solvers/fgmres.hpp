@@ -17,10 +17,14 @@ struct FGMRESOptions
     int restart = 30;
 
     /// @brief Relative residual tolerance for convergence.
-    ScalarType relative_residual_tolerance = 1e-6;
+    ///
+    /// Held in util::Accumulator< ScalarType > rather than ScalarType: a tolerance of
+    /// 1e-6 is not representable as a normal fp16 number, and comparing residuals is
+    /// host-side work that has no reason to run in the storage precision.
+    util::Accumulator< ScalarType > relative_residual_tolerance = 1e-6;
 
     /// @brief Absolute residual tolerance for convergence.
-    ScalarType absolute_residual_tolerance = 1e-6;
+    util::Accumulator< ScalarType > absolute_residual_tolerance = 1e-6;
 
     /// @brief Maximum number of total iterations (across all restarts).
     int max_iterations = 100;
@@ -56,8 +60,18 @@ class FGMRES
     /// @brief Right-hand side vector type.
     using RHSVectorType = DstOf< OperatorType >;
 
-    /// @brief Scalar type for computations.
+    /// @brief Scalar type of the Krylov vectors.
     using ScalarType = typename SolutionVectorType::ScalarType;
+
+    /// @brief Precision of the small dense problem: the Hessenberg matrix, the Givens
+    ///        rotations, the back-substitution and the residual bookkeeping.
+    ///
+    /// util::Accumulator< ScalarType >, so ScalarType for float and double and double
+    /// for the 16-bit types. The least-squares problem is (restart+1)^2 scalars on the
+    /// host, so carrying it in double costs nothing next to the Krylov vectors, and it
+    /// keeps the orthogonalization out of a 9.8e-4 unit roundoff. Only the vectors are
+    /// stored in ScalarType.
+    using DenseScalar = util::Accumulator< ScalarType >;
 
     /// @brief Construct an FGMRES solver with a custom preconditioner.
     ///
@@ -112,8 +126,8 @@ class FGMRES
         apply( A, x, r );
         lincomb( r, { 1.0, -1.0 }, { b, r } );
 
-        ScalarType       beta0            = Kokkos::sqrt( dot( r, r ) );
-        const ScalarType initial_residual = beta0;
+        DenseScalar       beta0            = Kokkos::sqrt( dot( r, r ) );
+        const DenseScalar initial_residual = beta0;
 
         if ( statistics_ )
         {
@@ -149,9 +163,9 @@ class FGMRES
         const int idxAcc = idxW + 1;             // accumulator for solution update
 
         // Allocate small dense arrays for Hessenberg matrix and Givens rotations.
-        Eigen::Matrix< ScalarType, Eigen::Dynamic, Eigen::Dynamic > H( m_req + 1, m_req );
-        Eigen::Matrix< ScalarType, Eigen::Dynamic, 1 >              g( m_req + 1 );
-        std::vector< ScalarType >                                   cs( m_req + 1, 0 ), sn( m_req + 1, 0 );
+        Eigen::Matrix< DenseScalar, Eigen::Dynamic, Eigen::Dynamic > H( m_req + 1, m_req );
+        Eigen::Matrix< DenseScalar, Eigen::Dynamic, 1 >              g( m_req + 1 );
+        std::vector< DenseScalar >                                   cs( m_req + 1, 0 ), sn( m_req + 1, 0 );
 
         int total_iters = 0;
 
@@ -165,8 +179,8 @@ class FGMRES
             // Reset dense workspace for this restart cycle
             H.setZero();
             g.setZero();
-            std::fill( cs.begin(), cs.end(), ScalarType( 0 ) );
-            std::fill( sn.begin(), sn.end(), ScalarType( 0 ) );
+            std::fill( cs.begin(), cs.end(), DenseScalar( 0 ) );
+            std::fill( sn.begin(), sn.end(), DenseScalar( 0 ) );
             g( 0 ) = beta0;
 
             int inner_its = 0;
@@ -203,16 +217,18 @@ class FGMRES
                 for ( int i = 0; i <= j; ++i )
                 {
                     auto&            vi  = tmp_[offV + i];
-                    const ScalarType hij = dot( w, vi );
-                    H( i, j )            = hij;
-                    lincomb( w, { 1.0, -hij }, { w, vi } );
+                    const DenseScalar hij = dot( w, vi );
+                    H( i, j )             = hij;
+                    lincomb( w, { static_cast< ScalarType >( 1.0 ), static_cast< ScalarType >( -hij ) }, { w, vi } );
                 }
 
                 // Compute h_{j+1,j} and normalize to get v_{j+1}
-                const ScalarType h_jp1j = Kokkos::sqrt( dot( w, w ) );
+                const DenseScalar h_jp1j = Kokkos::sqrt( dot( w, w ) );
 
-                // SAFE BREAK 1: Arnoldi Breakdown
-                if ( h_jp1j < Kokkos::Experimental::epsilon_v< ScalarType > * initial_residual )
+                // SAFE BREAK 1: Arnoldi Breakdown. The threshold is the unit roundoff of
+                // the vector precision -- that is what limits orthogonality -- but the
+                // comparison itself is done in DenseScalar.
+                if ( h_jp1j < util::epsilon_of< ScalarType >() * initial_residual )
                 {
                     H( j + 1, j ) = 0;
                     inner_its     = j + 1;
@@ -226,7 +242,7 @@ class FGMRES
 
                 H( j + 1, j ) = h_jp1j;
 
-                if ( h_jp1j > ScalarType( 0 ) )
+                if ( h_jp1j > DenseScalar( 0 ) )
                 {
                     auto& vjp1 = tmp_[offV + j + 1];
                     lincomb( vjp1, { static_cast< ScalarType >( 1.0 / h_jp1j ) }, { w } );
@@ -235,23 +251,23 @@ class FGMRES
                 // Apply previous Givens rotations to column j of H
                 for ( int i = 0; i < j; ++i )
                 {
-                    const ScalarType temp = cs[i] * H( i, j ) + sn[i] * H( i + 1, j );
+                    const DenseScalar temp = cs[i] * H( i, j ) + sn[i] * H( i + 1, j );
                     H( i + 1, j )         = -sn[i] * H( i, j ) + cs[i] * H( i + 1, j );
                     H( i, j )             = temp;
                 }
 
                 // Compute new Givens rotation to zero H(j+1, j)
                 {
-                    const ScalarType a    = H( j, j );
-                    const ScalarType b    = H( j + 1, j );
-                    const ScalarType r_ab = Kokkos::hypot( a, b );
-                    cs[j]                 = ( r_ab == ScalarType( 0 ) ) ? ScalarType( 1 ) : a / r_ab;
-                    sn[j]                 = ( r_ab == ScalarType( 0 ) ) ? ScalarType( 0 ) : b / r_ab;
+                    const DenseScalar a    = H( j, j );
+                    const DenseScalar b    = H( j + 1, j );
+                    const DenseScalar r_ab = Kokkos::hypot( a, b );
+                    cs[j]                  = ( r_ab == DenseScalar( 0 ) ) ? DenseScalar( 1 ) : a / r_ab;
+                    sn[j]                  = ( r_ab == DenseScalar( 0 ) ) ? DenseScalar( 0 ) : b / r_ab;
                     H( j, j )             = r_ab;
                     H( j + 1, j )         = 0;
 
                     // SAFE BREAK 2: Stagnation / Singularity
-                    if ( Kokkos::abs( H( j, j ) ) < Kokkos::Experimental::epsilon_v< ScalarType > )
+                    if ( Kokkos::abs( H( j, j ) ) < util::epsilon_of< ScalarType >() )
                     {
                         inner_its = j; // Don't include this column in the back-solve
 
@@ -263,15 +279,15 @@ class FGMRES
                     }
 
                     // Apply new Givens rotation to g
-                    const ScalarType gj  = g( j );
-                    const ScalarType gj1 = g( j + 1 );
+                    const DenseScalar gj  = g( j );
+                    const DenseScalar gj1 = g( j + 1 );
                     g( j )               = cs[j] * gj + sn[j] * gj1;
                     g( j + 1 )           = -sn[j] * gj + cs[j] * gj1;
                 }
 
                 // Estimate residual norm from least-squares problem
-                const ScalarType abs_res = Kokkos::abs( g( j + 1 ) );
-                const ScalarType rel_res = abs_res / initial_residual;
+                const DenseScalar abs_res = Kokkos::abs( g( j + 1 ) );
+                const DenseScalar rel_res = abs_res / initial_residual;
 
                 if ( statistics_ )
                 {
@@ -292,11 +308,11 @@ class FGMRES
             }
 
             // Solve upper-triangular system R*y = g(0..inner_its-1) via back-substitution
-            Eigen::Matrix< ScalarType, Eigen::Dynamic, 1 > y( inner_its );
+            Eigen::Matrix< DenseScalar, Eigen::Dynamic, 1 > y( inner_its );
             y.setZero();
             for ( int row = inner_its - 1; row >= 0; --row )
             {
-                ScalarType sum = g( row );
+                DenseScalar sum = g( row );
                 for ( int col = row + 1; col < inner_its; ++col )
                     sum -= H( row, col ) * y( col );
                 y( row ) = sum / H( row, row );
@@ -308,7 +324,8 @@ class FGMRES
             for ( int i = 0; i < inner_its; ++i )
             {
                 auto& zi = tmp_[offZ + i];
-                lincomb( acc, { 1.0, y( i ) }, { acc, zi } );
+                lincomb( acc, { static_cast< ScalarType >( 1.0 ), static_cast< ScalarType >( y( i ) ) },
+                         { acc, zi } );
             }
             lincomb( x, { 1.0, 1.0 }, { x, acc } );
 

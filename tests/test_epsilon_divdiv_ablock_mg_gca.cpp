@@ -488,6 +488,18 @@ class LowPrecABlock final
                 std::memcpy( &nrm_bits, &nrm, 2 );
                 std::memcpy( &ref_bits, &ref, 2 );
             }
+            // Host-side round trip on a value the compiler cannot fold away. 3.5 is 0x4300
+            // in fp16 and 0x4060 in bf16; a wrong bit pattern means double -> M is
+            // broken on the host, a wrong read-back means M -> double is.
+            volatile double rt_in  = 3.5;
+            const M         rt     = static_cast< M >( rt_in );
+            const double    rt_out = static_cast< double >( rt );
+            uint16_t        rt_bits = 0;
+            if constexpr ( sizeof( M ) == 2 )
+                std::memcpy( &rt_bits, &rt, 2 );
+            util::logroot << "[probe] host round trip 3.5 -> M -> double = " << rt_out << ", M bits = 0x" << std::hex
+                          << rt_bits << std::dec << std::endl;
+
             util::logroot << "[probe] assign 3.5: host mirror[0,1,1,1] = " << static_cast< double >( host( 0, 1, 1, 1 ) )
                           << ", Max<double> over the view = " << mx_double << "\n"
                           << "[probe]   host M(3.5) -> double = " << static_cast< double >( ref ) << ", bits = 0x"

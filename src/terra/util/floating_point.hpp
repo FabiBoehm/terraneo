@@ -32,4 +32,21 @@ concept FloatingPoint = std::floating_point< T > || std::is_same_v< T, Kokkos::E
 template < FloatingPoint T >
 using Accumulator = std::conditional_t< std::floating_point< T >, T, double >;
 
+/// @brief Unit roundoff of @p T, as a double.
+///
+/// Kokkos reports the numeric traits of the 16-bit types as bit_comparison_type, and
+/// converting one to double on the host goes through the wrapper, which is exactly the
+/// path that cannot be relied on with ROCm. The two mantissa lengths are fixed by the
+/// formats (fp16 is 1/5/10, bf16 is 1/8/7), so state them.
+template < FloatingPoint T >
+constexpr double epsilon_of()
+{
+    if constexpr ( std::floating_point< T > )
+        return static_cast< double >( Kokkos::Experimental::epsilon_v< T > );
+    else if constexpr ( std::is_same_v< T, Kokkos::Experimental::half_t > )
+        return 0x1p-10;
+    else
+        return 0x1p-7;
+}
+
 } // namespace terra::util

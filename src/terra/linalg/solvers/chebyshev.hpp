@@ -174,7 +174,10 @@ class Chebyshev
     std::vector< SolutionVectorType > tmps_;             ///< Temporary workspace vectors.
     int        max_ev_power_iterations_;                 ///< Number of power iterations to estimate the max eigenvalue.
     bool       need_max_ev_estimation_;                  ///< If true, max eigenvalue is estimated in next solve call.
-    ScalarType max_ev_estimate_;                         ///< Estimate of the max eigenvalue of ((D^-1)A).
+    /// Estimate of the max eigenvalue of ((D^-1)A). Kept in util::Accumulator so the
+    /// Chebyshev coefficients derived from it are formed in double: it is one scalar
+    /// per level, and the whole polynomial hinges on it.
+    util::Accumulator< ScalarType > max_ev_estimate_;
 };
 
 /// @brief Static assertion: Chebyshev satisfies SolverLike concept.
