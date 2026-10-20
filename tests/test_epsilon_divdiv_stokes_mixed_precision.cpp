@@ -283,7 +283,7 @@ struct InverseDiagonalPreconditioner
 
 /// Working precision of the velocity-block V-cycle. The outer FGMRES and the Stokes
 /// operator always stay in double; only this hierarchy changes.
-enum class ABlockPrec { DOUBLE, FLOAT, FP16, BF16 };
+enum class ABlockPrec { DOUBLE, FLOAT, FP16, BF16, NONE };
 
 /// Arithmetic precision inside the EpsDivDiv fast Dirichlet/Neumann kernel.
 ///
@@ -307,6 +307,7 @@ inline const char* ablock_prec_name( ABlockPrec p )
 {
     switch ( p )
     {
+    case ABlockPrec::NONE:  return "none";
     case ABlockPrec::FLOAT: return "float";
     case ABlockPrec::FP16:  return "fp16";
     case ABlockPrec::BF16:  return "bf16";
@@ -1001,6 +1002,11 @@ RunResult run_ablock_mg( int    min_level,
         vel_impl = low_arith ? make_impl.template operator()< BHalf, BHalf >()
                              : make_impl.template operator()< BHalf, double >();
         break;
+    case ABlockPrec::NONE:
+        // Control: no velocity preconditioner at all, so the outer FGMRES sees only
+        // the Schur block. Everything the V-cycle buys is measured against this.
+        vel_impl = std::make_shared< linalg::solvers::IdentityPrecImpl< Viscous > >();
+        break;
     case ABlockPrec::DOUBLE:
     default:
         vel_impl = std::make_shared< linalg::solvers::ForwardingPrecImpl< Viscous, MG > >( mg );
@@ -1369,7 +1375,8 @@ int main( int argc, char** argv )
         else if ( a == "--ablock-prec" )
         {
             const std::string q = argv[i + 1];
-            ablock_prec = ( q == "fp16" || q == "half" )                  ? ABlockPrec::FP16
+            ablock_prec = ( q == "none" || q == "identity" )              ? ABlockPrec::NONE
+                          : ( q == "fp16" || q == "half" )                ? ABlockPrec::FP16
                           : ( q == "bf16" || q == "bfloat16" )            ? ABlockPrec::BF16
                           : ( q == "float" || q == "single" )             ? ABlockPrec::FLOAT
                                                                           : ABlockPrec::DOUBLE;

@@ -60,4 +60,19 @@ class ForwardingPrecImpl : public VelocityPrecHandle< OperatorT >::Impl
     InnerSolverT& inner_;
 };
 
+/// @brief Inner impl that applies no preconditioner at all: x <- b.
+///
+/// The control arm. Everything the (1,1) multigrid buys, at any precision, is the
+/// difference between some other impl and this one, so it is worth being able to
+/// select it the same way rather than inferring it.
+template < OperatorLike OperatorT >
+class IdentityPrecImpl : public VelocityPrecHandle< OperatorT >::Impl
+{
+  public:
+    using SrcVectorType = SrcOf< OperatorT >;
+    using DstVectorType = DstOf< OperatorT >;
+
+    void solve_impl( OperatorT& /*A*/, SrcVectorType& x, const DstVectorType& b ) override { assign( x, b ); }
+};
+
 } // namespace terra::linalg::solvers
