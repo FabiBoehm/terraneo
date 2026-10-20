@@ -91,15 +91,15 @@ class EpsilonDivDivKerngen
     /// everything derived from them. Decoupled from ScalarType so a reduced field
     /// precision never reaches the coordinate differencing in the Jacobian.
     using GeomT                         = CoordScalarT;
+    /// Precision of the fast-path scratch field tiles and the local contraction.
+    /// Independent of GeomT so bandwidth and arithmetic can be varied separately.
+    using ArithT                        = ArithScalarT;
     /// Precision the tile-local scatter accumulates in. Never 16-bit: a 2-byte
     /// atomic_add has no lock-free implementation and falls back to a warp spin lock,
     /// which measured as the single largest cost of a reduced field precision.
     /// Accumulator<> already encodes "wide enough to sum in" for reductions; the
     /// scatter follows the same rule.
     using AccT                          = util::Accumulator< ArithT >;
-    /// Precision of the fast-path scratch field tiles and the local contraction.
-    /// Independent of GeomT so bandwidth and arithmetic can be varied separately.
-    using ArithT                        = ArithScalarT;
     static constexpr int LocalMatrixDim = 18;
     using Grid4DDataLocalMatrices = terra::grid::Grid4DDataMatrices< ScalarType, LocalMatrixDim, LocalMatrixDim, 2 >;
     using LocalMatrixStorage      = linalg::solvers::LocalMatrixStorage< ScalarType, LocalMatrixDim >;
