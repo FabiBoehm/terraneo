@@ -34,6 +34,60 @@ concept FloatingPoint = std::floating_point< T > || std::is_same_v< T, Kokkos::E
 template < FloatingPoint T >
 using Accumulator = std::conditional_t< std::floating_point< T >, T, double >;
 
+/// @brief An atomic add that never falls back to a lock.
+///
+/// Kokkos has no lock-free atomic_add for the 16-bit types: desul guards
+/// Lock_Based_Fetch_Op on `!device_atomic_always_lock_free<T>`, which holds for every
+/// 2-byte type, and that implementation ballots the warp and spins on a per-address
+/// lock, so the lanes serialize. The cost is severe wherever the 4- and 8-byte adds
+/// map to a native hardware atomic: on H100 the EpsDivDiv scatter runs 10.5x slower
+/// in 16-bit than in double, and the penalty tracks the *storage* type alone -- the
+/// arithmetic precision does not matter.
+///
+/// For a narrow type we therefore run a compare-and-swap loop on the aligned 32-bit
+/// word that contains the value. That is lock-free, needs no warp-wide agreement, and
+/// contends only with lanes touching the same word rather than with the whole warp.
+///
+/// @note The enclosing word may reach two bytes past @p dest. Device allocators pad
+///       well beyond that, and a Kokkos View base is at least 256-byte aligned, so
+///       the access stays inside the allocation; it can touch the neighbouring
+///       element, which the CAS retry handles.
+/// @tparam T Field precision.
+/// @param dest Address to add into.
+/// @param value Summand, in the field precision.
+template < FloatingPoint T >
+KOKKOS_INLINE_FUNCTION void atomic_add_lockfree( T* dest, T value )
+{
+    if constexpr ( sizeof( T ) >= 4 )
+    {
+        Kokkos::atomic_add( dest, value );
+    }
+    else
+    {
+        static_assert( sizeof( T ) == 2, "expected a 2-byte field precision" );
+        using Word = unsigned int;
+
+        const auto      addr  = reinterpret_cast< std::uintptr_t >( dest );
+        Word*           word  = reinterpret_cast< Word* >( addr & ~std::uintptr_t( 3 ) );
+        const int       shift = static_cast< int >( ( addr & std::uintptr_t( 3 ) ) * 8 );
+        const Word      mask  = Word( 0xffffu ) << shift;
+
+        Word old = Kokkos::atomic_load( word );
+        Word assumed;
+        do
+        {
+            assumed = old;
+
+            const auto bits = static_cast< std::uint16_t >( ( assumed >> shift ) & 0xffffu );
+            const T    cur  = static_cast< T >( Kokkos::bit_cast< T >( bits ) + value );
+            const auto out  = Kokkos::bit_cast< std::uint16_t >( cur );
+            const Word updated = ( assumed & ~mask ) | ( Word( out ) << shift );
+
+            old = Kokkos::atomic_compare_exchange( word, assumed, updated );
+        } while ( old != assumed );
+    }
+}
+
 /// @brief Unit roundoff of @p T, as a double.
 ///
 /// Kokkos reports the numeric traits of the 16-bit types as bit_comparison_type, and

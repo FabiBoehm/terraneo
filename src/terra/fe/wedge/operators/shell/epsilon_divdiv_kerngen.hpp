@@ -15,6 +15,7 @@
 #include "linalg/trafo/local_basis_trafo_normal_tangential.hpp"
 #include "linalg/vector.hpp"
 #include "linalg/vector_q1.hpp"
+#include "util/floating_point.hpp"
 #include "util/timer.hpp"
 
 namespace terra::fe::wedge::operators::shell {
@@ -1463,15 +1464,15 @@ class EpsilonDivDivKerngen
                             const int ddx = WEDGE_NODE_OFF[w][n][0];
                             const int ddy = WEDGE_NODE_OFF[w][n][1];
                             const int ddr = WEDGE_NODE_OFF[w][n][2];
-                            Kokkos::atomic_add(
+                            util::atomic_add_lockfree(
                                 &dst_( local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr, 0 ),
                                 static_cast< ScalarType >(
                                     kwJ * ( two * ( a0 * gu00 + a1 * gu10 + a2 * gu20 ) + ntt * a0 * div_u ) ) );
-                            Kokkos::atomic_add(
+                            util::atomic_add_lockfree(
                                 &dst_( local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr, 1 ),
                                 static_cast< ScalarType >(
                                     kwJ * ( two * ( a0 * gu10 + a1 * gu11 + a2 * gu21 ) + ntt * a1 * div_u ) ) );
-                            Kokkos::atomic_add(
+                            util::atomic_add_lockfree(
                                 &dst_( local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr, 2 ),
                                 static_cast< ScalarType >(
                                     kwJ * ( two * ( a0 * gu20 + a1 * gu21 + a2 * gu22 ) + ntt * a2 * div_u ) ) );
@@ -1537,7 +1538,7 @@ class EpsilonDivDivKerngen
                                 const int ddx = WEDGE_NODE_OFF[w][n][0];
                                 const int ddy = WEDGE_NODE_OFF[w][n][1];
                                 const int ddr = WEDGE_NODE_OFF[w][n][2];
-                                Kokkos::atomic_add(
+                                util::atomic_add_lockfree(
                                     &dst_( local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr, d ),
                                     static_cast< ScalarType >( eps * ( static_cast< ArithT >( G1[n] ) * c1 +
                                                                        static_cast< ArithT >( G2[n] ) * c2 ) ) );
@@ -1573,13 +1574,13 @@ class EpsilonDivDivKerngen
                             const int ddx = WEDGE_NODE_OFF[w][n][0];
                             const int ddy = WEDGE_NODE_OFF[w][n][1];
                             const int ddr = WEDGE_NODE_OFF[w][n][2];
-                            Kokkos::atomic_add(
+                            util::atomic_add_lockfree(
                                 &dst_( local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr, 0 ),
                                 static_cast< ScalarType >( kwJ * sv0 * d0 ) );
-                            Kokkos::atomic_add(
+                            util::atomic_add_lockfree(
                                 &dst_( local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr, 1 ),
                                 static_cast< ScalarType >( kwJ * sv1 * d1 ) );
-                            Kokkos::atomic_add(
+                            util::atomic_add_lockfree(
                                 &dst_( local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr, 2 ),
                                 static_cast< ScalarType >( kwJ * sv2 * d2 ) );
                         }
@@ -1617,7 +1618,7 @@ class EpsilonDivDivKerngen
                                 const int ddy = WEDGE_NODE_OFF[w][n][1];
                                 const int ddr = WEDGE_NODE_OFF[w][n][2];
                                 for ( int d = 0; d < 3; ++d )
-                                    Kokkos::atomic_add(
+                                    util::atomic_add_lockfree(
                                         &dst_( local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr, d ),
                                         static_cast< ScalarType >( eps * gdiag ) );
                             }
@@ -2186,17 +2187,17 @@ class EpsilonDivDivKerngen
 #pragma unroll
         for ( int dim_add = 0; dim_add < 3; ++dim_add )
         {
-            Kokkos::atomic_add( &dst_( local_subdomain_id, x_cell, y_cell, r_cell, dim_add ), dst8[dim_add][0] );
-            Kokkos::atomic_add( &dst_( local_subdomain_id, x_cell + 1, y_cell, r_cell, dim_add ), dst8[dim_add][1] );
-            Kokkos::atomic_add( &dst_( local_subdomain_id, x_cell, y_cell + 1, r_cell, dim_add ), dst8[dim_add][2] );
-            Kokkos::atomic_add( &dst_( local_subdomain_id, x_cell, y_cell, r_cell + 1, dim_add ), dst8[dim_add][3] );
-            Kokkos::atomic_add(
+            util::atomic_add_lockfree( &dst_( local_subdomain_id, x_cell, y_cell, r_cell, dim_add ), dst8[dim_add][0] );
+            util::atomic_add_lockfree( &dst_( local_subdomain_id, x_cell + 1, y_cell, r_cell, dim_add ), dst8[dim_add][1] );
+            util::atomic_add_lockfree( &dst_( local_subdomain_id, x_cell, y_cell + 1, r_cell, dim_add ), dst8[dim_add][2] );
+            util::atomic_add_lockfree( &dst_( local_subdomain_id, x_cell, y_cell, r_cell + 1, dim_add ), dst8[dim_add][3] );
+            util::atomic_add_lockfree(
                 &dst_( local_subdomain_id, x_cell + 1, y_cell, r_cell + 1, dim_add ), dst8[dim_add][4] );
-            Kokkos::atomic_add(
+            util::atomic_add_lockfree(
                 &dst_( local_subdomain_id, x_cell, y_cell + 1, r_cell + 1, dim_add ), dst8[dim_add][5] );
-            Kokkos::atomic_add(
+            util::atomic_add_lockfree(
                 &dst_( local_subdomain_id, x_cell + 1, y_cell + 1, r_cell, dim_add ), dst8[dim_add][6] );
-            Kokkos::atomic_add(
+            util::atomic_add_lockfree(
                 &dst_( local_subdomain_id, x_cell + 1, y_cell + 1, r_cell + 1, dim_add ), dst8[dim_add][7] );
         }
 
