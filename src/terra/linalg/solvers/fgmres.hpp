@@ -170,6 +170,13 @@ class FGMRES
 
         int total_iters = 0;
 
+        // A breakdown or a stagnation leaves the Krylov basis unusable, so restarting
+        // from the same residual reproduces it exactly: the inner `break` skips the
+        // loop's ++total_iters, the outer condition is unchanged, and the solver spins
+        // forever. Both safe breaks below therefore set this, and we leave after the
+        // least-squares solve and solution update have been applied.
+        bool hard_stop = false;
+
         // Outer restart loop
         while ( total_iters < options_.max_iterations )
         {
@@ -200,7 +207,8 @@ class FGMRES
                 if ( skip_preconditioner_in_case_of_nan_or_infs_ && preconditioner_result_contains_nan_or_inf )
                 {
                     util::logroot
-                        << "FGMRES: The preconditioner appears to have produced a vector that has NaN or Inf entries.\n"
+                        << "FGMRES[" << tag_
+                        << "]: The preconditioner appears to have produced a vector that has NaN or Inf entries.\n"
                            "        This may be a result of the preconditioner or of the input provided by FGMRES.\n"
                            "        To at least provide a fix for the first case, we keep the input to the preconditioner\n"
                            "        and write it to the output (equivalent of skipping the preconditioner in this iteration).\n"
@@ -227,16 +235,23 @@ class FGMRES
                 const DenseScalar h_jp1j = Kokkos::sqrt( dot( w, w ) );
 
                 // SAFE BREAK 1: Arnoldi Breakdown. The threshold is the unit roundoff of
-                // the vector precision -- that is what limits orthogonality -- but the
-                // comparison itself is done in DenseScalar.
-                if ( h_jp1j < util::epsilon_of< ScalarType >() * initial_residual )
+                // DenseScalar, not of ScalarType: H, g and the Givens rotations are all
+                // formed and stored in DenseScalar, so that is what limits how small a
+                // residual the least-squares problem can resolve. Using ScalarType here
+                // made the test useless for a 16-bit basis -- epsilon 2^-10 (fp16) or
+                // 2^-7 (bf16) against an O(1e2) initial residual declares a breakdown for
+                // any h_{j+1,j} below ~0.2, i.e. on the very first Arnoldi step.
+                if ( h_jp1j < util::epsilon_of< DenseScalar >() * initial_residual )
                 {
                     H( j + 1, j ) = 0;
                     inner_its     = j + 1;
+                    hard_stop     = true;
 
-                    util::logroot << "FGMRES: Arnoldi breakdown. Restarting.\n"
+                    util::logroot << "FGMRES[" << tag_ << "]: Arnoldi breakdown. Terminating.\n"
                                      "        (Details: total_iters = "
-                                  << total_iters << ", j = " << j << ")" << std::endl;
+                                  << total_iters << ", j = " << j << ", h_jp1j = " << double( h_jp1j )
+                                  << ", threshold = " << util::epsilon_of< DenseScalar >() * double( initial_residual )
+                                  << ")" << std::endl;
 
                     break; // Subspace is "full" or converged; exit to solve current least squares
                 }
@@ -267,14 +282,17 @@ class FGMRES
                     H( j, j )             = r_ab;
                     H( j + 1, j )         = 0;
 
-                    // SAFE BREAK 2: Stagnation / Singularity
-                    if ( Kokkos::abs( H( j, j ) ) < util::epsilon_of< ScalarType >() )
+                    // SAFE BREAK 2: Stagnation / Singularity. DenseScalar roundoff for the
+                    // same reason as SAFE BREAK 1 -- H( j, j ) is a DenseScalar.
+                    if ( Kokkos::abs( H( j, j ) ) < util::epsilon_of< DenseScalar >() )
                     {
                         inner_its = j; // Don't include this column in the back-solve
+                        hard_stop = true;
 
-                        util::logroot << "FGMRES: Stagnation after Givens rotation. Restarting.\n"
+                        util::logroot << "FGMRES[" << tag_ << "]: Stagnation after Givens rotation. Terminating.\n"
                                          "        (Details: total_iters = "
-                                      << total_iters << ", j = " << j << ")" << std::endl;
+                                      << total_iters << ", j = " << j << ", |H(j,j)| = "
+                                      << double( Kokkos::abs( H( j, j ) ) ) << ")" << std::endl;
 
                         break;
                     }
@@ -338,6 +356,12 @@ class FGMRES
             // Check for final convergence
             if ( beta0 <= options_.absolute_residual_tolerance ||
                  beta0 / initial_residual <= options_.relative_residual_tolerance )
+            {
+                return;
+            }
+
+            // A safe break has already contributed everything this basis can give.
+            if ( hard_stop )
             {
                 return;
             }
