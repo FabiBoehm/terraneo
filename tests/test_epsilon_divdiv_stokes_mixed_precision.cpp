@@ -509,7 +509,10 @@ class LowPrecABlock final
         linalg::lincomb( x, { scale }, { x } );
     }
 
-  private:
+  public:
+    // nvcc rejects an extended __host__ __device__ lambda whose enclosing
+    // function has private or protected access, and probe_stages() runs a
+    // KOKKOS_LAMBDA reduction, so it stays public. clang/HIP accepts either.
     /// @brief Walk the V-cycle one stage at a time on the first application and report
     ///        magnitudes and NaN/Inf, so a diverging low-precision arm can be pinned to
     ///        a stage instead of guessed at. Runs once, on scratch vectors.
@@ -605,6 +608,8 @@ class LowPrecABlock final
             rep( "after coarse solve       ", tmp_e_[0] );
         }
     }
+
+  private:
 
     std::vector< ScalM > eta_m_;
     std::vector< VecM >  inv_diag_m_;
