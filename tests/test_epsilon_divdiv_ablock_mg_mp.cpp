@@ -517,14 +517,22 @@ class LowPrecABlock final
             // Host-side round trip on a value the compiler cannot fold away. 3.5 is 0x4300
             // in fp16 and 0x4060 in bf16; a wrong bit pattern means double -> M is
             // broken on the host, a wrong read-back means M -> double is.
-            volatile double rt_in  = 3.5;
-            const M         rt     = util::narrow< M >( rt_in );
-            const double    rt_out = static_cast< double >( rt );
-            uint16_t        rt_bits = 0;
+            // A/B the two host-side narrowings on the SAME unfoldable input, reading the
+            // bits of each with the same memcpy. If both give 0x4300 then static_cast is
+            // fine here and util::narrow is redundant; if they differ, narrow is load
+            // bearing and we have a toolchain problem to report.
+            volatile double rt_in = 3.5;
+            const M         rt_cast   = static_cast< M >( rt_in );
+            const M         rt_narrow = util::narrow< M >( rt_in );
+            uint16_t        bits_cast = 0, bits_narrow = 0;
             if constexpr ( sizeof( M ) == 2 )
-                std::memcpy( &rt_bits, &rt, 2 );
-            util::logroot << "[probe] host round trip 3.5 -> M -> double = " << rt_out << ", M bits = 0x" << std::hex
-                          << rt_bits << std::dec << std::endl;
+            {
+                std::memcpy( &bits_cast, &rt_cast, 2 );
+                std::memcpy( &bits_narrow, &rt_narrow, 2 );
+            }
+            util::logroot << "[probe] host narrowing of a volatile 3.5:  static_cast -> 0x" << std::hex << bits_cast
+                          << ", util::narrow -> 0x" << bits_narrow << std::dec
+                          << "   (fp16 expects 0x4300, bf16 0x4060)" << std::endl;
 
             util::logroot << "[probe] assign 3.5: host mirror[0,1,1,1] = " << static_cast< double >( host( 0, 1, 1, 1 ) )
                           << ", Max<double> over the view = " << mx_double << "\n"
