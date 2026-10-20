@@ -19,8 +19,9 @@ concept VectorLike = requires(
     // Required lincomb overload
     { self.lincomb_impl( c, xx, c0 ) } -> std::same_as< void >;
 
-    // Required dot product
-    { self_const.dot_impl( x ) } -> std::same_as< typename T::ScalarType >;
+    // Required dot product. Convertible, not identical: a 16-bit vector returns its
+    // inner products in the wider util::Accumulator type (see AccumulatorOf).
+    { self_const.dot_impl( x ) } -> std::convertible_to< typename T::ScalarType >;
 
     // Required entries inversion
     { self.invert_entries_impl() } -> std::same_as< void >;
@@ -61,6 +62,12 @@ concept Block2VectorLike = VectorLike< T > && requires( const T& self_const, T& 
 /// @brief Alias for the scalar type of a vector.
 template < VectorLike Vector >
 using ScalarOf = typename Vector::ScalarType;
+
+/// @brief The type in which inner products over @p Vector are accumulated and
+///        returned: its own scalar type for float and double, double for the 16-bit
+///        types. See util::Accumulator.
+template < typename Vector >
+using AccumulatorOf = util::Accumulator< ScalarOf< Vector > >;
 
 /// @brief Compute a linear combination of vectors.
 /// Implements: \f$ y = \sum_{i} c_i x_i + c_0 \f$
@@ -115,7 +122,7 @@ void assign( Vector& y, const Vector& x )
 /// @param x Second vector.
 /// @return Dot product value.
 template < VectorLike Vector >
-ScalarOf< Vector > dot( const Vector& y, const Vector& x )
+AccumulatorOf< Vector > dot( const Vector& y, const Vector& x )
 {
     return y.dot_impl( x );
 }
@@ -163,7 +170,7 @@ ScalarOf< Vector > norm_inf( const Vector& y )
 /// @param y Input vector.
 /// @return 2-norm value.
 template < VectorLike Vector >
-ScalarOf< Vector > norm_2( const Vector& y )
+AccumulatorOf< Vector > norm_2( const Vector& y )
 {
     const auto dot_prod = dot( y, y );
     return Kokkos::sqrt( dot_prod );
@@ -175,10 +182,10 @@ ScalarOf< Vector > norm_2( const Vector& y )
 /// @param scaling_factor_under_the_root Scaling factor \f$ s \f$ under the square root.
 /// @return Scaled 2-norm value.
 template < VectorLike Vector >
-ScalarOf< Vector > norm_2_scaled( const Vector& y, const ScalarOf< Vector >& scaling_factor_under_the_root )
+AccumulatorOf< Vector > norm_2_scaled( const Vector& y, const ScalarOf< Vector >& scaling_factor_under_the_root )
 {
     const auto dot_prod = dot( y, y );
-    return Kokkos::sqrt( dot_prod * scaling_factor_under_the_root );
+    return Kokkos::sqrt( dot_prod * static_cast< AccumulatorOf< Vector > >( scaling_factor_under_the_root ) );
 }
 
 /// @brief Check if a vector contains NaN or inf entries.

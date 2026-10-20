@@ -546,17 +546,21 @@ void set_vector_component(
 }
 
 template < typename ScalarType >
-ScalarType sum_of_absolutes( const grid::Grid4DDataScalar< ScalarType >& x )
+util::Accumulator< ScalarType > sum_of_absolutes( const grid::Grid4DDataScalar< ScalarType >& x )
 {
-    ScalarType sum_abs = 0.0;
+    // Sums accumulate in util::Accumulator< ScalarType >: it is ScalarType for the
+    // built-in types and double for the 16-bit ones, where a sum over a whole level
+    // is hopeless -- half_t stops representing consecutive integers at 2048 and
+    // saturates at 65504. The result is narrowed once, on return.
+    using Acc   = util::Accumulator< ScalarType >;
+    Acc sum_abs = 0.0;
     Kokkos::parallel_reduce(
         "sum_of_absolutes",
         Kokkos::MDRangePolicy( { 0, 0, 0, 0 }, { x.extent( 0 ), x.extent( 1 ), x.extent( 2 ), x.extent( 3 ) } ),
-        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, ScalarType& local_sum_abs ) {
-            ScalarType val = Kokkos::abs( x( local_subdomain, i, j, k ) );
-            local_sum_abs  = local_sum_abs + val;
+        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, Acc& local_sum_abs ) {
+            local_sum_abs = local_sum_abs + static_cast< Acc >( Kokkos::abs( x( local_subdomain, i, j, k ) ) );
         },
-        Kokkos::Sum< ScalarType >( sum_abs ) );
+        Kokkos::Sum< Acc >( sum_abs ) );
 
     Kokkos::fence();
 
@@ -568,6 +572,8 @@ ScalarType sum_of_absolutes( const grid::Grid4DDataScalar< ScalarType >& x )
 template < typename ScalarType, util::FlagLike FlagType >
 ScalarType count_masked( const grid::Grid4DDataScalar< FlagType >& mask, const FlagType& mask_value )
 {
+    // Deliberately not promoted: callers pick ScalarType here (an integral type for a
+    // plain node count), and a count is never stored in a field precision.
     auto count = static_cast< ScalarType >( 0 );
 
     Kokkos::parallel_reduce(
@@ -575,10 +581,9 @@ ScalarType count_masked( const grid::Grid4DDataScalar< FlagType >& mask, const F
         Kokkos::MDRangePolicy(
             { 0, 0, 0, 0 }, { mask.extent( 0 ), mask.extent( 1 ), mask.extent( 2 ), mask.extent( 3 ) } ),
         KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, ScalarType& local_sum ) {
-            const ScalarType mask_val = util::has_flag( mask( local_subdomain, i, j, k ), mask_value ) ?
-                                            static_cast< ScalarType >( 1 ) :
-                                            static_cast< ScalarType >( 0 );
-            local_sum                 = local_sum + mask_val;
+            local_sum = local_sum + ( util::has_flag( mask( local_subdomain, i, j, k ), mask_value ) ?
+                                          static_cast< ScalarType >( 1 ) :
+                                          static_cast< ScalarType >( 0 ) );
         },
         Kokkos::Sum< ScalarType >( count ) );
 
@@ -590,22 +595,26 @@ ScalarType count_masked( const grid::Grid4DDataScalar< FlagType >& mask, const F
 }
 
 template < typename ScalarType, util::FlagLike FlagType >
-ScalarType masked_sum(
+util::Accumulator< ScalarType > masked_sum(
     const grid::Grid4DDataScalar< ScalarType >& x,
     const grid::Grid4DDataScalar< FlagType >&   mask,
     const FlagType&                             mask_value )
 {
-    ScalarType sum = 0.0;
+    // Sums accumulate in util::Accumulator< ScalarType >: it is ScalarType for the
+    // built-in types and double for the 16-bit ones, where a sum over a whole level
+    // is hopeless -- half_t stops representing consecutive integers at 2048 and
+    // saturates at 65504. The result is narrowed once, on return.
+    using Acc = util::Accumulator< ScalarType >;
+    Acc sum   = 0.0;
 
     Kokkos::parallel_reduce(
         "masked_sum",
         Kokkos::MDRangePolicy( { 0, 0, 0, 0 }, { x.extent( 0 ), x.extent( 1 ), x.extent( 2 ), x.extent( 3 ) } ),
-        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, ScalarType& local_sum ) {
-            const ScalarType mask_val = util::has_flag( mask( local_subdomain, i, j, k ), mask_value ) ? 1.0 : 0.0;
-            ScalarType       val      = x( local_subdomain, i, j, k ) * mask_val;
-            local_sum                 = local_sum + val;
+        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, Acc& local_sum ) {
+            const Acc mask_val = util::has_flag( mask( local_subdomain, i, j, k ), mask_value ) ? 1.0 : 0.0;
+            local_sum          = local_sum + static_cast< Acc >( x( local_subdomain, i, j, k ) ) * mask_val;
         },
-        Kokkos::Sum< ScalarType >( sum ) );
+        Kokkos::Sum< Acc >( sum ) );
 
     Kokkos::fence();
 
@@ -615,26 +624,30 @@ ScalarType masked_sum(
 }
 
 template < typename ScalarType, util::FlagLike FlagType0, util::FlagLike FlagType1 >
-ScalarType masked_sum(
+util::Accumulator< ScalarType > masked_sum(
     const grid::Grid4DDataScalar< ScalarType >& x,
     const grid::Grid4DDataScalar< FlagType0 >&  mask0,
     const grid::Grid4DDataScalar< FlagType1 >&  mask1,
     const FlagType0&                            mask0_value,
     const FlagType1&                            mask1_value )
 {
-    ScalarType sum = 0.0;
+    // Sums accumulate in util::Accumulator< ScalarType >: it is ScalarType for the
+    // built-in types and double for the 16-bit ones, where a sum over a whole level
+    // is hopeless -- half_t stops representing consecutive integers at 2048 and
+    // saturates at 65504. The result is narrowed once, on return.
+    using Acc = util::Accumulator< ScalarType >;
+    Acc sum   = 0.0;
 
     Kokkos::parallel_reduce(
         "masked_sum",
         Kokkos::MDRangePolicy( { 0, 0, 0, 0 }, { x.extent( 0 ), x.extent( 1 ), x.extent( 2 ), x.extent( 3 ) } ),
-        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, ScalarType& local_sum ) {
-            ScalarType mask_val = 1.0;
+        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, Acc& local_sum ) {
+            Acc mask_val = 1.0;
             mask_val *= util::has_flag( mask0( local_subdomain, i, j, k ), mask0_value ) ? 1.0 : 0.0;
             mask_val *= util::has_flag( mask1( local_subdomain, i, j, k ), mask1_value ) ? 1.0 : 0.0;
-            ScalarType val = x( local_subdomain, i, j, k ) * mask_val;
-            local_sum      = local_sum + val;
+            local_sum = local_sum + static_cast< Acc >( x( local_subdomain, i, j, k ) ) * mask_val;
         },
-        Kokkos::Sum< ScalarType >( sum ) );
+        Kokkos::Sum< Acc >( sum ) );
 
     Kokkos::fence();
 
@@ -644,18 +657,25 @@ ScalarType masked_sum(
 }
 
 template < typename ScalarType >
-ScalarType dot_product( const grid::Grid4DDataScalar< ScalarType >& x, const grid::Grid4DDataScalar< ScalarType >& y )
+util::Accumulator< ScalarType > dot_product(
+    const grid::Grid4DDataScalar< ScalarType >& x,
+    const grid::Grid4DDataScalar< ScalarType >& y )
 {
-    ScalarType dot_prod = 0.0;
+    // Sums accumulate in util::Accumulator< ScalarType >: it is ScalarType for the
+    // built-in types and double for the 16-bit ones, where a sum over a whole level
+    // is hopeless -- half_t stops representing consecutive integers at 2048 and
+    // saturates at 65504. The result is narrowed once, on return.
+    using Acc    = util::Accumulator< ScalarType >;
+    Acc dot_prod = 0.0;
 
     Kokkos::parallel_reduce(
         "dot_product",
         Kokkos::MDRangePolicy( { 0, 0, 0, 0 }, { x.extent( 0 ), x.extent( 1 ), x.extent( 2 ), x.extent( 3 ) } ),
-        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, ScalarType& local_dot_prod ) {
-            ScalarType val = x( local_subdomain, i, j, k ) * y( local_subdomain, i, j, k );
-            local_dot_prod = local_dot_prod + val;
+        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, Acc& local_dot_prod ) {
+            local_dot_prod = local_dot_prod + static_cast< Acc >( x( local_subdomain, i, j, k ) ) *
+                                                  static_cast< Acc >( y( local_subdomain, i, j, k ) );
         },
-        Kokkos::Sum< ScalarType >( dot_prod ) );
+        Kokkos::Sum< Acc >( dot_prod ) );
 
     Kokkos::fence( "dot_product" );
 
@@ -665,23 +685,28 @@ ScalarType dot_product( const grid::Grid4DDataScalar< ScalarType >& x, const gri
 }
 
 template < typename ScalarType, util::FlagLike FlagType >
-ScalarType masked_dot_product(
+util::Accumulator< ScalarType > masked_dot_product(
     const grid::Grid4DDataScalar< ScalarType >& x,
     const grid::Grid4DDataScalar< ScalarType >& y,
     const grid::Grid4DDataScalar< FlagType >&   mask,
     const FlagType&                             mask_value )
 {
-    ScalarType dot_prod = 0.0;
+    // Sums accumulate in util::Accumulator< ScalarType >: it is ScalarType for the
+    // built-in types and double for the 16-bit ones, where a sum over a whole level
+    // is hopeless -- half_t stops representing consecutive integers at 2048 and
+    // saturates at 65504. The result is narrowed once, on return.
+    using Acc    = util::Accumulator< ScalarType >;
+    Acc dot_prod = 0.0;
 
     Kokkos::parallel_reduce(
         "masked_dot_product",
         Kokkos::MDRangePolicy( { 0, 0, 0, 0 }, { x.extent( 0 ), x.extent( 1 ), x.extent( 2 ), x.extent( 3 ) } ),
-        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, ScalarType& local_dot_prod ) {
-            const ScalarType mask_val = util::has_flag( mask( local_subdomain, i, j, k ), mask_value ) ? 1.0 : 0.0;
-            ScalarType       val      = x( local_subdomain, i, j, k ) * y( local_subdomain, i, j, k ) * mask_val;
-            local_dot_prod            = local_dot_prod + val;
+        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, Acc& local_dot_prod ) {
+            const Acc mask_val = util::has_flag( mask( local_subdomain, i, j, k ), mask_value ) ? 1.0 : 0.0;
+            local_dot_prod     = local_dot_prod + static_cast< Acc >( x( local_subdomain, i, j, k ) ) *
+                                                  static_cast< Acc >( y( local_subdomain, i, j, k ) ) * mask_val;
         },
-        Kokkos::Sum< ScalarType >( dot_prod ) );
+        Kokkos::Sum< Acc >( dot_prod ) );
 
     Kokkos::fence( "masked_dot_product" );
 
@@ -691,13 +716,13 @@ ScalarType masked_dot_product(
 }
 
 template < typename ScalarType, util::FlagLike FlagType, int VecDim >
-ScalarType masked_dot_product(
+util::Accumulator< ScalarType > masked_dot_product(
     const grid::Grid4DDataVec< ScalarType, VecDim >& x,
     const grid::Grid4DDataVec< ScalarType, VecDim >& y,
     const grid::Grid4DDataScalar< FlagType >&        mask,
     const FlagType&                                  mask_value )
 {
-    ScalarType dot_prod = 0.0;
+    util::Accumulator< ScalarType > dot_prod = 0.0;
     for ( int d = 0; d < VecDim; ++d )
     {
         // masked_dot_product for scalar internally does MPI_Allreduce,
@@ -708,24 +733,29 @@ ScalarType masked_dot_product(
 }
 
 template < typename ScalarType >
-ScalarType dot_product_subset(
+util::Accumulator< ScalarType > dot_product_subset(
     const grid::Grid4DDataScalar< ScalarType >& x,
     const grid::Grid4DDataScalar< ScalarType >& y,
     dense::Vec< int, 4 >                        start,
     dense::Vec< int, 4 >                        end_excl )
 {
-    ScalarType dot_prod = 0.0;
+    // Sums accumulate in util::Accumulator< ScalarType >: it is ScalarType for the
+    // built-in types and double for the 16-bit ones, where a sum over a whole level
+    // is hopeless -- half_t stops representing consecutive integers at 2048 and
+    // saturates at 65504. The result is narrowed once, on return.
+    using Acc    = util::Accumulator< ScalarType >;
+    Acc dot_prod = 0.0;
 
     Kokkos::parallel_reduce(
         "masked_dot_product",
         Kokkos::MDRangePolicy(
             { start( 0 ), start( 1 ), start( 2 ), start( 3 ) },
             { end_excl( 0 ), end_excl( 1 ), end_excl( 2 ), end_excl( 3 ) } ),
-        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, ScalarType& local_dot_prod ) {
-            ScalarType val = x( local_subdomain, i, j, k ) * y( local_subdomain, i, j, k );
-            local_dot_prod = local_dot_prod + val;
+        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, Acc& local_dot_prod ) {
+            local_dot_prod = local_dot_prod + static_cast< Acc >( x( local_subdomain, i, j, k ) ) *
+                                                  static_cast< Acc >( y( local_subdomain, i, j, k ) );
         },
-        Kokkos::Sum< ScalarType >( dot_prod ) );
+        Kokkos::Sum< Acc >( dot_prod ) );
 
     Kokkos::fence( "masked_dot_product" );
 

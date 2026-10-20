@@ -71,7 +71,7 @@ class VectorQ1IsoQ2Q1
     /// Computes: \( \text{block}_1 \cdot x.\text{block}_1 + \text{block}_2 \cdot x.\text{block}_2 \)
     /// @param x Other block vector.
     /// @return Dot product value.
-    ScalarType dot_impl( const VectorQ1IsoQ2Q1& x ) const
+    util::Accumulator< ScalarType > dot_impl( const VectorQ1IsoQ2Q1& x ) const
     {
         return x.block_1().dot_impl( u_ ) + x.block_2().dot_impl( p_ );
     }

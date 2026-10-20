@@ -92,7 +92,7 @@ class VectorQ1Scalar
     /// Computes: \f$ \sum_{i} y_i \cdot x_i \f$ over owned nodes.
     /// @param x Other vector.
     /// @return Dot product value.
-    ScalarType dot_impl( const VectorQ1Scalar& x ) const
+    util::Accumulator< ScalarType > dot_impl( const VectorQ1Scalar& x ) const
     {
         return kernels::common::masked_dot_product(
             grid_data_, x.grid_data(), mask_data(), grid::NodeOwnershipFlag::OWNED );
@@ -235,7 +235,7 @@ class VectorQ1Vec
     /// Computes: \f$ \sum_{i} y_i \cdot x_i \f$ over owned nodes.
     /// @param x Other vector.
     /// @return Dot product value.
-    ScalarType dot_impl( const VectorQ1Vec& x ) const
+    util::Accumulator< ScalarType > dot_impl( const VectorQ1Vec& x ) const
     {
         return kernels::common::masked_dot_product(
             grid_data_, x.grid_data(), mask_data_, grid::NodeOwnershipFlag::OWNED );

@@ -21,4 +21,15 @@ template < typename T >
 concept FloatingPoint = std::floating_point< T > || std::is_same_v< T, Kokkos::Experimental::half_t > ||
                         std::is_same_v< T, Kokkos::Experimental::bhalf_t >;
 
+/// @brief Accumulator type for reductions over a field of precision @p T.
+///
+/// ScalarType for the built-in types, double for the 16-bit ones. A sum over a whole
+/// level in 16 bits is not usable: half_t stops representing consecutive integers at
+/// 2048 and saturates at 65504, so a dot product either drops its low-order
+/// contributions or overflows to inf, which is how a 16-bit V-cycle returns NaN even
+/// when every stored field is comfortably in range. Reductions therefore accumulate
+/// here and narrow once, on return.
+template < FloatingPoint T >
+using Accumulator = std::conditional_t< std::floating_point< T >, T, double >;
+
 } // namespace terra::util
