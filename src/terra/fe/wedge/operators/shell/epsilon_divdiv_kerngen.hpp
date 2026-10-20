@@ -397,8 +397,9 @@ class EpsilonDivDivKerngen
                     const int a2 = ( axis + 2 ) % 3;
                     for ( int d = 0; d < VecDim; ++d )
                         nm( s, x, y, r, d ) = 0.0;
-                    nm( s, x, y, r, a1 ) =  c( a2 );
-                    nm( s, x, y, r, a2 ) = -c( a1 );
+                    // c is GeomT; the rotation modes are stored in the field precision.
+                    nm( s, x, y, r, a1 ) = static_cast< ScalarType >( c( a2 ) );
+                    nm( s, x, y, r, a2 ) = static_cast< ScalarType >( -c( a1 ) );
                 } );
             Kokkos::fence();
 
@@ -422,7 +423,7 @@ class EpsilonDivDivKerngen
 
                     dense::Vec< ScalarType, 3 > normal;
                     for ( int d = 0; d < 3; ++d )
-                        normal( d ) = grid_local( s, x, y, d );
+                        normal( d ) = static_cast< ScalarType >( grid_local( s, x, y, d ) );
 
                     // R * v -> normal-tangential
                     const auto R  = trafo_mat_cartesian_to_normal_tangential( normal );
