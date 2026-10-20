@@ -60,7 +60,13 @@ using terra::linalg::trafo::trafo_mat_cartesian_to_normal_tangential;
 // decouple it: the Jacobian is formed by differencing coordinates, which loses the
 // geometry entirely in 16-bit and is already marginal in single. ScalarT governs
 // the stored fields src/dst and the coefficient -- where the memory traffic is.
-template < typename ScalarT, int VecDim = 3, typename CoordScalarT = ScalarT >
+// ArithScalarT is the precision of the ARITHMETIC in the fast Dirichlet/Neumann
+// kernel: the team-scratch field tiles and the local contraction. It defaults to
+// double, which is exactly what this kernel did unconditionally before, so every
+// existing instantiation is unchanged. Pass ScalarT to run the contraction at the
+// field precision -- the geometry (coordinates, Jacobian, reference gradients) stays
+// in CoordScalarT either way.
+template < typename ScalarT, int VecDim = 3, typename CoordScalarT = ScalarT, typename ArithScalarT = double >
 class EpsilonDivDivKerngen
 {
   public:
@@ -71,6 +77,9 @@ class EpsilonDivDivKerngen
     /// everything derived from them. Decoupled from ScalarType so a reduced field
     /// precision never reaches the coordinate differencing in the Jacobian.
     using GeomT                         = CoordScalarT;
+    /// Precision of the fast-path scratch field tiles and the local contraction.
+    /// Independent of GeomT so bandwidth and arithmetic can be varied separately.
+    using ArithT                        = ArithScalarT;
     static constexpr int LocalMatrixDim = 18;
     using Grid4DDataLocalMatrices = terra::grid::Grid4DDataMatrices< ScalarType, LocalMatrixDim, LocalMatrixDim, 2 >;
     using LocalMatrixStorage      = linalg::solvers::LocalMatrixStorage< ScalarType, LocalMatrixDim >;
@@ -678,6 +687,13 @@ class EpsilonDivDivKerngen
         return sizeof( double ) * nscalars;
     }
 
+    /// get_shmem hands out aligned chunks; round each block up so two requests in one
+    /// team allocation cannot overlap whatever the element sizes are.
+    static KOKKOS_INLINE_FUNCTION constexpr size_t shmem_block_bytes( size_t bytes )
+    {
+        return ( bytes + 7u ) & ~size_t( 7u );
+    }
+
     KOKKOS_INLINE_FUNCTION
     size_t team_shmem_size_dn( const int /* ts */ ) const
     {
@@ -685,15 +701,16 @@ class EpsilonDivDivKerngen
         const int n    = lat_tile_ + 1;
         const int nxy  = n * n;
 
-        // coords_sh(nxy,3) + src_sh(nxy,3,nlev) + k_sh(nxy,nlev) + r_sh(nlev)
-        const size_t nscalars =
-            size_t( nxy ) * 3 + size_t( nxy ) * 3 * nlev + size_t( nxy ) * nlev + size_t( nlev );
+        // Two blocks, because the tiles no longer share one element type: the geometry
+        // (coords_sh, r_sh) is GeomT and the fields (src_sh, k_sh) are ArithT. Each is
+        // sized with its own sizeof and rounded up, so they can never overlap -- a
+        // single sizeof(double) * nscalars silently under-allocates the moment one tile
+        // stops being double, and the apply then reads garbage and produces NaN.
+        const size_t geom_scalars  = size_t( nxy ) * 3 + size_t( nlev );
+        const size_t field_scalars = size_t( nxy ) * 3 * nlev + size_t( nxy ) * nlev;
 
-        // The team scratch tiles (coords_sh/src_sh/k_sh/r_sh) are stored in DOUBLE
-        // regardless of ScalarType, so the byte size must use sizeof(double). Using
-        // sizeof(ScalarType) under-allocates by 2x in a single-precision build, so the
-        // double tiles overrun/overlap and the operator apply reads garbage -> NaN.
-        return sizeof( double ) * nscalars;
+        return shmem_block_bytes( sizeof( GeomT ) * geom_scalars ) +
+               shmem_block_bytes( sizeof( ArithT ) * field_scalars );
     }
 
   private:
@@ -1072,28 +1089,27 @@ class EpsilonDivDivKerngen
         const int nlev = r_tile_block_ + 1;
         const int nxy  = ( lat_tile_ + 1 ) * ( lat_tile_ + 1 );
 
-        double* shmem =
-            reinterpret_cast< double* >( team.team_shmem().get_shmem( team_shmem_size_dn( team.team_size() ) ) );
+        // Geometry and fields come from two separate scratch blocks so they can have
+        // different element types (see team_shmem_size_dn).
+        auto* geom_mem = reinterpret_cast< GeomT* >( team.team_shmem().get_shmem(
+            shmem_block_bytes( sizeof( GeomT ) * ( size_t( nxy ) * 3 + size_t( nlev ) ) ) ) );
+        auto* field_mem = reinterpret_cast< ArithT* >( team.team_shmem().get_shmem( shmem_block_bytes(
+            sizeof( ArithT ) * ( size_t( nxy ) * 3 * nlev + size_t( nxy ) * nlev ) ) ) );
 
         using ScratchCoords =
-            Kokkos::View< double**, Kokkos::LayoutRight, typename Team::scratch_memory_space, Kokkos::MemoryUnmanaged >;
+            Kokkos::View< GeomT**, Kokkos::LayoutRight, typename Team::scratch_memory_space, Kokkos::MemoryUnmanaged >;
+        using ScratchR =
+            Kokkos::View< GeomT*, Kokkos::LayoutRight, typename Team::scratch_memory_space, Kokkos::MemoryUnmanaged >;
         using ScratchSrc = Kokkos::
-            View< double***, Kokkos::LayoutRight, typename Team::scratch_memory_space, Kokkos::MemoryUnmanaged >;
+            View< ArithT***, Kokkos::LayoutRight, typename Team::scratch_memory_space, Kokkos::MemoryUnmanaged >;
         using ScratchK =
-            Kokkos::View< double**, Kokkos::LayoutRight, typename Team::scratch_memory_space, Kokkos::MemoryUnmanaged >;
+            Kokkos::View< ArithT**, Kokkos::LayoutRight, typename Team::scratch_memory_space, Kokkos::MemoryUnmanaged >;
 
-        ScratchCoords coords_sh( shmem, nxy, 3 );
-        shmem += nxy * 3;
+        ScratchCoords coords_sh( geom_mem, nxy, 3 );
+        ScratchR      r_sh( geom_mem + size_t( nxy ) * 3, nlev );
 
-        ScratchSrc src_sh( shmem, nxy, 3, nlev );
-        shmem += nxy * 3 * nlev;
-
-        ScratchK k_sh( shmem, nxy, nlev );
-        shmem += nxy * nlev;
-
-        auto r_sh =
-            Kokkos::View< double*, Kokkos::LayoutRight, typename Team::scratch_memory_space, Kokkos::MemoryUnmanaged >(
-                shmem, nlev );
+        ScratchSrc src_sh( field_mem, nxy, 3, nlev );
+        ScratchK   k_sh( field_mem + size_t( nxy ) * 3 * nlev, nxy, nlev );
 
         auto node_id = [&]( int nx, int ny ) -> int { return nx + ( lat_tile_ + 1 ) * ny; };
 
@@ -1207,23 +1223,23 @@ class EpsilonDivDivKerngen
                 const int v1 = w == 0 ? n10 : n01;
                 const int v2 = w == 0 ? n01 : n10;
 
-                double k_sum = 0.0;
+                ArithT k_sum = 0.0;
 #pragma unroll
                 for ( int node = 0; node < 6; ++node )
                 {
                     const int nid = node_id( tx + WEDGE_NODE_OFF[w][node][0], ty + WEDGE_NODE_OFF[w][node][1] );
                     k_sum += k_sh( nid, lvl0 + WEDGE_NODE_OFF[w][node][2] );
                 }
-                const double k_eval = ONE_SIXTH * k_sum;
+                const ArithT k_eval = static_cast< ArithT >( ONE_SIXTH * static_cast< double >( k_sum ) );
 
-                double kwJ;
+                ArithT kwJ;
 
                 // ==== Phase 1: Jacobian + Gather (gu tensor) ====
                 // invJ lives only in this scope so the compiler can reclaim its registers.
-                double gu00 = 0.0;
-                double gu10 = 0.0, gu11 = 0.0;
-                double gu20 = 0.0, gu21 = 0.0, gu22 = 0.0;
-                double div_u = 0.0;
+                ArithT gu00 = 0.0;
+                ArithT gu10 = 0.0, gu11 = 0.0;
+                ArithT gu20 = 0.0, gu21 = 0.0, gu22 = 0.0;
+                ArithT div_u = 0.0;
                 {
                     const double half_dr = 0.5 * ( r_1 - r_0 );
                     const double r_mid   = 0.5 * ( r_0 + r_1 );
@@ -1247,7 +1263,8 @@ class EpsilonDivDivKerngen
                                          J_0_1 * J_1_0 * J_2_2 + J_0_1 * J_1_2 * J_2_0 +
                                          J_0_2 * J_1_0 * J_2_1 - J_0_2 * J_1_1 * J_2_0;
 
-                    kwJ = k_eval * Kokkos::abs( J_det );
+                    // |J| is geometry, so form the weight in GeomT and narrow once.
+                    kwJ = static_cast< ArithT >( static_cast< double >( k_eval ) * Kokkos::abs( J_det ) );
 
                     const double inv_det = 1.0 / J_det;
 
@@ -1269,9 +1286,16 @@ class EpsilonDivDivKerngen
                             const double gx = dN_ref[n][0];
                             const double gy = dN_ref[n][1];
                             const double gz = dN_ref[n][2];
+                            // Shape-function gradients are geometry: formed in GeomT from
+                            // the inverse Jacobian, then narrowed once so the contraction
+                            // against the field values runs entirely in ArithT.
                             const double g0 = i00 * gx + i01 * gy + i02 * gz;
                             const double g1 = i10 * gx + i11 * gy + i12 * gz;
                             const double g2 = i20 * gx + i21 * gy + i22 * gz;
+                            const ArithT a0 = static_cast< ArithT >( g0 );
+                            const ArithT a1 = static_cast< ArithT >( g1 );
+                            const ArithT a2 = static_cast< ArithT >( g2 );
+                            const ArithT half = static_cast< ArithT >( 0.5 );
 
                             const int ddx = WEDGE_NODE_OFF[w][n][0];
                             const int ddy = WEDGE_NODE_OFF[w][n][1];
@@ -1279,17 +1303,17 @@ class EpsilonDivDivKerngen
                             const int nid = node_id( tx + ddx, ty + ddy );
                             const int lvl = lvl0 + ddr;
 
-                            const double s0 = src_sh( nid, 0, lvl );
-                            const double s1 = src_sh( nid, 1, lvl );
-                            const double s2 = src_sh( nid, 2, lvl );
+                            const ArithT s0 = src_sh( nid, 0, lvl );
+                            const ArithT s1 = src_sh( nid, 1, lvl );
+                            const ArithT s2 = src_sh( nid, 2, lvl );
 
-                            gu00  += g0 * s0;
-                            gu11  += g1 * s1;
-                            gu22  += g2 * s2;
-                            gu10  += 0.5 * ( g1 * s0 + g0 * s1 );
-                            gu20  += 0.5 * ( g2 * s0 + g0 * s2 );
-                            gu21  += 0.5 * ( g2 * s1 + g1 * s2 );
-                            div_u += g0 * s0 + g1 * s1 + g2 * s2;
+                            gu00  += a0 * s0;
+                            gu11  += a1 * s1;
+                            gu22  += a2 * s2;
+                            gu10  += half * ( a1 * s0 + a0 * s1 );
+                            gu20  += half * ( a2 * s0 + a0 * s2 );
+                            gu21  += half * ( a2 * s1 + a1 * s2 );
+                            div_u += a0 * s0 + a1 * s1 + a2 * s2;
                         }
                     }
                 }
@@ -1343,22 +1367,27 @@ class EpsilonDivDivKerngen
                             const double g0 = i00 * gx + i01 * gy + i02 * gz;
                             const double g1 = i10 * gx + i11 * gy + i12 * gz;
                             const double g2 = i20 * gx + i21 * gy + i22 * gz;
+                            const ArithT a0  = static_cast< ArithT >( g0 );
+                            const ArithT a1  = static_cast< ArithT >( g1 );
+                            const ArithT a2  = static_cast< ArithT >( g2 );
+                            const ArithT two = static_cast< ArithT >( 2.0 );
+                            const ArithT ntt = static_cast< ArithT >( NEG_TWO_THIRDS );
 
                             const int ddx = WEDGE_NODE_OFF[w][n][0];
                             const int ddy = WEDGE_NODE_OFF[w][n][1];
                             const int ddr = WEDGE_NODE_OFF[w][n][2];
                             Kokkos::atomic_add(
                                 &dst_( local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr, 0 ),
-                                kwJ * ( 2.0 * ( g0 * gu00 + g1 * gu10 + g2 * gu20 ) +
-                                        NEG_TWO_THIRDS * g0 * div_u ) );
+                                static_cast< ScalarType >(
+                                    kwJ * ( two * ( a0 * gu00 + a1 * gu10 + a2 * gu20 ) + ntt * a0 * div_u ) ) );
                             Kokkos::atomic_add(
                                 &dst_( local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr, 1 ),
-                                kwJ * ( 2.0 * ( g0 * gu10 + g1 * gu11 + g2 * gu21 ) +
-                                        NEG_TWO_THIRDS * g1 * div_u ) );
+                                static_cast< ScalarType >(
+                                    kwJ * ( two * ( a0 * gu10 + a1 * gu11 + a2 * gu21 ) + ntt * a1 * div_u ) ) );
                             Kokkos::atomic_add(
                                 &dst_( local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr, 2 ),
-                                kwJ * ( 2.0 * ( g0 * gu20 + g1 * gu21 + g2 * gu22 ) +
-                                        NEG_TWO_THIRDS * g2 * div_u ) );
+                                static_cast< ScalarType >(
+                                    kwJ * ( two * ( a0 * gu20 + a1 * gu21 + a2 * gu22 ) + ntt * a2 * div_u ) ) );
                         }
                     }
 
@@ -1374,26 +1403,30 @@ class EpsilonDivDivKerngen
                             const double g1 = i10 * gx + i11 * gy + i12 * gz;
                             const double g2 = i20 * gx + i21 * gy + i22 * gz;
                             const double gg = g0 * g0 + g1 * g1 + g2 * g2;
+                            // Purely geometric row factors, narrowed once each.
+                            const ArithT d0 = static_cast< ArithT >( gg + ONE_THIRD * g0 * g0 );
+                            const ArithT d1 = static_cast< ArithT >( gg + ONE_THIRD * g1 * g1 );
+                            const ArithT d2 = static_cast< ArithT >( gg + ONE_THIRD * g2 * g2 );
 
                             const int nid = node_id( tx + WEDGE_NODE_OFF[w][n][0], ty + WEDGE_NODE_OFF[w][n][1] );
                             const int lvl = lvl0 + WEDGE_NODE_OFF[w][n][2];
 
-                            const double sv0 = src_sh( nid, 0, lvl );
-                            const double sv1 = src_sh( nid, 1, lvl );
-                            const double sv2 = src_sh( nid, 2, lvl );
+                            const ArithT sv0 = src_sh( nid, 0, lvl );
+                            const ArithT sv1 = src_sh( nid, 1, lvl );
+                            const ArithT sv2 = src_sh( nid, 2, lvl );
 
                             const int ddx = WEDGE_NODE_OFF[w][n][0];
                             const int ddy = WEDGE_NODE_OFF[w][n][1];
                             const int ddr = WEDGE_NODE_OFF[w][n][2];
                             Kokkos::atomic_add(
                                 &dst_( local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr, 0 ),
-                                kwJ * sv0 * ( gg + ONE_THIRD * g0 * g0 ) );
+                                static_cast< ScalarType >( kwJ * sv0 * d0 ) );
                             Kokkos::atomic_add(
                                 &dst_( local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr, 1 ),
-                                kwJ * sv1 * ( gg + ONE_THIRD * g1 * g1 ) );
+                                static_cast< ScalarType >( kwJ * sv1 * d1 ) );
                             Kokkos::atomic_add(
                                 &dst_( local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr, 2 ),
-                                kwJ * sv2 * ( gg + ONE_THIRD * g2 * g2 ) );
+                                static_cast< ScalarType >( kwJ * sv2 * d2 ) );
                         }
                     }
                 }

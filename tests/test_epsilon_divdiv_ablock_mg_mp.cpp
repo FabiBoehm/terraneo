@@ -279,6 +279,19 @@ struct InverseDiagonalPreconditioner
 /// operator always stay in double; only this hierarchy changes.
 enum class ABlockPrec { DOUBLE, FLOAT, FP16, BF16 };
 
+/// Arithmetic precision inside the EpsDivDiv fast Dirichlet/Neumann kernel, chosen
+/// independently of the storage precision above. DOUBLE keeps the historical
+/// behaviour -- the team-scratch tiles and the local contraction are double whatever
+/// the field precision is -- so --ablock-prec alone measures memory traffic. LOW moves
+/// the field tiles and the contraction to the field precision as well, leaving only
+/// the geometry (coordinates, Jacobian, shape-function gradients) in double.
+enum class ABlockArith { DOUBLE, LOW };
+
+inline const char* ablock_arith_name( ABlockArith a )
+{
+    return a == ABlockArith::LOW ? "low" : "double";
+}
+
 inline const char* ablock_prec_name( ABlockPrec p )
 {
     switch ( p )
@@ -311,7 +324,7 @@ inline const char* ablock_prec_note( ABlockPrec p )
 /// diagonals and the coarse solver's Krylov workspace. convert() runs at the
 /// double<->M boundary on entry and exit, which is two passes over one fine-level
 /// vector per application -- the V-cycle itself never leaves M.
-template < typename M >
+template < typename M, typename ArithM = double >
 class LowPrecABlock final
 : public linalg::solvers::VelocityPrecHandle<
       fe::wedge::operators::shell::EpsilonDivDivKerngen< double > >::Impl
@@ -320,7 +333,8 @@ class LowPrecABlock final
     using OuterOp  = fe::wedge::operators::shell::EpsilonDivDivKerngen< double >;
     using OuterVec = linalg::VectorQ1Vec< double, 3 >;
 
-    using ViscM  = fe::wedge::operators::shell::EpsilonDivDivKerngen< M, 3, double >;
+    // < field precision, VecDim, coordinate precision, fast-path arithmetic precision >
+    using ViscM  = fe::wedge::operators::shell::EpsilonDivDivKerngen< M, 3, double, ArithM >;
     using ProlM  = fe::wedge::operators::shell::ProlongationVecConstant< M >;
     using RestM  = fe::wedge::operators::shell::RestrictionVecConstant< M >;
     using SmooM  = linalg::solvers::Chebyshev< ViscM >;
@@ -611,7 +625,8 @@ RunResult run_ablock_mg( int    min_level,
                          double coarse_tol,     // coarse FGMRES relative tolerance
                          bool   full_stokes,    // false = solve A-block with MG; true = full Stokes outer FGMRES
                          KrylovPrec krylov_prec, // Krylov-basis precision for the full-Stokes outer FGMRES
-                         ABlockPrec ablock_prec ) // working precision of the A-block V-cycle preconditioner
+                         ABlockPrec  ablock_prec, // working precision of the A-block V-cycle preconditioner
+                         ABlockArith ablock_arith ) // fast-path arithmetic precision in that V-cycle
 {
     using ScalarType = double;
 
@@ -938,22 +953,30 @@ RunResult run_ablock_mg( int    min_level,
     VectorQ1IsoQ2Q1< ScalarType > tri_tmp(
         "tri_tmp", domains[velocity_level], domains[pressure_level], mask_data[velocity_level], mask_data[pressure_level] );
     std::shared_ptr< typename VelPrecHandle::Impl > vel_impl;
+    // One instantiation per (storage, arithmetic) pair; the constructor arguments are
+    // identical, so the body lives in a templated lambda.
+    using ImplPtr  = std::shared_ptr< typename VelPrecHandle::Impl >;
+    auto make_impl = [&]< typename M, typename ArithM >() -> ImplPtr {
+        return std::make_shared< LowPrecABlock< M, ArithM > >(
+            domains, coords_shell, coords_radii, mask_data, boundary_mask_data, eta,
+            inverse_diagonals, bcs, cheby_order, 3, coarse_tol );
+    };
+    using Half           = Kokkos::Experimental::half_t;
+    using BHalf          = Kokkos::Experimental::bhalf_t;
+    const bool low_arith = ( ablock_arith == ABlockArith::LOW );
     switch ( ablock_prec )
     {
     case ABlockPrec::FLOAT:
-        vel_impl = std::make_shared< LowPrecABlock< float > >(
-            domains, coords_shell, coords_radii, mask_data, boundary_mask_data, eta,
-            inverse_diagonals, bcs, cheby_order, 3, coarse_tol );
+        vel_impl = low_arith ? make_impl.template operator()< float, float >()
+                             : make_impl.template operator()< float, double >();
         break;
     case ABlockPrec::FP16:
-        vel_impl = std::make_shared< LowPrecABlock< Kokkos::Experimental::half_t > >(
-            domains, coords_shell, coords_radii, mask_data, boundary_mask_data, eta,
-            inverse_diagonals, bcs, cheby_order, 3, coarse_tol );
+        vel_impl = low_arith ? make_impl.template operator()< Half, Half >()
+                             : make_impl.template operator()< Half, double >();
         break;
     case ABlockPrec::BF16:
-        vel_impl = std::make_shared< LowPrecABlock< Kokkos::Experimental::bhalf_t > >(
-            domains, coords_shell, coords_radii, mask_data, boundary_mask_data, eta,
-            inverse_diagonals, bcs, cheby_order, 3, coarse_tol );
+        vel_impl = low_arith ? make_impl.template operator()< BHalf, BHalf >()
+                             : make_impl.template operator()< BHalf, double >();
         break;
     case ABlockPrec::DOUBLE:
     default:
@@ -1286,7 +1309,8 @@ int main( int argc, char** argv )
     double coarse_tol   = 1e-6;  // coarse FGMRES relative tolerance
     bool   full_stokes  = false; // --solve stokes: outer FGMRES on full saddle point
     KrylovPrec krylov_prec = KrylovPrec::DOUBLE; // --krylov-precision double|single|bf16|fp16 (full-Stokes only)
-    ABlockPrec ablock_prec = ABlockPrec::DOUBLE; // --ablock-prec double|float|fp16|bf16 (full-Stokes only)
+    ABlockPrec  ablock_prec  = ABlockPrec::DOUBLE;  // --ablock-prec double|float|fp16|bf16 (full-Stokes only)
+    ABlockArith ablock_arith = ABlockArith::DOUBLE; // --ablock-arith double|low
     for ( int i = 1; i + 1 < argc; ++i )
     {
         const std::string a = argv[i];
@@ -1309,6 +1333,12 @@ int main( int argc, char** argv )
                                                                         : 0;
         else if ( a == "--coarse-tol" )    coarse_tol  = std::atof( argv[i + 1] );
         else if ( a == "--solve" )         full_stokes = ( std::string( argv[i + 1] ) == "stokes" );
+        else if ( a == "--ablock-arith" )
+        {
+            const std::string q = argv[i + 1];
+            ablock_arith        = ( q == "low" || q == "field" || q == "reduced" ) ? ABlockArith::LOW
+                                                                                  : ABlockArith::DOUBLE;
+        }
         else if ( a == "--ablock-prec" )
         {
             const std::string q = argv[i + 1];
@@ -1370,6 +1400,7 @@ int main( int argc, char** argv )
                                            + krylov_prec_storage_note( krylov_prec )
                                            + ", A-block prec = " + ablock_prec_name( ablock_prec )
                                            + ablock_prec_note( ablock_prec )
+                                           + ", A-block arith = " + ablock_arith_name( ablock_arith )
                                    : std::string() )
                   << ", BC = " << bc_name
                   << ", viscosity = "
@@ -1393,13 +1424,14 @@ int main( int argc, char** argv )
 
             const auto res =
                 run_ablock_mg( min_level, max_level, cheby_order, perturb_amp, rmu, s.gca, max_cycles, bc, s.interp,
-                               visc_profile, coarse_tol, full_stokes, krylov_prec, ablock_prec );
+                               visc_profile, coarse_tol, full_stokes, krylov_prec, ablock_prec, ablock_arith );
 
             summary->add_row(
                 { { "rmu", rmu },
                   { "gca", s.gca },
                   { "krylov", std::string( krylov_prec_name( krylov_prec ) ) },
                   { "ablock_prec", std::string( ablock_prec_name( ablock_prec ) ) },
+                  { "ablock_arith", std::string( ablock_arith_name( ablock_arith ) ) },
                   { "scheme", std::string( s.name ) },
                   { "cycles", res.cycles },
                   { "final_rel_res", res.rel_residual_final },
