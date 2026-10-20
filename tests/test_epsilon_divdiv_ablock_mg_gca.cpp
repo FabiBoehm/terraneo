@@ -381,8 +381,10 @@ class LowPrecABlock final
         linalg::solvers::FGMRESOptions< M > copts;
         copts.restart                     = coarse_restart;
         copts.max_iterations              = ( coarse_tol < 1e-7 ) ? 300 : 50;
-        copts.relative_residual_tolerance = static_cast< M >( coarse_tol );
-        copts.absolute_residual_tolerance = static_cast< M >( 1e-16 );
+        // The tolerances live in FGMRES's dense precision, not in M: 1e-6 is not a
+        // normal fp16 number and the comparison is host-side anyway.
+        copts.relative_residual_tolerance = coarse_tol;
+        copts.absolute_residual_tolerance = 1e-16;
         coarse_table_  = std::make_shared< util::Table >();
         coarse_solver_ = std::make_unique< CSolvM >( coarse_tmps_, copts, coarse_table_,
                                                      CPrecM( inv_diag_m_[0] ) );
