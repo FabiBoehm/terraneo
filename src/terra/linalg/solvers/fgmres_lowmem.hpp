@@ -121,6 +121,11 @@ class FGMRESLowMem
 
         int total_iters = 0;
 
+        // See fgmres.hpp: a bare `break` out of the inner loop skips its ++total_iters,
+        // so restarting from an unchanged residual reproduces the same breakdown and
+        // spins forever. Leave instead, once the basis has contributed what it can.
+        bool hard_stop = false;
+
         while ( total_iters < options_.max_iterations )
         {
             // V_0 = r / ||r||   (compute in double, store as reduced precision)
@@ -179,8 +184,12 @@ class FGMRESLowMem
                 {
                     H( j + 1, j ) = 0;
                     inner_its     = j + 1;
-                    util::logroot << "FGMRESLowMem: Arnoldi breakdown. Restarting. (total_iters = " << total_iters
-                                  << ", j = " << j << ")" << std::endl;
+                    hard_stop     = true;
+                    util::logroot << "FGMRESLowMem[" << tag_ << "]: Arnoldi breakdown. Terminating. (total_iters = "
+                                  << total_iters << ", j = " << j << ", h_jp1j = " << double( h_jp1j )
+                                  << ", threshold = "
+                                  << double( Kokkos::Experimental::epsilon_v< ScalarType > * initial_residual ) << ")"
+                                  << std::endl;
                     break;
                 }
 
@@ -214,8 +223,11 @@ class FGMRESLowMem
                     if ( Kokkos::abs( H( j, j ) ) < Kokkos::Experimental::epsilon_v< ScalarType > )
                     {
                         inner_its = j;
-                        util::logroot << "FGMRESLowMem: Stagnation after Givens. Restarting. (total_iters = "
-                                      << total_iters << ", j = " << j << ")" << std::endl;
+                        hard_stop = true;
+                        util::logroot << "FGMRESLowMem[" << tag_
+                                      << "]: Stagnation after Givens. Terminating. (total_iters = " << total_iters
+                                      << ", j = " << j << ", |H(j,j)| = " << double( Kokkos::abs( H( j, j ) ) ) << ")"
+                                      << std::endl;
                         break;
                     }
 
@@ -295,6 +307,11 @@ class FGMRESLowMem
             }
             if ( beta0 <= options_.absolute_residual_tolerance ||
                  beta0 / initial_residual <= options_.relative_residual_tolerance )
+            {
+                return;
+            }
+
+            if ( hard_stop )
             {
                 return;
             }
