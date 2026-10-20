@@ -140,6 +140,7 @@ struct Parameters
     int  refinement_level_subdomains = 0;
     bool precision_sweep             = false;
     bool precision_matrix            = false;
+    bool tile_sweep                  = false;
 };
 
 template < OperatorLike OperatorT >
@@ -483,7 +484,12 @@ double modelled_bytes( long dofs_scalar )
 /// scalar operators convert to float per operation, so an A = half arm pays a
 /// conversion on every multiply-add whether or not the storage is narrow.
 template < typename S, typename A = S >
-BenchmarkData run_precision( const int level, const int executions, const int refinement_level_subdomains )
+BenchmarkData run_precision( const int level,
+                             const int executions,
+                             const int refinement_level_subdomains,
+                             const int tile_lat    = 0,
+                             const int tile_r      = 0,
+                             const int tile_passes = 0 )
 {
     const auto domain = grid::shell::DistributedDomain::create_uniform(
         level, level, 0.5, 1.0, refinement_level_subdomains, refinement_level_subdomains );
@@ -513,6 +519,16 @@ BenchmarkData run_precision( const int level, const int executions, const int re
     // Storage S, fast-path arithmetic A, geometry double.
     EpsilonDivDivKerngen< S, 3, double, A > op(
         domain, coords_shell, coords_radii, boundary_mask_data, coeff.grid_data(), bcs, false );
+
+    if ( tile_lat > 0 )
+    {
+        // A rejected tiling leaves the operator at its default and reports -1, so the
+        // sweep can tell "not launchable here" apart from "slow".
+        if ( !op.set_tiling( tile_lat, tile_r, tile_passes, false ) )
+        {
+            return BenchmarkData{ level, dofs_vec, -1.0 };
+        }
+    }
 
     const double duration = measure_run_time( executions, op, src, dst );
 
@@ -596,6 +612,92 @@ void run_precision_sweep( const int min_level,
 /// matched (both narrow), storage-only (narrow fields, double arithmetic) and
 /// arithmetic-only (double fields, narrow arithmetic). The differences separate
 /// the cost of the narrow load/store path from the cost of the narrow arithmetic.
+
+/// Team-tile tuning for the production kernel, at every precision.
+///
+/// The tile shape is (lat, lat, r) with r_passes radial passes, so the team holds
+/// lat^2 * r threads and stages ( r * r_passes + 1 ) * ( lat + 1 )^2 nodes. The fast
+/// Dirichlet/Neumann path is launched with LaunchBounds< 128, 5 >, which caps the team
+/// at 128 threads; the candidates below respect that, and set_tiling() rejects anything
+/// that would not launch or would overflow 64 KiB of scratch.
+void run_tile_sweep( const int min_level,
+                     const int max_level,
+                     const int executions,
+                     const int refinement_level_subdomains )
+{
+    using half  = Kokkos::Experimental::half_t;
+    using bhalf = Kokkos::Experimental::bhalf_t;
+
+    struct Tile
+    {
+        int lat, r, passes;
+    };
+    // lat^2 * r <= 128, spanning lateral-heavy to radial-heavy shapes.
+    const std::vector< Tile > tiles = {
+        { 1, 32, 1 }, { 1, 64, 1 }, { 1, 128, 1 }, { 1, 32, 2 }, { 1, 64, 2 },
+        { 2, 8, 1 },  { 2, 16, 1 }, { 2, 32, 1 },  { 2, 8, 2 },  { 2, 16, 2 },
+        { 2, 32, 2 }, { 4, 2, 1 },  { 4, 4, 1 },   { 4, 8, 1 },  { 4, 4, 2 },
+        { 4, 8, 2 },  { 4, 8, 4 },  { 8, 2, 1 },   { 8, 2, 2 },  { 8, 2, 4 },
+        // Teams above 128 threads: set_tiling rejects these unless the operator was
+        // built with a raised TERRA_EPSDIVDIV_MAX_TEAM, and a rejected shape is skipped.
+        { 2, 64, 1 }, { 4, 16, 1 }, { 4, 32, 1 },  { 8, 4, 1 },  { 8, 8, 1 },
+    };
+
+    logroot << "Team-tile sweep for EpsDivDivKerngen, all precisions." << std::endl;
+    logroot << "min_level " << min_level << ", max_level " << max_level << ", executions "
+            << executions << std::endl
+            << std::endl;
+
+    int world_size = 0;
+    MPI_Comm_size( MPI_COMM_WORLD, &world_size );
+
+    util::Table table;
+
+    for ( int level = min_level; level <= max_level; ++level )
+    {
+        for ( const auto& t : tiles )
+        {
+            struct Arm
+            {
+                const char* name;
+                BenchmarkData ( *fn )( int, int, int, int, int, int );
+            };
+            const Arm arms[] = {
+                { "double", &run_precision< double, double > },
+                { "float", &run_precision< float, float > },
+                { "bf16", &run_precision< bhalf, bhalf > },
+                { "fp16", &run_precision< half, half > },
+            };
+
+            for ( const auto& arm : arms )
+            {
+                const auto d = arm.fn( level, executions, refinement_level_subdomains, t.lat, t.r, t.passes );
+                const bool ok = d.duration > 0.0;
+                table.add_row( { { "precision", std::string( arm.name ) },
+                                 { "level", level },
+                                 { "lat", t.lat },
+                                 { "r", t.r },
+                                 { "passes", t.passes },
+                                 { "team", t.lat * t.lat * t.r },
+                                 { "dofs", d.dofs },
+                                 { "duration (s)", ok ? d.duration : 0.0 },
+                                 { "GDoF/s", ok ? d.dofs / d.duration / 1e9 : 0.0 },
+                                 { "launched", ok ? 1 : 0 } } );
+            }
+        }
+        logroot << "level " << level << " done" << std::endl;
+    }
+
+    table.print_pretty();
+    if ( mpi::rank() == 0 )
+    {
+        std::ofstream out( "./csv/tiles_np" + std::to_string( world_size ) + "_ml" +
+                           std::to_string( max_level ) + ".csv" );
+        table.print_csv( out );
+    }
+    table.print_csv( logroot );
+}
+
 void run_precision_matrix( const int min_level,
                            const int max_level,
                            const int executions,
@@ -705,6 +807,9 @@ int main( int argc, char** argv )
         "Refinement level applied to form the subdomains." );
     util::add_option_with_default(
         app, "--executions", parameters.executions, "Number of matrix-vector multiplications to be executed." );
+    app.add_flag( "--tile-sweep",
+                  parameters.tile_sweep,
+                  "Sweep team-tile shapes for the production kernel at every precision." );
     app.add_flag( "--precision-matrix",
                   parameters.precision_matrix,
                   "Separate storage precision from arithmetic precision for each narrow type." );
@@ -725,7 +830,12 @@ int main( int argc, char** argv )
     util::print_cli_summary( app, logroot );
     logroot << "\n\n";
 
-    if ( parameters.precision_matrix )
+    if ( parameters.tile_sweep )
+    {
+        run_tile_sweep(
+            parameters.min_level, parameters.max_level, parameters.executions, parameters.refinement_level_subdomains );
+    }
+    else if ( parameters.precision_matrix )
     {
         run_precision_matrix(
             parameters.min_level, parameters.max_level, parameters.executions, parameters.refinement_level_subdomains );

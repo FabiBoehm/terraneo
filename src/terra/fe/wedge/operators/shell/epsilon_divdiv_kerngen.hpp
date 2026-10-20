@@ -66,6 +66,19 @@ using terra::linalg::trafo::trafo_mat_cartesian_to_normal_tangential;
 // existing instantiation is unchanged. Pass ScalarT to run the contraction at the
 // field precision -- the geometry (coordinates, Jacobian, reference gradients) stays
 // in CoordScalarT either way.
+// Occupancy target for the fast Dirichlet/Neumann and free-slip team policies. The
+// maximum team size caps the tile shape (lat_tile^2 * r_tile) and the minimum waves
+// per execution unit caps the register budget: at 5 waves/SIMD the compiler gets
+// 48 VGPRs + 48 AGPRs on gfx90a and spills, at 4 it gets 64 + 64. Both are
+// overridable from the build so an occupancy/spill trade can be measured without
+// editing this header.
+#ifndef TERRA_EPSDIVDIV_MAX_TEAM
+#define TERRA_EPSDIVDIV_MAX_TEAM 128
+#endif
+#ifndef TERRA_EPSDIVDIV_MIN_WAVES
+#define TERRA_EPSDIVDIV_MIN_WAVES 5
+#endif
+
 template < typename ScalarT, int VecDim = 3, typename CoordScalarT = ScalarT, typename ArithScalarT = double >
 class EpsilonDivDivKerngen
 {
@@ -129,6 +142,18 @@ class EpsilonDivDivKerngen
     int lat_refinement_level_;
 
     // Team-policy tiling (one team handles a slab lat_tile x lat_tile x r_tile cells)
+    /// Tile counts, team size and block count implied by the current tile shape.
+    void recompute_tiling()
+    {
+        r_tile_block_ = r_tile_ * r_passes_;
+
+        lat_tiles_ = ( hex_lat_ + lat_tile_ - 1 ) / lat_tile_;
+        r_tiles_   = ( hex_rad_ + r_tile_block_ - 1 ) / r_tile_block_;
+
+        team_size_ = lat_tile_ * lat_tile_ * r_tile_;
+        blocks_    = local_subdomains_ * lat_tiles_ * lat_tiles_ * r_tiles_;
+    }
+
     int lat_tile_;
     int r_tile_;
     int r_passes_;
@@ -244,13 +269,7 @@ class EpsilonDivDivKerngen
             r_tile_       = 8;
             r_passes_     = 2;
         }
-        r_tile_block_ = r_tile_ * r_passes_;
-
-        lat_tiles_ = ( hex_lat_ + lat_tile_ - 1 ) / lat_tile_;
-        r_tiles_   = ( hex_rad_ + r_tile_block_ - 1 ) / r_tile_block_;
-
-        team_size_ = lat_tile_ * lat_tile_ * r_tile_;
-        blocks_    = local_subdomains_ * lat_tiles_ * lat_tiles_ * r_tiles_;
+        recompute_tiling();
 
         r_min_ = domain_info.radii()[0];
         r_max_ = domain_info.radii()[domain_info.radii().size() - 1];
@@ -271,6 +290,62 @@ class EpsilonDivDivKerngen
     }
 
     void set_penalty_epsilon( ScalarT eps ) { penalty_epsilon_ = eps; }
+
+    /// @brief Override the team-tile shape at runtime, for tuning.
+    ///
+    /// Call before the first apply(). Two limits are checked here rather than left to
+    /// fail at launch: the fast Dirichlet/Neumann path is dispatched with
+    /// Kokkos::LaunchBounds< TERRA_EPSDIVDIV_MAX_TEAM, ... >, so a team of more than
+    /// TERRA_EPSDIVDIV_MAX_TEAM threads cannot be launched at all, and the staging slab grows as
+    /// ( r_tile * r_passes + 1 ) * ( lat_tile + 1 )^2, which has to fit in 64 KiB of
+    /// shared memory. On rejection the previous tiling is restored and false returned,
+    /// so a tuning sweep can simply skip the configuration.
+    bool set_tiling( int lat_tile, int r_tile, int r_passes, bool verbose = true )
+    {
+        if ( lat_tile < 1 || r_tile < 1 || r_passes < 1 )
+        {
+            util::logroot << "[EpsilonDivDiv] set_tiling rejected: tiles must be >= 1" << std::endl;
+            return false;
+        }
+        if ( lat_tile * lat_tile * r_tile > TERRA_EPSDIVDIV_MAX_TEAM )
+        {
+            util::logroot << "[EpsilonDivDiv] set_tiling rejected (" << lat_tile << "," << lat_tile << ","
+                          << r_tile << "): team_size " << lat_tile * lat_tile * r_tile
+                          << " exceeds the LaunchBounds of " << TERRA_EPSDIVDIV_MAX_TEAM << std::endl;
+            return false;
+        }
+
+        const int saved_lat = lat_tile_, saved_r = r_tile_, saved_p = r_passes_;
+        lat_tile_ = lat_tile;
+        r_tile_   = r_tile;
+        r_passes_ = r_passes;
+        recompute_tiling();
+
+        const size_t shmem = team_shmem_size( team_size_ ) > team_shmem_size_dn( team_size_ )
+                                 ? team_shmem_size( team_size_ )
+                                 : team_shmem_size_dn( team_size_ );
+        if ( shmem > 64u * 1024u )
+        {
+            util::logroot << "[EpsilonDivDiv] set_tiling rejected (" << lat_tile << "," << lat_tile << ","
+                          << r_tile << "," << r_passes << "): " << shmem << " B of scratch exceeds 64 KiB"
+                          << std::endl;
+            lat_tile_ = saved_lat;
+            r_tile_   = saved_r;
+            r_passes_ = saved_p;
+            recompute_tiling();
+            return false;
+        }
+
+        if ( verbose )
+        {
+            util::logroot << "[EpsilonDivDiv] retiled to (x,y,r)=(" << lat_tile_ << "," << lat_tile_ << ","
+                          << r_tile_ << "), r_passes=" << r_passes_ << ", team_size=" << team_size_
+                          << ", blocks=" << blocks_ << ", scratch=" << shmem << " B" << std::endl;
+        }
+        return true;
+    }
+
+    int team_size() const { return team_size_; }
 
     /**
      * @brief Initialize penalty for fs/fs null-space regularization.
@@ -569,7 +644,7 @@ class EpsilonDivDivKerngen
         }
         else
         {
-            Kokkos::TeamPolicy< Kokkos::LaunchBounds< 128, 5 > > dn_policy( blocks_, team_size_ );
+            Kokkos::TeamPolicy< Kokkos::LaunchBounds< TERRA_EPSDIVDIV_MAX_TEAM, TERRA_EPSDIVDIV_MIN_WAVES > > dn_policy( blocks_, team_size_ );
             dn_policy.set_scratch_size( 0, Kokkos::PerTeam( team_shmem_size_dn( team_size_ ) ) );
             if ( diagonal_ )
             {
