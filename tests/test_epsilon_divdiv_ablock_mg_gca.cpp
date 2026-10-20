@@ -19,6 +19,8 @@
 // (Ra=7e3, free-slip both shells, Y_3^2 perturbation), same as the contrast
 // test -- only the contrast rmu is swept here instead of fixed at 1e5.
 
+#include <cstring>
+
 #include "../src/terra/communication/shell/communication.hpp"
 
 #include "fe/strong_algebraic_dirichlet_enforcement.hpp"
@@ -476,9 +478,22 @@ class LowPrecABlock final
                 },
                 Kokkos::Max< double >( mx_double ) );
             Kokkos::fence();
-            util::logroot << "[probe] assign 3.5: host[0,1,1,1] = " << static_cast< double >( host( 0, 1, 1, 1 ) )
-                          << ", norm_inf (reduced in M) = " << static_cast< double >( linalg::norm_inf( *x_m_ ) )
-                          << ", Max<double> over the same view = " << mx_double << std::endl;
+            // Compare raw bit patterns, so a broken host-side conversion cannot hide a
+            // correct value (or fake one). 3.5 is 0x4300 in fp16 and 0x4060 in bf16.
+            const M  nrm = linalg::norm_inf( *x_m_ );
+            const M  ref = static_cast< M >( 3.5 );
+            uint16_t nrm_bits = 0, ref_bits = 0;
+            if constexpr ( sizeof( M ) == 2 )
+            {
+                std::memcpy( &nrm_bits, &nrm, 2 );
+                std::memcpy( &ref_bits, &ref, 2 );
+            }
+            util::logroot << "[probe] assign 3.5: host mirror[0,1,1,1] = " << static_cast< double >( host( 0, 1, 1, 1 ) )
+                          << ", Max<double> over the view = " << mx_double << "\n"
+                          << "[probe]   host M(3.5) -> double = " << static_cast< double >( ref ) << ", bits = 0x"
+                          << std::hex << ref_bits << std::dec << "\n"
+                          << "[probe]   norm_inf (Max<M>) -> double = " << static_cast< double >( nrm )
+                          << ", bits = 0x" << std::hex << nrm_bits << std::dec << std::endl;
             linalg::assign( *x_m_, static_cast< M >( 0 ) );
         }
 
