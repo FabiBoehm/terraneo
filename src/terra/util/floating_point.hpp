@@ -52,15 +52,17 @@ using Accumulator = std::conditional_t< std::floating_point< T >, T, double >;
 ///       well beyond that, and a Kokkos View base is at least 256-byte aligned, so
 ///       the access stays inside the allocation; it can touch the neighbouring
 ///       element, which the CAS retry handles.
-/// @tparam T Field precision.
+/// @tparam T Field precision of the destination.
+/// @tparam U Summand type; narrowed to @p T, as Kokkos::atomic_add would. The hex-cell
+///           path accumulates in double and scatters into the field precision.
 /// @param dest Address to add into.
-/// @param value Summand, in the field precision.
-template < FloatingPoint T >
-KOKKOS_INLINE_FUNCTION void atomic_add_lockfree( T* dest, T value )
+/// @param value Summand.
+template < FloatingPoint T, typename U >
+KOKKOS_INLINE_FUNCTION void atomic_add_lockfree( T* dest, U value )
 {
     if constexpr ( sizeof( T ) >= 4 )
     {
-        Kokkos::atomic_add( dest, value );
+        Kokkos::atomic_add( dest, static_cast< T >( value ) );
     }
     else
     {
@@ -79,7 +81,7 @@ KOKKOS_INLINE_FUNCTION void atomic_add_lockfree( T* dest, T value )
             assumed = old;
 
             const auto bits = static_cast< std::uint16_t >( ( assumed >> shift ) & 0xffffu );
-            const T    cur  = static_cast< T >( Kokkos::bit_cast< T >( bits ) + value );
+            const T    cur  = static_cast< T >( Kokkos::bit_cast< T >( bits ) + static_cast< T >( value ) );
             const auto out  = Kokkos::bit_cast< std::uint16_t >( cur );
             const Word updated = ( assumed & ~mask ) | ( Word( out ) << shift );
 
