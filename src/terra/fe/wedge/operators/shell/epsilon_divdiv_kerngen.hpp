@@ -1644,22 +1644,22 @@ class EpsilonDivDivKerngen
                         }
                         // The scaling is geometry, so it is formed in double and
                         // narrowed once; everything that touches the field values then
-                        // runs in ArithT like the rest of this kernel.
+                        // runs in ScalarType like the rest of this kernel.
                         const double diag_mean = static_cast< double >( kwJ ) * ( 10.0 / 54.0 ) * sum_gg;
-                        const ArithT eps       = static_cast< ArithT >( stab_c_ * diag_mean / NORM2_G );
+                        const ScalarType eps       = static_cast< ScalarType >( stab_c_ * diag_mean / NORM2_G );
 
                         for ( int d = 0; d < 3; ++d )
                         {
-                            ArithT c1 = 0.0, c2 = 0.0;
+                            ScalarType c1 = 0.0, c2 = 0.0;
 #pragma unroll
                             for ( int n = cmb_shift; n < 6 - surface_shift; ++n )
                             {
                                 const int nid =
                                     node_id( tx + WEDGE_NODE_OFF[w][n][0], ty + WEDGE_NODE_OFF[w][n][1] );
                                 const int    lvl = lvl0 + WEDGE_NODE_OFF[w][n][2];
-                                const ArithT u   = src_sh( nid, d, lvl );
-                                c1 += static_cast< ArithT >( G1[n] ) * u;
-                                c2 += static_cast< ArithT >( G2[n] ) * u;
+                                const ScalarType u   = src_sh( nid, d, lvl );
+                                c1 += static_cast< ScalarType >( G1[n] ) * u;
+                                c2 += static_cast< ScalarType >( G2[n] ) * u;
                             }
 #pragma unroll
                             for ( int n = cmb_shift; n < 6 - surface_shift; ++n )
@@ -1669,8 +1669,8 @@ class EpsilonDivDivKerngen
                                 const int ddr = WEDGE_NODE_OFF[w][n][2];
                                 Kokkos::atomic_add(
                                     &dst_( local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr, d ),
-                                    static_cast< ScalarType >( eps * ( static_cast< ArithT >( G1[n] ) * c1 +
-                                                                       static_cast< ArithT >( G2[n] ) * c2 ) ) );
+                                    static_cast< ScalarType >( eps * ( static_cast< ScalarType >( G1[n] ) * c1 +
+                                                                       static_cast< ScalarType >( G2[n] ) * c2 ) ) );
                             }
                         }
                     }
@@ -1733,12 +1733,12 @@ class EpsilonDivDivKerngen
                                 sum_gg += b0 * b0 + b1 * b1 + b2 * b2;
                             }
                             const double diag_mean = static_cast< double >( kwJ ) * ( 10.0 / 54.0 ) * sum_gg;
-                            const ArithT eps       = static_cast< ArithT >( stab_c_ * diag_mean / NORM2_G );
+                            const ScalarType eps       = static_cast< ScalarType >( stab_c_ * diag_mean / NORM2_G );
 #pragma unroll
                             for ( int n = surface_shift; n < 6 - cmb_shift; ++n )
                             {
-                                const ArithT gdiag =
-                                    static_cast< ArithT >( G1[n] * G1[n] + G2[n] * G2[n] );
+                                const ScalarType gdiag =
+                                    static_cast< ScalarType >( G1[n] * G1[n] + G2[n] * G2[n] );
                                 const int ddx = WEDGE_NODE_OFF[w][n][0];
                                 const int ddy = WEDGE_NODE_OFF[w][n][1];
                                 const int ddr = WEDGE_NODE_OFF[w][n][2];
