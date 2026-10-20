@@ -97,9 +97,13 @@ class EpsilonDivDivKerngen
     /// Precision the tile-local scatter accumulates in. Never 16-bit: a 2-byte
     /// atomic_add has no lock-free implementation and falls back to a warp spin lock,
     /// which measured as the single largest cost of a reduced field precision.
-    /// Accumulator<> already encodes "wide enough to sum in" for reductions; the
-    /// scatter follows the same rule.
-    using AccT                          = util::Accumulator< ArithT >;
+    ///
+    /// float rather than double for the 16-bit arms. A node takes on the order of
+    /// twenty contributions carrying at most an 11-bit mantissa, and the sum is
+    /// narrowed back to ScalarType on the way out, so float holds it comfortably;
+    /// double would only double the scratch these arms carry, and with it cost
+    /// occupancy -- which is the whole reason the buffer is off for wide storage.
+    using AccT = std::conditional_t< ( sizeof( ArithT ) >= 4 ), ArithT, float >;
     /// Whether the scatter goes through the team's tile buffer instead of straight to
     /// global memory. Only narrow storage wants it: a 2-byte atomic_add has no
     /// lock-free form and falls back to a warp spin lock, so routing it through a
@@ -1297,14 +1301,15 @@ class EpsilonDivDivKerngen
 
             if ( xi <= hex_lat_ && yi <= hex_lat_ && rr <= hex_rad_ )
             {
-                // The team scratch tiles are double regardless of ScalarT (see
-                // team_shmem_size), so the gather from the stored fields is the one
-                // place the field precision is widened. The 16-bit Kokkos types only
-                // convert out of themselves explicitly, hence the casts.
-                k_sh( node, lvl )      = static_cast< double >( k_( local_subdomain_id, xi, yi, rr ) );
-                src_sh( node, 0, lvl ) = static_cast< double >( src_( local_subdomain_id, xi, yi, rr, 0 ) );
-                src_sh( node, 1, lvl ) = static_cast< double >( src_( local_subdomain_id, xi, yi, rr, 1 ) );
-                src_sh( node, 2, lvl ) = static_cast< double >( src_( local_subdomain_id, xi, yi, rr, 2 ) );
+                // Straight into the tile's own type. Going through double here is a
+                // leftover from when the tiles were double whatever ScalarT was; with
+                // ArithT tiles it makes a 16-bit gather a half->double->half round
+                // trip, four per node and level. The 16-bit Kokkos types only convert
+                // out of themselves explicitly, hence the casts.
+                k_sh( node, lvl )      = static_cast< ArithT >( k_( local_subdomain_id, xi, yi, rr ) );
+                src_sh( node, 0, lvl ) = static_cast< ArithT >( src_( local_subdomain_id, xi, yi, rr, 0 ) );
+                src_sh( node, 1, lvl ) = static_cast< ArithT >( src_( local_subdomain_id, xi, yi, rr, 1 ) );
+                src_sh( node, 2, lvl ) = static_cast< ArithT >( src_( local_subdomain_id, xi, yi, rr, 2 ) );
             }
             else
             {
