@@ -1193,6 +1193,25 @@ class EpsilonDivDivKerngen
     /// storage is narrow, global memory otherwise. The returned pointer differs in
     /// type between the two, which is why this is a selector rather than a branch at
     /// each of the eight scatter sites.
+    /// DIAGNOSTIC ONLY. Replaces the tile accumulation's atomic with a plain +=,
+    /// which races between threads owning adjacent cells and so produces wrong
+    /// results. It exists to bound what removing the LDS atomic could be worth,
+    /// before paying for a per-cell register accumulation that may or may not stay
+    /// in registers. Never define this for a run whose numbers matter.
+#ifdef TERRA_EPSDIVDIV_DIAG_NONATOMIC
+    template < typename T, typename V >
+    static KOKKOS_INLINE_FUNCTION void tile_accumulate( T* p, const V& v )
+    {
+        *p += static_cast< T >( v );
+    }
+#else
+    template < typename T, typename V >
+    static KOKKOS_INLINE_FUNCTION void tile_accumulate( T* p, const V& v )
+    {
+        util::atomic_add_lockfree( p, v );
+    }
+#endif
+
     template < typename Buf >
     KOKKOS_INLINE_FUNCTION auto* scatter_target( const Buf& tile,
                                                  const int  lnode,
@@ -1532,15 +1551,15 @@ class EpsilonDivDivKerngen
                             const int ddx = WEDGE_NODE_OFF[w][n][0];
                             const int ddy = WEDGE_NODE_OFF[w][n][1];
                             const int ddr = WEDGE_NODE_OFF[w][n][2];
-                            util::atomic_add_lockfree(
+                            tile_accumulate(
                                 scatter_target( dst_sh, node_id( tx + ddx, ty + ddy ), 0, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
                                 static_cast< ScalarType >(
                                     kwJ * ( two * ( a0 * gu00 + a1 * gu10 + a2 * gu20 ) + ntt * a0 * div_u ) ) );
-                            util::atomic_add_lockfree(
+                            tile_accumulate(
                                 scatter_target( dst_sh, node_id( tx + ddx, ty + ddy ), 1, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
                                 static_cast< ScalarType >(
                                     kwJ * ( two * ( a0 * gu10 + a1 * gu11 + a2 * gu21 ) + ntt * a1 * div_u ) ) );
-                            util::atomic_add_lockfree(
+                            tile_accumulate(
                                 scatter_target( dst_sh, node_id( tx + ddx, ty + ddy ), 2, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
                                 static_cast< ScalarType >(
                                     kwJ * ( two * ( a0 * gu20 + a1 * gu21 + a2 * gu22 ) + ntt * a2 * div_u ) ) );
@@ -1606,7 +1625,7 @@ class EpsilonDivDivKerngen
                                 const int ddx = WEDGE_NODE_OFF[w][n][0];
                                 const int ddy = WEDGE_NODE_OFF[w][n][1];
                                 const int ddr = WEDGE_NODE_OFF[w][n][2];
-                                util::atomic_add_lockfree(
+                                tile_accumulate(
                                     scatter_target( dst_sh, node_id( tx + ddx, ty + ddy ), d, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
                                     static_cast< ScalarType >( eps * ( static_cast< ArithT >( G1[n] ) * c1 +
                                                                        static_cast< ArithT >( G2[n] ) * c2 ) ) );
@@ -1642,13 +1661,13 @@ class EpsilonDivDivKerngen
                             const int ddx = WEDGE_NODE_OFF[w][n][0];
                             const int ddy = WEDGE_NODE_OFF[w][n][1];
                             const int ddr = WEDGE_NODE_OFF[w][n][2];
-                            util::atomic_add_lockfree(
+                            tile_accumulate(
                                 scatter_target( dst_sh, node_id( tx + ddx, ty + ddy ), 0, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
                                 static_cast< ScalarType >( kwJ * sv0 * d0 ) );
-                            util::atomic_add_lockfree(
+                            tile_accumulate(
                                 scatter_target( dst_sh, node_id( tx + ddx, ty + ddy ), 1, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
                                 static_cast< ScalarType >( kwJ * sv1 * d1 ) );
-                            util::atomic_add_lockfree(
+                            tile_accumulate(
                                 scatter_target( dst_sh, node_id( tx + ddx, ty + ddy ), 2, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
                                 static_cast< ScalarType >( kwJ * sv2 * d2 ) );
                         }
@@ -1686,7 +1705,7 @@ class EpsilonDivDivKerngen
                                 const int ddy = WEDGE_NODE_OFF[w][n][1];
                                 const int ddr = WEDGE_NODE_OFF[w][n][2];
                                 for ( int d = 0; d < 3; ++d )
-                                    util::atomic_add_lockfree(
+                                    tile_accumulate(
                                         scatter_target( dst_sh, node_id( tx + ddx, ty + ddy ), d, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
                                         static_cast< ScalarType >( eps * gdiag ) );
                             }
