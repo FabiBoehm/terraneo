@@ -397,7 +397,15 @@ class LowPrecABlock final
         copts.max_iterations              = ( coarse_tol < 1e-7 ) ? 300 : 50;
         // The tolerances live in FGMRES's dense precision, not in M: 1e-6 is not a
         // normal fp16 number and the comparison is host-side anyway.
-        copts.relative_residual_tolerance = coarse_tol;
+        //
+        // They are also floored at the working precision's unit roundoff. A coarse
+        // solve cannot be driven below what M can represent: asking bf16 (eps 7.8e-3)
+        // for 1e-6 only burns the iteration budget and trips the Arnoldi breakdown
+        // guard on every restart -- 613 times in one run before this. Each precision
+        // is asked for the best it can actually deliver, which leaves double at 1e-6
+        // and costs float essentially nothing.
+        coarse_tol_eff_                   = std::max( coarse_tol, 10.0 * util::epsilon_of< M >() );
+        copts.relative_residual_tolerance = coarse_tol_eff_;
         copts.absolute_residual_tolerance = 1e-16;
         coarse_table_  = std::make_shared< util::Table >();
         coarse_solver_ = std::make_unique< CSolvM >( coarse_tmps_, copts, coarse_table_,
@@ -424,7 +432,9 @@ class LowPrecABlock final
             eta_overflow      = eta_overflow || linalg::has_nan_or_inf( eta_m_[l] );
             inv_diag_overflow = inv_diag_overflow || linalg::has_nan_or_inf( inv_diag_m_[l] );
         }
-        util::logroot << "[LowPrecABlock] M finite_max = "
+        util::logroot << "[LowPrecABlock] coarse rel-tol = " << coarse_tol_eff_ << " (requested " << coarse_tol
+                      << ", floor 10*eps = " << 10.0 * util::epsilon_of< M >() << ")\n"
+                      << "                M finite_max = "
                       // The numeric traits of the 16-bit types are bit_comparison_type, not M,
                       // so they go through M's constructor before they can reach double.
                       << static_cast< double >( M( Kokkos::Experimental::finite_max_v< M > ) )
@@ -569,6 +579,7 @@ class LowPrecABlock final
     std::unique_ptr< VecM >        x_m_, b_m_;
     std::unique_ptr< OuterVec >    b_scaled_;
     bool                           probe_ = true;
+    double                         coarse_tol_eff_ = 0.0;
 };
 
 enum class BCKind { DIRICHLET, FREESLIP };
@@ -819,7 +830,9 @@ RunResult run_ablock_mg( int    min_level,
     linalg::solvers::FGMRESOptions< ScalarType > coarse_opts;
     coarse_opts.restart                     = coarse_restart;
     coarse_opts.max_iterations              = coarse_max;
-    coarse_opts.relative_residual_tolerance = coarse_tol;
+    // Same unit-roundoff floor as the reduced-precision hierarchies (see
+    // LowPrecABlock); inactive at double, where 10*eps is 2.2e-15.
+    coarse_opts.relative_residual_tolerance = std::max( coarse_tol, 10.0 * util::epsilon_of< ScalarType >() );
     coarse_opts.absolute_residual_tolerance = 1e-16;
     CoarseGridSolver coarse_solver( coarse_tmps, coarse_opts, coarse_table, CoarseGridPrec( inverse_diagonals[0] ) );
     coarse_solver.set_tag( "coarse_grid_fgmres" );
