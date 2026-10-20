@@ -1,5 +1,19 @@
-// "Naked" viscous-block (A-block) multigrid convergence study under increasing
-// viscosity contrast, with and without Galerkin coarse approximation (GCA).
+// Mixed-precision study of the viscous-block (A-block) multigrid solver.
+//
+// Two precisions are selectable at runtime and both default to double:
+//   --ablock-prec double|float|bf16|fp16   the working precision of the whole
+//       velocity V-cycle -- level vectors, coarse operators, Chebyshev smoothers,
+//       transfers, inverse diagonals and the coarse FGMRES. Node coordinates stay
+//       double in every operator (CoordScalarT), since the Jacobian is formed by
+//       differencing them and that loses the geometry at 16 bits.
+//   --krylov-precision double|single|bf16|fp16   the storage precision of the outer
+//       FGMRES Krylov basis (via FGMRESLowMem).
+// Everything else -- the outer FGMRES, the Stokes operator, the pressure mass matrix
+// and the Schur block -- is double throughout, so each run measures what one
+// reduced-precision component costs in outer iterations.
+//
+// It doubles as the original A-block convergence study under increasing viscosity
+// contrast, with and without Galerkin coarse approximation (--gca).
 //
 // Unlike test_epsilon_divdiv_stokes_viscosity_contrast.cpp -- which wraps the
 // viscous-block MG as the (1,1) preconditioner inside the full Stokes saddle-
