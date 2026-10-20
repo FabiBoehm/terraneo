@@ -100,6 +100,14 @@ class EpsilonDivDivKerngen
     /// Accumulator<> already encodes "wide enough to sum in" for reductions; the
     /// scatter follows the same rule.
     using AccT                          = util::Accumulator< ArithT >;
+    /// Whether the scatter goes through the team's tile buffer instead of straight to
+    /// global memory. Only narrow storage wants it: a 2-byte atomic_add has no
+    /// lock-free form and falls back to a warp spin lock, so routing it through a
+    /// wider tile buffer is worth 1.9x (fp16) to 4.2x (bf16). For 4- and 8-byte
+    /// storage the global atomic is already native, and the buffer is then pure
+    /// overhead -- it costs shared memory, hence occupancy, plus a barrier and a
+    /// second pass, and measured 0.83x (double) and 0.81x (float) on H100.
+    static constexpr bool use_tile_scatter = ( sizeof( ScalarType ) < 4 );
     static constexpr int LocalMatrixDim = 18;
     using Grid4DDataLocalMatrices = terra::grid::Grid4DDataMatrices< ScalarType, LocalMatrixDim, LocalMatrixDim, 2 >;
     using LocalMatrixStorage      = linalg::solvers::LocalMatrixStorage< ScalarType, LocalMatrixDim >;
@@ -803,7 +811,7 @@ class EpsilonDivDivKerngen
         // stops being double, and the apply then reads garbage and produces NaN.
         const size_t geom_scalars  = size_t( nxy ) * 3 + size_t( nlev );
         const size_t field_scalars = size_t( nxy ) * 3 * nlev + size_t( nxy ) * nlev;
-        const size_t acc_scalars   = size_t( nxy ) * 3 * nlev;
+        const size_t acc_scalars   = use_tile_scatter ? size_t( nxy ) * 3 * nlev : 0;
 
         return shmem_block_bytes( sizeof( GeomT ) * geom_scalars ) +
                shmem_block_bytes( sizeof( ArithT ) * field_scalars ) +
@@ -1177,6 +1185,30 @@ class EpsilonDivDivKerngen
     }
 
     // ===================== FAST DIRICHLET/NEUMANN PATH =====================
+    /// Where one node contribution is accumulated: the team's tile buffer when the
+    /// storage is narrow, global memory otherwise. The returned pointer differs in
+    /// type between the two, which is why this is a selector rather than a branch at
+    /// each of the eight scatter sites.
+    template < typename Buf >
+    KOKKOS_INLINE_FUNCTION auto* scatter_target( const Buf& tile,
+                                                 const int  lnode,
+                                                 const int  d,
+                                                 const int  llvl,
+                                                 const int  sub,
+                                                 const int  xi,
+                                                 const int  yi,
+                                                 const int  rr ) const
+    {
+        if constexpr ( use_tile_scatter )
+        {
+            return &tile( lnode, d, llvl );
+        }
+        else
+        {
+            return &dst_( sub, xi, yi, rr, d );
+        }
+    }
+
     template < bool Diagonal >
     KOKKOS_INLINE_FUNCTION
     void operator_fast_dirichlet_neumann_path(
@@ -1201,8 +1233,8 @@ class EpsilonDivDivKerngen
         auto* field_mem = reinterpret_cast< ArithT* >( team.team_shmem().get_shmem( shmem_block_bytes(
             sizeof( ArithT ) * ( size_t( nxy ) * 3 * nlev + size_t( nxy ) * nlev ) ) ) );
 
-        auto* acc_mem = reinterpret_cast< AccT* >(
-            team.team_shmem().get_shmem( shmem_block_bytes( sizeof( AccT ) * size_t( nxy ) * 3 * nlev ) ) );
+        auto* acc_mem = reinterpret_cast< AccT* >( team.team_shmem().get_shmem(
+            shmem_block_bytes( sizeof( AccT ) * ( use_tile_scatter ? size_t( nxy ) * 3 * nlev : 0 ) ) ) );
 
         using ScratchCoords =
             Kokkos::View< GeomT**, Kokkos::LayoutRight, typename Team::scratch_memory_space, Kokkos::MemoryUnmanaged >;
@@ -1224,7 +1256,7 @@ class EpsilonDivDivKerngen
         // memory as one atomic per node instead of one per wedge-node.
         using ScratchDst =
             Kokkos::View< AccT***, Kokkos::LayoutRight, typename Team::scratch_memory_space, Kokkos::MemoryUnmanaged >;
-        ScratchDst dst_sh( acc_mem, nxy, 3, nlev );
+        ScratchDst dst_sh( acc_mem, use_tile_scatter ? nxy : 0, 3, use_tile_scatter ? nlev : 0 );
 
         auto node_id = [&]( int nx, int ny ) -> int { return nx + ( lat_tile_ + 1 ) * ny; };
 
@@ -1280,7 +1312,8 @@ class EpsilonDivDivKerngen
                 src_sh( node, 0, lvl ) = src_sh( node, 1, lvl ) = src_sh( node, 2, lvl ) = 0.0;
             }
 
-            dst_sh( node, 0, lvl ) = dst_sh( node, 1, lvl ) = dst_sh( node, 2, lvl ) = AccT( 0 );
+            if constexpr ( use_tile_scatter )
+                dst_sh( node, 0, lvl ) = dst_sh( node, 1, lvl ) = dst_sh( node, 2, lvl ) = AccT( 0 );
         } );
 
         team.team_barrier();
@@ -1495,15 +1528,15 @@ class EpsilonDivDivKerngen
                             const int ddy = WEDGE_NODE_OFF[w][n][1];
                             const int ddr = WEDGE_NODE_OFF[w][n][2];
                             util::atomic_add_lockfree(
-                                &dst_sh( node_id( tx + ddx, ty + ddy ), 0, lvl0 + ddr ),
+                                scatter_target( dst_sh, node_id( tx + ddx, ty + ddy ), 0, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
                                 static_cast< ScalarType >(
                                     kwJ * ( two * ( a0 * gu00 + a1 * gu10 + a2 * gu20 ) + ntt * a0 * div_u ) ) );
                             util::atomic_add_lockfree(
-                                &dst_sh( node_id( tx + ddx, ty + ddy ), 1, lvl0 + ddr ),
+                                scatter_target( dst_sh, node_id( tx + ddx, ty + ddy ), 1, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
                                 static_cast< ScalarType >(
                                     kwJ * ( two * ( a0 * gu10 + a1 * gu11 + a2 * gu21 ) + ntt * a1 * div_u ) ) );
                             util::atomic_add_lockfree(
-                                &dst_sh( node_id( tx + ddx, ty + ddy ), 2, lvl0 + ddr ),
+                                scatter_target( dst_sh, node_id( tx + ddx, ty + ddy ), 2, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
                                 static_cast< ScalarType >(
                                     kwJ * ( two * ( a0 * gu20 + a1 * gu21 + a2 * gu22 ) + ntt * a2 * div_u ) ) );
                         }
@@ -1569,7 +1602,7 @@ class EpsilonDivDivKerngen
                                 const int ddy = WEDGE_NODE_OFF[w][n][1];
                                 const int ddr = WEDGE_NODE_OFF[w][n][2];
                                 util::atomic_add_lockfree(
-                                    &dst_sh( node_id( tx + ddx, ty + ddy ), d, lvl0 + ddr ),
+                                    scatter_target( dst_sh, node_id( tx + ddx, ty + ddy ), d, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
                                     static_cast< ScalarType >( eps * ( static_cast< ArithT >( G1[n] ) * c1 +
                                                                        static_cast< ArithT >( G2[n] ) * c2 ) ) );
                             }
@@ -1605,13 +1638,13 @@ class EpsilonDivDivKerngen
                             const int ddy = WEDGE_NODE_OFF[w][n][1];
                             const int ddr = WEDGE_NODE_OFF[w][n][2];
                             util::atomic_add_lockfree(
-                                &dst_sh( node_id( tx + ddx, ty + ddy ), 0, lvl0 + ddr ),
+                                scatter_target( dst_sh, node_id( tx + ddx, ty + ddy ), 0, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
                                 static_cast< ScalarType >( kwJ * sv0 * d0 ) );
                             util::atomic_add_lockfree(
-                                &dst_sh( node_id( tx + ddx, ty + ddy ), 1, lvl0 + ddr ),
+                                scatter_target( dst_sh, node_id( tx + ddx, ty + ddy ), 1, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
                                 static_cast< ScalarType >( kwJ * sv1 * d1 ) );
                             util::atomic_add_lockfree(
-                                &dst_sh( node_id( tx + ddx, ty + ddy ), 2, lvl0 + ddr ),
+                                scatter_target( dst_sh, node_id( tx + ddx, ty + ddy ), 2, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
                                 static_cast< ScalarType >( kwJ * sv2 * d2 ) );
                         }
 
@@ -1649,7 +1682,7 @@ class EpsilonDivDivKerngen
                                 const int ddr = WEDGE_NODE_OFF[w][n][2];
                                 for ( int d = 0; d < 3; ++d )
                                     util::atomic_add_lockfree(
-                                        &dst_sh( node_id( tx + ddx, ty + ddy ), d, lvl0 + ddr ),
+                                        scatter_target( dst_sh, node_id( tx + ddx, ty + ddy ), d, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
                                         static_cast< ScalarType >( eps * gdiag ) );
                             }
                         }
@@ -1664,26 +1697,29 @@ class EpsilonDivDivKerngen
         // the only place a 16-bit field precision is narrowed on the way out, so the
         // 2-byte atomic -- which has no lock-free form and falls back to a warp spin
         // lock -- is gone from the inner loops entirely.
-        team.team_barrier();
+        if constexpr ( use_tile_scatter )
+        {
+            team.team_barrier();
 
-        Kokkos::parallel_for( Kokkos::TeamThreadRange( team, total_pairs ), [&]( int t ) {
-            const int node = t / nlev;
-            const int lvl  = t - node * nlev;
-            const int xi   = x0 + node % ( lat_tile_ + 1 );
-            const int yi   = y0 + node / ( lat_tile_ + 1 );
-            const int rr   = r0 + lvl;
+            Kokkos::parallel_for( Kokkos::TeamThreadRange( team, total_pairs ), [&]( int t ) {
+                const int node = t / nlev;
+                const int lvl  = t - node * nlev;
+                const int xi   = x0 + node % ( lat_tile_ + 1 );
+                const int yi   = y0 + node / ( lat_tile_ + 1 );
+                const int rr   = r0 + lvl;
 
-            if ( xi > hex_lat_ || yi > hex_lat_ || rr > hex_rad_ )
-                return;
+                if ( xi > hex_lat_ || yi > hex_lat_ || rr > hex_rad_ )
+                    return;
 
-            for ( int d = 0; d < 3; ++d )
-            {
-                const AccT v = dst_sh( node, d, lvl );
-                if ( v != AccT( 0 ) )
-                    util::atomic_add_lockfree( &dst_( local_subdomain_id, xi, yi, rr, d ),
-                                               static_cast< ScalarType >( v ) );
-            }
-        } );
+                for ( int d = 0; d < 3; ++d )
+                {
+                    const AccT v = dst_sh( node, d, lvl );
+                    if ( v != AccT( 0 ) )
+                        util::atomic_add_lockfree( &dst_( local_subdomain_id, xi, yi, rr, d ),
+                                                   static_cast< ScalarType >( v ) );
+                }
+            } );
+        }
     }
 
     // ===================== FAST FREESLIP PATH =====================
