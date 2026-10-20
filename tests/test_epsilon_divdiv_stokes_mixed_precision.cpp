@@ -298,6 +298,18 @@ enum class ABlockPrec { DOUBLE, FLOAT, FP16, BF16, NONE };
 /// both tells you whether a degradation came from the bus or from the contraction.
 enum class ABlockArith { DOUBLE, LOW };
 
+/// Outer iteration. FGMRES is the Krylov method; IR is pure iterative refinement,
+/// x <- x + M^-1 (b - A x), with the residual and the update in double and M^-1 one
+/// application of the block preconditioner.
+///
+/// IR is the sharper probe of a reduced-precision V-cycle: its convergence rate is
+/// exactly the preconditioner's contraction factor, with nothing in between. FGMRES
+/// builds a Krylov space that can compensate for a mediocre preconditioner, which is
+/// what makes a low-precision arm there look better than the V-cycle really is.
+enum class OuterSolver { FGMRES, IR };
+
+inline const char* outer_solver_name( OuterSolver o ) { return o == OuterSolver::IR ? "ir" : "fgmres"; }
+
 inline const char* ablock_arith_name( ABlockArith a )
 {
     return a == ABlockArith::LOW ? "low" : "double";
@@ -643,7 +655,8 @@ RunResult run_ablock_mg( int    min_level,
                          ABlockPrec  ablock_prec, // working precision of the A-block V-cycle preconditioner
                          ABlockArith ablock_arith, // fast-path arithmetic precision in that V-cycle
                          double      hourglass_c, // rank-6 hourglass stabilization coefficient (0 = off)
-                         double      outer_tol )  // outer FGMRES relative residual tolerance
+                         double      outer_tol,   // outer relative residual tolerance
+                         OuterSolver outer_solver ) // fgmres or pure iterative refinement
 {
     using ScalarType = double;
 
@@ -1033,7 +1046,56 @@ RunResult run_ablock_mg( int    min_level,
     //                       reduced-precision basis vectors),
     // mirroring the mc app's reduced-precision Krylov-basis workspace in
     // stokes_solver.hpp.
-    if ( krylov_prec == KrylovPrec::DOUBLE )
+    if ( outer_solver == OuterSolver::IR )
+    {
+        // Pure iterative refinement. The residual and the update are formed in double;
+        // the correction comes from one application of the block preconditioner, whose
+        // (1,1) block runs at the precision under test. No Krylov acceleration, so the
+        // per-iteration factor is the preconditioner's own.
+        //
+        // Rows go into the same table under the same tag as the FGMRES path, so the
+        // convergence history is read out identically.
+        VectorQ1IsoQ2Q1< ScalarType > r_ir( "r_ir", domains[velocity_level], domains[pressure_level],
+                                            mask_data[velocity_level], mask_data[pressure_level] );
+        VectorQ1IsoQ2Q1< ScalarType > d_ir( "d_ir", domains[velocity_level], domains[pressure_level],
+                                            mask_data[velocity_level], mask_data[pressure_level] );
+
+        linalg::apply( K_op, u_stokes, r_ir );
+        linalg::lincomb( r_ir, { 1.0, -1.0 }, { f_full, r_ir } );
+        const double r0 = static_cast< double >( linalg::norm_2( r_ir ) );
+
+        outer_table->add_row( { { "tag", std::string( "stokes_fgmres" ) },
+                                { "iteration", 0 },
+                                { "relative_residual", 1.0 },
+                                { "absolute_residual", r0 } } );
+
+        for ( int k = 1; k <= max_cycles; ++k )
+        {
+            linalg::assign( d_ir, 0.0 );
+            linalg::solvers::solve( prec_stokes, K_op, d_ir, r_ir );
+
+            if ( linalg::has_nan_or_inf( d_ir ) )
+            {
+                util::logroot << "IR: the preconditioner returned NaN/Inf at iteration " << k
+                              << "; stopping (no Krylov space to fall back on)." << std::endl;
+                break;
+            }
+
+            linalg::lincomb( u_stokes, { 1.0, 1.0 }, { u_stokes, d_ir } );
+            linalg::apply( K_op, u_stokes, r_ir );
+            linalg::lincomb( r_ir, { 1.0, -1.0 }, { f_full, r_ir } );
+
+            const double rk  = static_cast< double >( linalg::norm_2( r_ir ) );
+            const double rel = ( r0 > 0.0 ) ? rk / r0 : 0.0;
+            outer_table->add_row( { { "tag", std::string( "stokes_fgmres" ) },
+                                    { "iteration", k },
+                                    { "relative_residual", rel },
+                                    { "absolute_residual", rk } } );
+            if ( rel <= outer_tol )
+                break;
+        }
+    }
+    else if ( krylov_prec == KrylovPrec::DOUBLE )
     {
         std::vector< VectorQ1IsoQ2Q1< ScalarType > > tmp_fgmres;
         for ( int i = 0; i < 2 * outer_restart + 4; ++i )
@@ -1342,6 +1404,7 @@ int main( int argc, char** argv )
     ABlockArith ablock_arith = ABlockArith::LOW; // --ablock-arith low|double (low = follow --ablock-prec)
     double      hourglass_c  = 0.0;              // --hourglass C (0 = off, 0.3 as in EpsDivDivSimpleStab)
     double      outer_tol    = 1e-6;             // --outer-tol T
+    OuterSolver outer_solver = OuterSolver::FGMRES; // --outer-solver fgmres|ir
     for ( int i = 1; i + 1 < argc; ++i )
     {
         const std::string a = argv[i];
@@ -1364,6 +1427,11 @@ int main( int argc, char** argv )
                                                                         : 0;
         else if ( a == "--coarse-tol" )    coarse_tol  = std::atof( argv[i + 1] );
         else if ( a == "--solve" )         full_stokes = ( std::string( argv[i + 1] ) == "stokes" );
+        else if ( a == "--outer-solver" )
+        {
+            const std::string q = argv[i + 1];
+            outer_solver        = ( q == "ir" || q == "refinement" ) ? OuterSolver::IR : OuterSolver::FGMRES;
+        }
         else if ( a == "--hourglass" )      hourglass_c = std::atof( argv[i + 1] );
         else if ( a == "--outer-tol" )      outer_tol   = std::atof( argv[i + 1] );
         else if ( a == "--ablock-arith" )
@@ -1430,7 +1498,8 @@ int main( int argc, char** argv )
     util::logroot << "=== " << ( full_stokes ? "FULL STOKES outer-FGMRES (w-BFBT Schur) " : "A-block (viscous) MG " )
                   << "convergence vs viscosity contrast ===\n"
                   << "    solve = " << ( full_stokes ? "stokes (cycles = outer FGMRES iters)" : "ablock (cycles = MG V-cycles)" )
-                  << ( full_stokes ? std::string( ", krylov-basis = " ) + krylov_prec_name( krylov_prec )
+                  << ( full_stokes ? std::string( ", outer = " ) + outer_solver_name( outer_solver )
+                                           + ", krylov-basis = " + krylov_prec_name( krylov_prec )
                                            + krylov_prec_storage_note( krylov_prec )
                                            + ", A-block prec = " + ablock_prec_name( ablock_prec )
                                            + ablock_prec_note( ablock_prec )
@@ -1461,7 +1530,7 @@ int main( int argc, char** argv )
             const auto res =
                 run_ablock_mg( min_level, max_level, cheby_order, perturb_amp, rmu, s.gca, max_cycles, bc, s.interp,
                                visc_profile, coarse_tol, full_stokes, krylov_prec, ablock_prec, ablock_arith,
-                               hourglass_c, outer_tol );
+                               hourglass_c, outer_tol, outer_solver );
 
             summary->add_row(
                 { { "rmu", rmu },
@@ -1470,6 +1539,7 @@ int main( int argc, char** argv )
                   { "ablock_prec", std::string( ablock_prec_name( ablock_prec ) ) },
                   { "ablock_arith", std::string( ablock_arith_name( ablock_arith ) ) },
                   { "hourglass", hourglass_c },
+                  { "outer_solver", std::string( outer_solver_name( outer_solver ) ) },
                   { "scheme", std::string( s.name ) },
                   { "cycles", res.cycles },
                   { "final_rel_res", res.rel_residual_final },
