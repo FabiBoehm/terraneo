@@ -349,6 +349,9 @@ class StokesContext
             eta_[velocity_level_].grid_data(),
             bcs_,
             false );
+        // The hourglass correction must sit on the operator the V-cycle solves and on
+        // every coarse level, or the levels discretize different problems.
+        K_->block_11().set_hourglass_coefficient( prm_.stokes_solver_parameters.hourglass_coefficient );
 
         K_neumann_ = std::make_unique< Stokes >(
             *domains_[velocity_level_],
@@ -393,6 +396,7 @@ class StokesContext
                     eta_[level].grid_data(),
                     bcs_,
                     false );
+                A_c_.back().set_hourglass_coefficient( prm_.stokes_solver_parameters.hourglass_coefficient );
                 if ( gca == 2 )
                 {
                     A_c_.back().set_stored_matrix_mode(

@@ -280,6 +280,11 @@ struct StokesSolverParameters
 
     int viscous_pc_num_vcycles                 = 1;
     int viscous_pc_chebyshev_order             = 2;
+
+    /// Rank-6 hourglass stabilization coefficient of the viscous block
+    /// (EpsilonDivDivKerngen::set_hourglass_coefficient). 0 = off, the plain
+    /// one-point-quadrature operator; 0.3 is the stabilized operator.
+    double hourglass_coefficient = 0.0;
     int viscous_pc_num_smoothing_steps_prepost = 2;
     int viscous_pc_num_power_iterations        = 10;
 
@@ -927,6 +932,9 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
         ->group( "Stokes Solver" );
     add_option_with_default(
         app, "--stokes-viscous-pc-cheby-order", parameters.stokes_solver_parameters.viscous_pc_chebyshev_order )
+        ->group( "Stokes Solver" );
+    add_option_with_default(
+        app, "--stokes-hourglass-coefficient", parameters.stokes_solver_parameters.hourglass_coefficient )
         ->group( "Stokes Solver" );
     add_option_with_default(
         app,

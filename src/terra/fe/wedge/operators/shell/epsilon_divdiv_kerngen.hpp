@@ -134,6 +134,13 @@ class EpsilonDivDivKerngen
     bool                                 use_q0_coefficient_ = false;
     grid::Grid4DDataScalar< ScalarType > k_q0_;
 
+    /// Hourglass (rank-6 gamma) stabilization coefficient; 0 disables it entirely.
+    /// One-point quadrature on the wedge leaves two zero-energy modes per element,
+    /// so the assembled A-block has a near-null space that no amount of multigrid
+    /// resolves -- the outer residual simply stops descending. Same coefficient and
+    /// scaling as EpsilonDivDivSimpleStab.
+    double stab_c_ = 0.0;
+
     linalg::OperatorApplyMode         operator_apply_mode_;
     linalg::OperatorCommunicationMode operator_communication_mode_;
     linalg::OperatorStoredMatrixMode  operator_stored_matrix_mode_;
@@ -478,6 +485,10 @@ class EpsilonDivDivKerngen
         use_q0_coefficient_ = true;
     }
     void clear_q0_coefficient_field() { use_q0_coefficient_ = false; }
+    /// @brief Set the hourglass stabilization coefficient (0 disables; 0.3 is the
+    ///        value EpsilonDivDivSimpleStab uses).
+    void   set_hourglass_coefficient( double c ) { stab_c_ = c; }
+    double hourglass_coefficient() const { return stab_c_; }
 
     void set_boundary_conditions( BoundaryConditions bcs )
     {
@@ -1595,6 +1606,74 @@ class EpsilonDivDivKerngen
                                 &dst_( local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr, 2 ),
                                 kwJ * ( 2.0 * ( g0 * gu20 + g1 * gu21 + g2 * gu22 ) + NEG_TWO_THIRDS * g2 * div_u ) );
                         }
+
+                    // ---- hourglass stabilization (rank-6 gamma correction) ----
+                    // One-point quadrature on the wedge leaves two zero-energy modes
+                    // per element. They are invisible to the operator, so the A-block
+                    // has a near-null space the V-cycle cannot touch and the outer
+                    // residual stops descending well above the requested tolerance.
+                    //
+                    // Same gamma vectors and the same eps = stab_c * mean(diag)/|g|^2
+                    // as EpsilonDivDivSimpleStab, but applied matrix-free: the
+                    // correction is rank 2 per component, so it costs two dot products
+                    // and a scatter instead of an 18x18 assembly.
+                    //
+                    // mean(diag) has a closed form here. The local diagonal entry for
+                    // node n, component d is kwJ * (gg_n + g_{n,d}^2 / 3), and summing
+                    // over d gives (10/3) gg_n, so the mean over the 18 entries is
+                    // kwJ * (10/54) * sum_n gg_n -- no assembly needed for it either.
+                    if ( stab_c_ > 0.0 )
+                    {
+                        constexpr double G1[6]   = { ONE_THIRD,  -2.0 * ONE_THIRD, ONE_THIRD,
+                                                     -ONE_THIRD, 2.0 * ONE_THIRD,  -ONE_THIRD };
+                        constexpr double G2[6]   = { ONE_THIRD,  ONE_THIRD,  -2.0 * ONE_THIRD,
+                                                     -ONE_THIRD, -ONE_THIRD, 2.0 * ONE_THIRD };
+                        constexpr double NORM2_G = 4.0 / 3.0;
+
+                        double sum_gg = 0.0;
+#pragma unroll
+                        for ( int n = 0; n < 6; ++n )
+                        {
+                            const double gx = dN_ref[n][0];
+                            const double gy = dN_ref[n][1];
+                            const double gz = dN_ref[n][2];
+                            const double b0 = i00 * gx + i01 * gy + i02 * gz;
+                            const double b1 = i10 * gx + i11 * gy + i12 * gz;
+                            const double b2 = i20 * gx + i21 * gy + i22 * gz;
+                            sum_gg += b0 * b0 + b1 * b1 + b2 * b2;
+                        }
+                        // The scaling is geometry, so it is formed in double and
+                        // narrowed once; everything that touches the field values then
+                        // runs in ArithT like the rest of this kernel.
+                        const double diag_mean = static_cast< double >( kwJ ) * ( 10.0 / 54.0 ) * sum_gg;
+                        const ArithT eps       = static_cast< ArithT >( stab_c_ * diag_mean / NORM2_G );
+
+                        for ( int d = 0; d < 3; ++d )
+                        {
+                            ArithT c1 = 0.0, c2 = 0.0;
+#pragma unroll
+                            for ( int n = cmb_shift; n < 6 - surface_shift; ++n )
+                            {
+                                const int nid =
+                                    node_id( tx + WEDGE_NODE_OFF[w][n][0], ty + WEDGE_NODE_OFF[w][n][1] );
+                                const int    lvl = lvl0 + WEDGE_NODE_OFF[w][n][2];
+                                const ArithT u   = src_sh( nid, d, lvl );
+                                c1 += static_cast< ArithT >( G1[n] ) * u;
+                                c2 += static_cast< ArithT >( G2[n] ) * u;
+                            }
+#pragma unroll
+                            for ( int n = cmb_shift; n < 6 - surface_shift; ++n )
+                            {
+                                const int ddx = WEDGE_NODE_OFF[w][n][0];
+                                const int ddy = WEDGE_NODE_OFF[w][n][1];
+                                const int ddr = WEDGE_NODE_OFF[w][n][2];
+                                Kokkos::atomic_add(
+                                    &dst_( local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr, d ),
+                                    static_cast< ScalarType >( eps * ( static_cast< ArithT >( G1[n] ) * c1 +
+                                                                       static_cast< ArithT >( G2[n] ) * c2 ) ) );
+                            }
+                        }
+                    }
                     }
 
                     if ( Diagonal || ( treat_boundary_dirichlet && at_boundary ) )
@@ -1629,6 +1708,45 @@ class EpsilonDivDivKerngen
                             Kokkos::atomic_add(
                                 &dst_( local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr, 2 ),
                                 kwJ * sv2 * ( gg + ONE_THIRD * g2 * g2 ) );
+                        }
+
+                        // Diagonal of the stabilization itself, so the Chebyshev
+                        // inverse diagonal matches the operator it smooths.
+                        if ( Diagonal && stab_c_ > 0.0 )
+                        {
+                            constexpr double G1[6]   = { ONE_THIRD,  -2.0 * ONE_THIRD, ONE_THIRD,
+                                                         -ONE_THIRD, 2.0 * ONE_THIRD,  -ONE_THIRD };
+                            constexpr double G2[6]   = { ONE_THIRD,  ONE_THIRD,  -2.0 * ONE_THIRD,
+                                                         -ONE_THIRD, -ONE_THIRD, 2.0 * ONE_THIRD };
+                            constexpr double NORM2_G = 4.0 / 3.0;
+
+                            double sum_gg = 0.0;
+#pragma unroll
+                            for ( int n = 0; n < 6; ++n )
+                            {
+                                const double gx = dN_ref[n][0];
+                                const double gy = dN_ref[n][1];
+                                const double gz = dN_ref[n][2];
+                                const double b0 = i00 * gx + i01 * gy + i02 * gz;
+                                const double b1 = i10 * gx + i11 * gy + i12 * gz;
+                                const double b2 = i20 * gx + i21 * gy + i22 * gz;
+                                sum_gg += b0 * b0 + b1 * b1 + b2 * b2;
+                            }
+                            const double diag_mean = static_cast< double >( kwJ ) * ( 10.0 / 54.0 ) * sum_gg;
+                            const ArithT eps       = static_cast< ArithT >( stab_c_ * diag_mean / NORM2_G );
+#pragma unroll
+                            for ( int n = surface_shift; n < 6 - cmb_shift; ++n )
+                            {
+                                const ArithT gdiag =
+                                    static_cast< ArithT >( G1[n] * G1[n] + G2[n] * G2[n] );
+                                const int ddx = WEDGE_NODE_OFF[w][n][0];
+                                const int ddy = WEDGE_NODE_OFF[w][n][1];
+                                const int ddr = WEDGE_NODE_OFF[w][n][2];
+                                for ( int d = 0; d < 3; ++d )
+                                    Kokkos::atomic_add(
+                                        &dst_( local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr, d ),
+                                        static_cast< ScalarType >( eps * gdiag ) );
+                            }
                         }
                     }
                 }
