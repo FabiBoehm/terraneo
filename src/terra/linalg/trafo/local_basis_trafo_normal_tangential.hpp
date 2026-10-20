@@ -1,5 +1,6 @@
 #pragma once
 
+#include "util/floating_point.hpp"
 #include "linalg/vector_q1.hpp"
 #include "terra/dense/mat.hpp"
 #include "terra/dense/vec.hpp"
@@ -31,7 +32,7 @@ namespace terra::linalg::trafo {
 /// \tparam ScalarType Floating-point scalar type (e.g. float, double).
 /// \param n_input Surface normal vector at the point of interest (not required to be unit length).
 /// \return 3×3 transformation matrix \f$ R \f$ with rows \f$ [\,\hat{n}^\mathrm{T},\, \mathbf{t}_1^\mathrm{T},\, \mathbf{t}_2^\mathrm{T}\,] \f$.
-template < std::floating_point ScalarType >
+template < util::FloatingPoint ScalarType >
 KOKKOS_INLINE_FUNCTION dense::Mat< ScalarType, 3, 3 >
                        trafo_mat_cartesian_to_normal_tangential( const dense::Vec< ScalarType, 3 >& n_input )
 {
@@ -91,14 +92,14 @@ KOKKOS_INLINE_FUNCTION dense::Mat< ScalarType, 3, 3 >
 /// \param n_input Surface normal vector at the point of interest (not required to be unit length).
 /// \return The 3×3 inverse transformation matrix \f$ R^{\mathsf{T}} \f$
 ///         that maps local (n, t₁, t₂) coordinates back to Cartesian space.
-template < std::floating_point ScalarType >
+template < util::FloatingPoint ScalarType >
 KOKKOS_INLINE_FUNCTION dense::Mat< ScalarType, 3, 3 >
                        trafo_mat_normal_tangential_to_cartesian_trafo( const dense::Vec< ScalarType, 3 >& n_input )
 {
     return trafo_mat_cartesian_to_normal_tangential< ScalarType >( n_input ).transposed();
 }
 
-template < std::floating_point ScalarType, std::floating_point ScalarTypeGrid, util::FlagLike FlagType >
+template < util::FloatingPoint ScalarType, util::FloatingPoint ScalarTypeGrid, util::FlagLike FlagType >
 void cartesian_to_normal_tangential_in_place(
     VectorQ1Vec< ScalarType, 3 >&                   vec_cartesian,
     const grid::Grid3DDataVec< ScalarTypeGrid, 3 >& coords_shell,
@@ -142,7 +143,7 @@ void cartesian_to_normal_tangential_in_place(
     Kokkos::fence();
 }
 
-template < std::floating_point ScalarType, std::floating_point ScalarTypeGrid, util::FlagLike FlagType >
+template < util::FloatingPoint ScalarType, util::FloatingPoint ScalarTypeGrid, util::FlagLike FlagType >
 void normal_tangential_to_cartesian_in_place(
     VectorQ1Vec< ScalarType, 3 >&                   vec_normal_tangential,
     const grid::Grid3DDataVec< ScalarTypeGrid, 3 >& coords_shell,

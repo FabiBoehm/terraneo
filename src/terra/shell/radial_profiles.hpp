@@ -1,5 +1,6 @@
 #pragma once
 
+#include "util/floating_point.hpp"
 #include <numeric>
 
 #include "kokkos/kokkos_wrapper.hpp"
@@ -244,10 +245,10 @@ util::Table
 /// @param profile_values input profile: vector of values to interpolate
 /// @return Kokkos::View with the same dimensions of coords_radii, populated with interpolated values per subdomain
 template <
-    std::floating_point GridDataType,
-    std::floating_point ProfileInRadiiType,
-    std::floating_point ProfileInValueType,
-    std::floating_point ProfileOutDataType = double >
+    util::FloatingPoint GridDataType,
+    util::FloatingPoint ProfileInRadiiType,
+    util::FloatingPoint ProfileInValueType,
+    util::FloatingPoint ProfileOutDataType = double >
 grid::Grid2DDataScalar< ProfileOutDataType > interpolate_radial_profile_into_subdomains(
     const std::string&                            profile_out_label,
     const grid::Grid2DDataScalar< GridDataType >& coords_radii,
@@ -353,7 +354,7 @@ grid::Grid2DDataScalar< ProfileOutDataType > interpolate_radial_profile_into_sub
 /// @param coords_radii radii of each node for all local subdomains - see \ref terra::grid::shell::subdomain_shell_radii(),
 ///                     the output grid data will have the same extents
 /// @return Kokkos::View with the same dimensions of coords_radii, populated with interpolated values per subdomain
-template < std::floating_point GridDataType, std::floating_point ProfileOutDataType = double >
+template < util::FloatingPoint GridDataType, util::FloatingPoint ProfileOutDataType = double >
 grid::Grid2DDataScalar< ProfileOutDataType > interpolate_radial_profile_into_subdomains_from_csv(
     const std::string&                            filename,
     const std::string&                            key_radii,
@@ -381,7 +382,7 @@ grid::Grid2DDataScalar< ProfileOutDataType > interpolate_radial_profile_into_sub
 ///                     the output grid data will have the same extents
 /// @param value the constant value to interpolate
 /// @return Kokkos::View with the same dimensions of coords_radii, populated with interpolated values per subdomain
-template < std::floating_point GridDataType, std::floating_point ProfileOutDataType = double >
+template < util::FloatingPoint GridDataType, util::FloatingPoint ProfileOutDataType = double >
 grid::Grid2DDataScalar< ProfileOutDataType > interpolate_constant_radial_profile(
     const grid::Grid2DDataScalar< GridDataType >& coords_radii,
     const ProfileOutDataType&                     value )

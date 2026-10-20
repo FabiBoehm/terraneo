@@ -1,6 +1,7 @@
 
 #pragma once
 
+#include "util/floating_point.hpp"
 #include "terra/dense/mat.hpp"
 #include "terra/dense/vec.hpp"
 
@@ -82,7 +83,7 @@ namespace terra::fe::wedge {
 ///   \end{align}
 ///   \f]
 ///
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr T shape_rad( const int node_idx, const T zeta )
 {
     const T N_rad[2] = { static_cast< T >( 0.5 ) * ( 1 - zeta ), static_cast< T >( 0.5 ) * ( 1 + zeta ) };
@@ -98,7 +99,7 @@ KOKKOS_INLINE_FUNCTION constexpr T shape_rad( const int node_idx, const T zeta )
 ///   \end{align}
 ///   \f]
 ///
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr T shape_rad( const int node_idx, const dense::Vec< T, 3 >& xi_eta_zeta )
 {
     return shape_rad( node_idx, xi_eta_zeta( 2 ) );
@@ -114,7 +115,7 @@ KOKKOS_INLINE_FUNCTION constexpr T shape_rad( const int node_idx, const dense::V
 ///   \end{align}
 ///   \f]
 ///
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr T shape_lat( const int node_idx, const T xi, const T eta )
 {
     const T N_lat[3] = { static_cast< T >( 1.0 ) - xi - eta, xi, eta };
@@ -131,7 +132,7 @@ KOKKOS_INLINE_FUNCTION constexpr T shape_lat( const int node_idx, const T xi, co
 ///   \end{align}
 ///   \f]
 ///
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr T shape_lat( const int node_idx, const dense::Vec< T, 3 >& xi_eta_zeta )
 {
     return shape_lat( node_idx, xi_eta_zeta( 0 ), xi_eta_zeta( 1 ) );
@@ -142,7 +143,7 @@ KOKKOS_INLINE_FUNCTION constexpr T shape_lat( const int node_idx, const dense::V
 ///   N_i = N^\mathrm{lat}_i * N^\mathrm{rad}_i
 /// \f]
 ///
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr T shape( const int node_idx, const T xi, const T eta, const T zeta )
 {
     return shape_lat( node_idx, xi, eta ) * shape_rad( node_idx, zeta );
@@ -153,7 +154,7 @@ KOKKOS_INLINE_FUNCTION constexpr T shape( const int node_idx, const T xi, const 
 ///   N_i = N^\mathrm{lat}_i * N^\mathrm{rad}_i
 /// \f]
 ///
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr T shape( const int node_idx, const dense::Vec< T, 3 >& xi_eta_zeta )
 {
     return shape_lat( node_idx, xi_eta_zeta ) * shape_rad( node_idx, xi_eta_zeta );
@@ -168,7 +169,7 @@ KOKKOS_INLINE_FUNCTION constexpr T shape( const int node_idx, const dense::Vec< 
 ///
 /// \f$ \frac{\partial}{\partial \zeta} N_j = N^\mathrm{lat}_j \frac{\partial}{\partial \zeta} N^\mathrm{rad}_j \f$
 ///
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr T grad_shape_rad( const int node_idx )
 {
     constexpr T grad_N_rad[2] = { -0.5, 0.5 };
@@ -184,7 +185,7 @@ KOKKOS_INLINE_FUNCTION constexpr T grad_shape_rad( const int node_idx )
 ///
 /// \f$ \frac{\partial}{\partial \xi} N_j = N^\mathrm{rad}_j \frac{\partial}{\partial \xi} N^\mathrm{lat}_j \f$
 ///
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr T grad_shape_lat_xi( const int node_idx )
 {
     constexpr T grad_N_lat_xi[3] = { -1.0, 1.0, 0.0 };
@@ -200,7 +201,7 @@ KOKKOS_INLINE_FUNCTION constexpr T grad_shape_lat_xi( const int node_idx )
 ///
 /// \f$ \frac{\partial}{\partial \eta} N_j = N^\mathrm{rad}_j \frac{\partial}{\partial \eta} N^\mathrm{lat}_j \f$
 ///
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr T grad_shape_lat_eta( const int node_idx )
 {
     constexpr T grad_N_lat_eta[3] = { -1.0, 0.0, 1.0 };
@@ -223,7 +224,7 @@ KOKKOS_INLINE_FUNCTION constexpr T grad_shape_lat_eta( const int node_idx )
 ///     N^\mathrm{lat}_j \frac{\partial}{\partial \zeta} N^\mathrm{rad}_j
 /// \end{bmatrix}
 /// \f]
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr dense::Vec< T, 3 >
     grad_shape( const int node_idx, const T xi, const T eta, const T zeta )
 {
@@ -250,7 +251,7 @@ KOKKOS_INLINE_FUNCTION constexpr dense::Vec< T, 3 >
 ///     N^\mathrm{lat}_j \frac{\partial}{\partial \zeta} N^\mathrm{rad}_j
 /// \end{bmatrix}
 /// \f]
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr dense::Vec< T, 3 >
     grad_shape( const int node_idx, const dense::Vec< T, 3 >& xi_eta_zeta )
 {
@@ -263,7 +264,7 @@ KOKKOS_INLINE_FUNCTION constexpr dense::Vec< T, 3 >
 ///                              evaluate") (in {0, ..., 5})
 /// @param fine_radial_wedge_idx 0 for inner fine wedge, 1 for outer fine wedge
 /// @param zeta_fine             coordinate in the reference fine-wedge (in [-1, 1])
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr T
     shape_rad_coarse( const int coarse_node_idx, const int fine_radial_wedge_idx, const T zeta_fine )
 {
@@ -317,7 +318,7 @@ KOKKOS_INLINE_FUNCTION constexpr T
 ///                               3: center triangle (orientation: down)
 /// @param xi_fine                xi-coordinate in the reference fine-wedge (in [0, 1])
 /// @param eta_fine               eta-coordinate in the reference fine-wedge (in [0, 1])
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr T
     shape_lat_coarse( const int coarse_node_idx, const int fine_lateral_wedge_idx, const T xi_fine, const T eta_fine )
 {
@@ -369,7 +370,7 @@ KOKKOS_INLINE_FUNCTION constexpr T
         return 0.0;
     }
 }
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr T shape_coarse(
     const int coarse_node_idx,
     const int fine_radial_wedge_idx,
@@ -381,7 +382,7 @@ KOKKOS_INLINE_FUNCTION constexpr T shape_coarse(
     return shape_lat_coarse( coarse_node_idx, fine_lateral_wedge_idx, xi_fine, eta_fine ) *
            shape_rad_coarse( coarse_node_idx, fine_radial_wedge_idx, zeta_fine );
 }
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr T shape_coarse(
     const int                 coarse_node_idx,
     const int                 fine_radial_wedge_idx,
@@ -391,7 +392,7 @@ KOKKOS_INLINE_FUNCTION constexpr T shape_coarse(
     return shape_lat_coarse( coarse_node_idx, fine_lateral_wedge_idx, xi_eta_zeta_fine( 0 ), xi_eta_zeta_fine( 1 ) ) *
            shape_rad_coarse( coarse_node_idx, fine_radial_wedge_idx, xi_eta_zeta_fine( 2 ) );
 }
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr T grad_shape_rad_coarse( const int coarse_node_idx, const int fine_radial_wedge_idx )
 {
     switch ( coarse_node_idx / 3 )
@@ -432,7 +433,7 @@ KOKKOS_INLINE_FUNCTION constexpr T grad_shape_rad_coarse( const int coarse_node_
         return 0.0;
     }
 }
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr T
     grad_shape_lat_coarse_xi( const int coarse_node_idx, const int fine_lateral_wedge_idx )
 {
@@ -486,7 +487,7 @@ KOKKOS_INLINE_FUNCTION constexpr T
     }
 }
 
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr T
     grad_shape_lat_coarse_eta( const int coarse_node_idx, const int fine_lateral_wedge_idx )
 {
@@ -540,7 +541,7 @@ KOKKOS_INLINE_FUNCTION constexpr T
     }
 }
 
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr dense::Vec< T, 3 > grad_shape_coarse(
     const int node_idx,
     const int fine_radial_wedge_idx,
@@ -559,7 +560,7 @@ KOKKOS_INLINE_FUNCTION constexpr dense::Vec< T, 3 > grad_shape_coarse(
     return grad_N;
 }
 
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr dense::Vec< T, 3 > grad_shape_coarse(
     const int                 node_idx,
     const int                 fine_radial_wedge_idx,
@@ -575,13 +576,13 @@ KOKKOS_INLINE_FUNCTION constexpr dense::Vec< T, 3 > grad_shape_coarse(
         xi_eta_zeta_fine( 2 ) );
 }
 
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr T forward_map_rad( const T r_1, const T r_2, const T zeta )
 {
     return r_1 + 0.5 * ( r_2 - r_1 ) * ( 1 + zeta );
 }
 
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr dense::Vec< T, 3 > forward_map_lat(
     const dense::Vec< T, 3 >& p1_phy,
     const dense::Vec< T, 3 >& p2_phy,
@@ -592,7 +593,7 @@ KOKKOS_INLINE_FUNCTION constexpr dense::Vec< T, 3 > forward_map_lat(
     return ( 1 - xi - eta ) * p1_phy + xi * p2_phy + eta * p3_phy;
 }
 
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr dense::Vec< T, 3 > forward_map(
     const dense::Vec< T, 3 >& p1_phy,
     const dense::Vec< T, 3 >& p2_phy,
@@ -606,13 +607,13 @@ KOKKOS_INLINE_FUNCTION constexpr dense::Vec< T, 3 > forward_map(
     return forward_map_rad( r_1, r_2, zeta ) * forward_map_lat( p1_phy, p2_phy, p3_phy, xi, eta );
 }
 
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr T grad_forward_map_rad( const T r_1, const T r_2 )
 {
     return 0.5 * ( r_2 - r_1 );
 }
 
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr dense::Vec< T, 3 > grad_forward_map_lat_xi(
     const dense::Vec< T, 3 >& p1_phy,
     const dense::Vec< T, 3 >& p2_phy,
@@ -621,7 +622,7 @@ KOKKOS_INLINE_FUNCTION constexpr dense::Vec< T, 3 > grad_forward_map_lat_xi(
     return p2_phy - p1_phy;
 }
 
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr dense::Vec< T, 3 > grad_forward_map_lat_eta(
     const dense::Vec< T, 3 >& p1_phy,
     const dense::Vec< T, 3 >& /* p2_phy */,
@@ -630,7 +631,7 @@ KOKKOS_INLINE_FUNCTION constexpr dense::Vec< T, 3 > grad_forward_map_lat_eta(
     return p3_phy - p1_phy;
 }
 
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr dense::Mat< T, 3, 3 > jac_lat(
     const dense::Vec< T, 3 >& p1_phy,
     const dense::Vec< T, 3 >& p2_phy,
@@ -644,7 +645,7 @@ KOKKOS_INLINE_FUNCTION constexpr dense::Mat< T, 3, 3 > jac_lat(
     return dense::Mat< T, 3, 3 >::from_col_vecs( col_0, col_1, col_2 );
 }
 
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr dense::Vec< T, 3 > jac_rad( const T r_1, const T r_2, const T zeta )
 {
     const auto r      = forward_map_rad( r_1, r_2, zeta );
@@ -652,7 +653,7 @@ KOKKOS_INLINE_FUNCTION constexpr dense::Vec< T, 3 > jac_rad( const T r_1, const 
     return dense::Vec< T, 3 >{ r, r, grad_r };
 }
 
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr dense::Mat< T, 3, 3 >
     jac( const dense::Vec< T, 3 >& p1_phy,
          const dense::Vec< T, 3 >& p2_phy,
@@ -667,7 +668,7 @@ KOKKOS_INLINE_FUNCTION constexpr dense::Mat< T, 3, 3 >
            dense::Mat< T, 3, 3 >::diagonal_from_vec( jac_rad( r_1, r_2, zeta ) );
 }
 
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr dense::Mat< T, 3, 3 >
     jac( const dense::Vec< T, 3 > p_phy[3], const T r_1, const T r_2, const dense::Vec< T, 3 >& xi_eta_zeta_fine )
 {
@@ -681,7 +682,7 @@ KOKKOS_INLINE_FUNCTION constexpr dense::Mat< T, 3, 3 >
 /// @param quad_point             quadrature point on the reference element
 /// @param dof                    local index of the shape function a wedge
 /// @param dim                    dimension of the vectorial shape function, of which the gradient should be computed
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr dense::Mat< T, 3, 3 > symmetric_grad(
     const dense::Mat< T, 3, 3 >& J_inv_transposed,
     const dense::Vec< T, 3 >&    quad_point,

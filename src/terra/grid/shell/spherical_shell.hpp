@@ -13,6 +13,8 @@
 #include "mpi/mpi.hpp"
 #include "util/logging.hpp"
 
+#include "util/floating_point.hpp"
+
 namespace terra::grid::shell {
 
 /// @brief Computes the radial shell radii for a uniform grid.
@@ -24,7 +26,7 @@ namespace terra::grid::shell {
 /// @param r_max Radius of the outermost shell.
 /// @param num_shells Number of shells.
 /// @return Vector of shell radii (uniformly distributed in [r_min, r_max]).
-template < std::floating_point T >
+template < util::FloatingPoint T >
 std::vector< T > uniform_shell_radii( T r_min, T r_max, int num_shells )
 {
     if ( num_shells < 2 )
@@ -65,7 +67,7 @@ std::vector< T > uniform_shell_radii( T r_min, T r_max, int num_shells )
 ///
 /// @param k \f$k = 0\f$ results in a uniform distribution (linear function), \f$k > 0\f$ refines at the boundary
 ///        (roughly: \f$k \approx 1\f$: mild clustering, \f$k \approx 2\f$: strong clustering)
-template < std::floating_point T >
+template < util::FloatingPoint T >
 std::function< T( T ) > make_tanh_boundary_cluster( T k )
 {
     return [k]( T s ) {
@@ -117,7 +119,7 @@ std::function< T( T ) > make_tanh_boundary_cluster( T k )
 ///            \f$ f(0)=0 \f$ and \f$ f(1)=1 \f$.
 ///
 /// @return Vector of shell radii (non-uniformly distributed in \f$[r_{\min}, r_{\max}]\f$).
-template < std::floating_point T >
+template < util::FloatingPoint T >
 std::vector< T > mapped_shell_radii( T r_min, T r_max, int num_shells, const std::function< T( T ) >& map )
 {
     if ( num_shells < 2 )
@@ -150,7 +152,7 @@ std::vector< T > mapped_shell_radii( T r_min, T r_max, int num_shells, const std
 }
 
 /// @brief Computes the min absolute distance of two entries in the passed vector of shell radii.
-template < std::floating_point T >
+template < util::FloatingPoint T >
 T min_radial_h( const std::vector< T >& shell_radii )
 {
     if ( shell_radii.size() < 2 )
@@ -171,7 +173,7 @@ T min_radial_h( const std::vector< T >& shell_radii )
 }
 
 /// @brief Computes the max absolute distance of two entries in the passed vector of shell radii.
-template < std::floating_point T >
+template < util::FloatingPoint T >
 T max_radial_h( const std::vector< T >& shell_radii )
 {
     if ( shell_radii.size() < 2 )
@@ -193,7 +195,7 @@ T max_radial_h( const std::vector< T >& shell_radii )
 
 /// Struct to hold the coordinates of the four base corners
 /// and the number of intervals N = ntan - 1.
-template < std::floating_point T >
+template < util::FloatingPoint T >
 struct BaseCorners
 {
     using Vec3 = dense::Vec< T, 3 >;
@@ -215,7 +217,7 @@ struct BaseCorners
 };
 
 // Memoization cache type: maps (i, j) index pair to computed coordinates
-template < std::floating_point T >
+template < util::FloatingPoint T >
 using MemoizationCache = std::map< std::pair< int, int >, dense::Vec< T, 3 > >;
 
 /// @brief Computes the coordinates for a specific node (i, j) in the final refined grid.
@@ -227,7 +229,7 @@ using MemoizationCache = std::map< std::pair< int, int >, dense::Vec< T, 3 > >;
 /// @param cache Cache to store/retrieve already computed nodes.
 /// @return Vec3 Coordinates of the node (i, j) on the unit sphere.
 ///
-template < std::floating_point T >
+template < util::FloatingPoint T >
 dense::Vec< T, 3 > compute_node_recursive( int i, int j, const BaseCorners< T >& corners, MemoizationCache< T >& cache )
 {
     using Vec3 = dense::Vec< T, 3 >;
@@ -357,7 +359,7 @@ dense::Vec< T, 3 > compute_node_recursive( int i, int j, const BaseCorners< T >&
 /// @return Kokkos::View<T**[3], Kokkos::HostSpace> Host view containing coordinates
 ///         for the subdomain. Dimensions are ((i_end_incl - 1) - i_start, (j_end_incl - 1) - j_start).
 ///
-template < std::floating_point T >
+template < util::FloatingPoint T >
 void compute_subdomain(
     const typename Grid3DDataVec< T, 3 >::host_mirror_type& subdomain_coords_host,
     int                                               subdomain_idx,
@@ -416,7 +418,7 @@ void compute_subdomain(
     }
 }
 
-template < std::floating_point T >
+template < util::FloatingPoint T >
 void unit_sphere_single_shell_subdomain_coords(
     const typename Grid3DDataVec< T, 3 >::host_mirror_type& subdomain_coords_host,
     int                                               subdomain_idx,
@@ -557,7 +559,7 @@ void unit_sphere_single_shell_subdomain_coords(
         subdomain_coords_host, subdomain_idx, corners, i_start_incl, i_end_incl, j_start_incl, j_end_incl );
 }
 
-template < std::floating_point T >
+template < util::FloatingPoint T >
 void unit_sphere_single_shell_subdomain_coords(
     const typename Grid3DDataVec< T, 3 >::host_mirror_type& subdomain_coords_host,
     int                                               subdomain_idx,
@@ -2706,7 +2708,7 @@ inline Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >
 ///     grid( local_subdomain_id, x_idx, y_idx, node_coord )
 ///
 /// where node_coord is in {0, 1, 2} and refers to the cartesian coordinate of the point.
-template < std::floating_point T >
+template < util::FloatingPoint T >
 Grid3DDataVec< T, 3 > subdomain_unit_sphere_single_shell_coords( const DistributedDomain& domain )
 {
     Grid3DDataVec< T, 3 > subdomain_coords(
@@ -2741,7 +2743,7 @@ Grid3DDataVec< T, 3 > subdomain_unit_sphere_single_shell_coords( const Distribut
 ///
 ///     grid( local_subdomain_id, r_idx ) = radius
 ///
-template < std::floating_point T >
+template < util::FloatingPoint T >
 Grid2DDataScalar< T > subdomain_shell_radii( const DistributedDomain& domain )
 {
     const int shells_per_subdomain = domain.domain_info().subdomain_num_nodes_radially();

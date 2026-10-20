@@ -1,13 +1,14 @@
 
 #pragma once
 
+#include "util/floating_point.hpp"
 #include "terra/dense/vec.hpp"
 
 namespace terra::fe::triangle::quadrature {
 
 constexpr int quad_triangle_3_num_quad_points = 3;
 
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr void
     quad_triangle_3_quad_points( dense::Vec< T, 2 > ( &quad_points )[quad_triangle_3_num_quad_points] )
 {
@@ -16,7 +17,7 @@ KOKKOS_INLINE_FUNCTION constexpr void
     quad_points[2] = { 0.1666666666666667, 0.1666666666666667 };
 }
 
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr void
     quad_triangle_3_quad_weights( T ( &quad_weights )[quad_triangle_3_num_quad_points] )
 {

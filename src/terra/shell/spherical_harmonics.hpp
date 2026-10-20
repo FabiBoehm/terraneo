@@ -1,5 +1,6 @@
 
 #pragma once
+#include "util/floating_point.hpp"
 #include "grid/grid_types.hpp"
 #include "grid/shell/spherical_shell.hpp"
 #include "kokkos/kokkos_wrapper.hpp"
@@ -301,7 +302,7 @@ class SphericalHarmonicsTool
 ///                     \ref terra::grid::shell::subdomain_unit_sphere_single_shell_coords
 /// @return Scalar 3D grid with spherical harmonics coefficients on the sphere:
 /// @code grid[local_subdomain_id][i][j] = coeff @endcode
-template < std::floating_point ScalarTypeCoeff, std::floating_point ScalarTypeGrid >
+template < util::FloatingPoint ScalarTypeCoeff, util::FloatingPoint ScalarTypeGrid >
 grid::Grid3DDataScalar< ScalarTypeCoeff > spherical_harmonics_coefficients_grid(
     const int                                       degree_l,
     const int                                       order_m,

@@ -1,6 +1,7 @@
 
 #pragma once
 
+#include "util/floating_point.hpp"
 #include <fstream>
 
 #include "mpi/mpi.hpp"
@@ -574,7 +575,7 @@ class XDMFOutput
         return false;
     }
 
-    template < std::floating_point FloatingPointOutputType >
+    template < util::FloatingPoint FloatingPointOutputType >
     void write_geometry_binary_data( std::stringstream& out )
     {
         // Copy mesh to host.

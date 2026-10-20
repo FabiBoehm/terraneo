@@ -140,7 +140,7 @@ class Multigrid
                 { { "tag", tag_ },
                   { "cycle", 0 },
                   { "relative_residual", 1.0 },
-                  { "absolute_residual", initial_residual },
+                  { "absolute_residual", static_cast< double >( initial_residual ) },
                   { "residual_convergence_rate", 1.0 } } );
         }
 
@@ -161,9 +161,10 @@ class Multigrid
                 statistics_->add_row(
                     { { "tag", tag_ },
                       { "cycle", cycle },
-                      { "relative_residual", relative_residual },
-                      { "absolute_residual", absolute_residual },
-                      { "residual_convergence_rate", absolute_residual / previous_absolut_residual } } );
+                      { "relative_residual", static_cast< double >( relative_residual ) },
+                      { "absolute_residual", static_cast< double >( absolute_residual ) },
+                      { "residual_convergence_rate",
+                        static_cast< double >( absolute_residual / previous_absolut_residual ) } } );
 
                 if ( relative_residual <= relative_residual_threshold_ )
                 {

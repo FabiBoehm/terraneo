@@ -1,6 +1,7 @@
 
 #pragma once
 
+#include "util/floating_point.hpp"
 #include "terra/dense/vec.hpp"
 
 /// @namespace terra::fe::wedge::quadrature
@@ -31,14 +32,14 @@ namespace terra::fe::wedge::quadrature {
 
 constexpr int quad_felippa_1x1_num_quad_points = 1;
 
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr void
     quad_felippa_1x1_quad_points( dense::Vec< T, 3 > ( &quad_points )[quad_felippa_1x1_num_quad_points] )
 {
     quad_points[0] = { 1.0 / 3.0, 1.0 / 3.0, 0.0 };
 }
 
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr void
     quad_felippa_1x1_quad_weights( T ( &quad_weights )[quad_felippa_1x1_num_quad_points] )
 {
@@ -47,7 +48,7 @@ KOKKOS_INLINE_FUNCTION constexpr void
 
 constexpr int quad_felippa_1x2_num_quad_points = 2;
 
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr void
     quad_felippa_1x2_quad_points( dense::Vec< T, 3 > ( &quad_points )[quad_felippa_1x2_num_quad_points] )
 {
@@ -55,7 +56,7 @@ KOKKOS_INLINE_FUNCTION constexpr void
     quad_points[1] = { 1.0 / 3.0, 1.0 / 3.0, -1.0/Kokkos::sqrt(3) };
 }
 
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr void
     quad_felippa_1x2_quad_weights( T ( &quad_weights )[quad_felippa_1x2_num_quad_points] )
 {
@@ -65,7 +66,7 @@ KOKKOS_INLINE_FUNCTION constexpr void
 
 constexpr int quad_felippa_3x2_num_quad_points = 6;
 
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr void
     quad_felippa_3x2_quad_points( dense::Vec< T, 3 > ( &quad_points )[quad_felippa_3x2_num_quad_points] )
 {
@@ -77,7 +78,7 @@ KOKKOS_INLINE_FUNCTION constexpr void
     quad_points[5] = { 0.1666666666666667, 0.1666666666666667, 0.5773502691896257 };
 }
 
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr void quad_felippa_3x2_quad_points_ptr( dense::Vec< T, 3 >* quad_points )
 {
     quad_points[0] = { 0.6666666666666666, 0.1666666666666667, -0.5773502691896257 };
@@ -88,7 +89,7 @@ KOKKOS_INLINE_FUNCTION constexpr void quad_felippa_3x2_quad_points_ptr( dense::V
     quad_points[5] = { 0.1666666666666667, 0.1666666666666667, 0.5773502691896257 };
 }
 
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr void
     quad_felippa_3x2_quad_weights( T ( &quad_weights )[quad_felippa_3x2_num_quad_points] )
 {
@@ -100,7 +101,7 @@ KOKKOS_INLINE_FUNCTION constexpr void
     quad_weights[5] = 0.1666666666666667;
 }
 
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr void quad_felippa_3x2_quad_weights_ptr( T* quad_weights )
 {
     quad_weights[0] = 0.1666666666666667;

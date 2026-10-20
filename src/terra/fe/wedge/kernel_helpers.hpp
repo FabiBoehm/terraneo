@@ -1,5 +1,7 @@
 #pragma once
 
+#include "util/floating_point.hpp"
+
 namespace terra::fe::wedge {
 
 constexpr int num_wedges_per_hex_cell     = 2;
@@ -22,7 +24,7 @@ constexpr int num_nodes_per_wedge         = 6;
 /// @param local_subdomain_id    [in]  shell subdomain id on this process
 /// @param x_cell                [in]  hex cell x-coordinate
 /// @param y_cell                [in]  hex cell y-coordinate
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION void wedge_surface_physical_coords(
     dense::Vec< T, 3 > ( &wedge_surf_phy_coords )[num_wedges_per_hex_cell][num_nodes_per_wedge_surface],
     const grid::Grid3DDataVec< T, 3 >& lateral_grid,
@@ -55,7 +57,7 @@ KOKKOS_INLINE_FUNCTION void wedge_surface_physical_coords(
     wedge_surf_phy_coords[1][2] = quad_surface_coords[1][0];
 }
 
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION void wedge_0_surface_physical_coords(
     dense::Vec< T, 3 >*                wedge_surf_phy_coords,
     const grid::Grid3DDataVec< T, 3 >& lateral_grid,
@@ -84,7 +86,7 @@ KOKKOS_INLINE_FUNCTION void wedge_0_surface_physical_coords(
     wedge_surf_phy_coords[2] = quad_surface_coords[0][1];
 }
 
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION void wedge_1_surface_physical_coords(
     dense::Vec< T, 3 >*                wedge_surf_phy_coords,
     const grid::Grid3DDataVec< T, 3 >& lateral_grid,
@@ -122,7 +124,7 @@ KOKKOS_INLINE_FUNCTION void wedge_1_surface_physical_coords(
 /// @param wedge_surf_phy_coords   [in]  coords of the triangular wedge surfaces on the unit sphere (compute via
 ///                                      wedge_surface_physical_coords())
 /// @param quad_points             [in]  the quadrature points
-template < std::floating_point T, int NumQuadPoints >
+template < util::FloatingPoint T, int NumQuadPoints >
 KOKKOS_INLINE_FUNCTION constexpr void jacobian_lat_inverse_transposed_and_determinant(
     dense::Mat< T, 3, 3 > ( &jac_lat_inv_t )[num_wedges_per_hex_cell][NumQuadPoints],
     T ( &det_jac_lat )[num_wedges_per_hex_cell][NumQuadPoints],
@@ -154,7 +156,7 @@ KOKKOS_INLINE_FUNCTION constexpr void jacobian_lat_inverse_transposed_and_determ
 /// @param wedge_surf_phy_coords   [in]  coords of the triangular wedge surfaces on the unit sphere (compute via
 ///                                      wedge_surface_physical_coords())
 /// @param quad_points             [in]  the quadrature points
-template < std::floating_point T, int NumQuadPoints >
+template < util::FloatingPoint T, int NumQuadPoints >
 KOKKOS_INLINE_FUNCTION constexpr void jacobian_lat_determinant(
     T ( &det_jac_lat )[num_wedges_per_hex_cell][NumQuadPoints],
     const dense::Vec< T, 3 > wedge_surf_phy_coords[num_wedges_per_hex_cell][num_nodes_per_wedge_surface],
@@ -204,7 +206,7 @@ KOKKOS_INLINE_FUNCTION constexpr void jacobian_lat_determinant(
 /// @param jac_lat_inv_t [in]  transposed inverse of lateral Jacobian - see
 ///                            jacobian_lat_inverse_transposed_and_determinant()
 /// @param quad_points   [in]  the quadrature points
-template < std::floating_point T, int NumQuadPoints >
+template < util::FloatingPoint T, int NumQuadPoints >
 KOKKOS_INLINE_FUNCTION constexpr void lateral_parts_of_grad_phi(
     dense::Vec< T, 3 > ( &g_rad )[num_wedges_per_hex_cell][num_nodes_per_wedge][NumQuadPoints],
     dense::Vec< T, 3 > ( &g_lat )[num_wedges_per_hex_cell][num_nodes_per_wedge][NumQuadPoints],
@@ -243,7 +245,7 @@ KOKKOS_INLINE_FUNCTION constexpr void lateral_parts_of_grad_phi(
 /// @param wedge_idx      [in] wedge index of the hex cell (0 or 1)
 /// @param node_idx       [in] node index in the wedge (0, 1, ..., 5)
 /// @param quad_point_idx [in] index of the quadrature point
-template < std::floating_point T, int NumQuadPoints >
+template < util::FloatingPoint T, int NumQuadPoints >
 KOKKOS_INLINE_FUNCTION constexpr dense::Vec< T, 3 > grad_shape_full(
     const dense::Vec< T, 3 > g_rad[num_wedges_per_hex_cell][num_nodes_per_wedge][NumQuadPoints],
     const dense::Vec< T, 3 > g_lat[num_wedges_per_hex_cell][num_nodes_per_wedge][NumQuadPoints],
@@ -266,7 +268,7 @@ KOKKOS_INLINE_FUNCTION constexpr dense::Vec< T, 3 > grad_shape_full(
 ///                            radial direction - compute with grad_forward_map_rad())
 /// @param wedge_idx      [in] wedge index of the hex cell (0 or 1)
 /// @param quad_point_idx [in] index of the quadrature point
-template < std::floating_point T, int NumQuadPoints >
+template < util::FloatingPoint T, int NumQuadPoints >
 KOKKOS_INLINE_FUNCTION constexpr T det_full(
     const T   det_jac_lat[num_wedges_per_hex_cell][NumQuadPoints],
     const T   r,
@@ -302,7 +304,7 @@ KOKKOS_INLINE_FUNCTION constexpr T det_full(
 /// @param y_cell              [in]  hex cell y-coordinate
 /// @param r_cell              [in]  hex cell r-coordinate
 /// @param global_coefficients [in]  the global coefficient vector
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION void extract_local_wedge_scalar_coefficients(
     dense::Vec< T, 6 > ( &local_coefficients )[2],
     const int                          local_subdomain_id,
@@ -352,7 +354,7 @@ KOKKOS_INLINE_FUNCTION void extract_local_wedge_scalar_coefficients(
 /// @param r_cell              [in]  hex cell r-coordinate
 /// @param d                   [in]  vector-element of the vector-valued global view
 /// @param global_coefficients [in]  the global coefficient vector
-template < std::floating_point T, int VecDim >
+template < util::FloatingPoint T, int VecDim >
 KOKKOS_INLINE_FUNCTION void extract_local_wedge_vector_coefficients(
     dense::Vec< T, 6 > ( &local_coefficients )[2],
     const int                               local_subdomain_id,
@@ -403,7 +405,7 @@ KOKKOS_INLINE_FUNCTION void extract_local_wedge_vector_coefficients(
 /// @param y_cell              [in]    hex cell y-coordinate
 /// @param r_cell              [in]    hex cell r-coordinate
 /// @param local_coefficients  [in]    the local coefficient vector
-template < std::floating_point T >
+template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION void atomically_add_local_wedge_scalar_coefficients(
     const grid::Grid4DDataScalar< T >& global_coefficients,
     const int                          local_subdomain_id,
@@ -461,7 +463,7 @@ KOKKOS_INLINE_FUNCTION void atomically_add_local_wedge_scalar_coefficients(
 /// @param r_cell              [in]    hex cell r-coordinate
 /// @param d                   [in]    vector-element of the vector-valued global view
 /// @param local_coefficients  [in]    the local coefficient vector
-template < std::floating_point T, int VecDim >
+template < util::FloatingPoint T, int VecDim >
 KOKKOS_INLINE_FUNCTION void atomically_add_local_wedge_vector_coefficients(
     const grid::Grid4DDataVec< T, VecDim >& global_coefficients,
     const int                               local_subdomain_id,
