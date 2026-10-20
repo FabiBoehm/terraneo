@@ -5,6 +5,7 @@
 #include "mpi/mpi.hpp"
 #include "terra/grid/bit_masks.hpp"
 #include "terra/util/bit_masking.hpp"
+#include "util/floating_point.hpp"
 
 namespace terra::kernels::common {
 
@@ -781,9 +782,8 @@ void cast( const grid::Grid4DDataScalar< ScalarTypeDst >& dst, const grid::Grid4
 template < typename ScalarTypeDst >
 void rand( const grid::Grid4DDataScalar< ScalarTypeDst >& dst )
 {
-    static_assert(
-        std::is_same_v< ScalarTypeDst, double > || std::is_same_v< ScalarTypeDst, float >,
-        "Random integers not implemented. But can be done easily below." );
+    static_assert( util::FloatingPoint< ScalarTypeDst >,
+                   "Random integers not implemented. But can be done easily below." );
 
     Kokkos::Random_XorShift64_Pool<> random_pool( /*seed=*/12345 );
     Kokkos::parallel_for(

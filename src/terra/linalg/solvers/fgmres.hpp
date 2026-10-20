@@ -112,13 +112,16 @@ class FGMRES
         apply( A, x, r );
         lincomb( r, { 1.0, -1.0 }, { b, r } );
 
-        ScalarType       beta0            = std::sqrt( dot( r, r ) );
+        ScalarType       beta0            = Kokkos::sqrt( dot( r, r ) );
         const ScalarType initial_residual = beta0;
 
         if ( statistics_ )
         {
             statistics_->add_row(
-                { { "tag", tag_ }, { "iteration", 0 }, { "relative_residual", 1.0 }, { "absolute_residual", beta0 } } );
+                { { "tag", tag_ },
+                  { "iteration", 0 },
+                  { "relative_residual", 1.0 },
+                  { "absolute_residual", static_cast< double >( beta0 ) } } );
         }
 
         if ( beta0 <= options_.absolute_residual_tolerance )
@@ -206,10 +209,10 @@ class FGMRES
                 }
 
                 // Compute h_{j+1,j} and normalize to get v_{j+1}
-                const ScalarType h_jp1j = std::sqrt( dot( w, w ) );
+                const ScalarType h_jp1j = Kokkos::sqrt( dot( w, w ) );
 
                 // SAFE BREAK 1: Arnoldi Breakdown
-                if ( h_jp1j < std::numeric_limits< ScalarType >::epsilon() * initial_residual )
+                if ( h_jp1j < Kokkos::Experimental::epsilon_v< ScalarType > * initial_residual )
                 {
                     H( j + 1, j ) = 0;
                     inner_its     = j + 1;
@@ -241,14 +244,14 @@ class FGMRES
                 {
                     const ScalarType a    = H( j, j );
                     const ScalarType b    = H( j + 1, j );
-                    const ScalarType r_ab = std::hypot( a, b );
+                    const ScalarType r_ab = Kokkos::hypot( a, b );
                     cs[j]                 = ( r_ab == ScalarType( 0 ) ) ? ScalarType( 1 ) : a / r_ab;
                     sn[j]                 = ( r_ab == ScalarType( 0 ) ) ? ScalarType( 0 ) : b / r_ab;
                     H( j, j )             = r_ab;
                     H( j + 1, j )         = 0;
 
                     // SAFE BREAK 2: Stagnation / Singularity
-                    if ( std::abs( H( j, j ) ) < std::numeric_limits< ScalarType >::epsilon() )
+                    if ( Kokkos::abs( H( j, j ) ) < Kokkos::Experimental::epsilon_v< ScalarType > )
                     {
                         inner_its = j; // Don't include this column in the back-solve
 
@@ -267,7 +270,7 @@ class FGMRES
                 }
 
                 // Estimate residual norm from least-squares problem
-                const ScalarType abs_res = std::abs( g( j + 1 ) );
+                const ScalarType abs_res = Kokkos::abs( g( j + 1 ) );
                 const ScalarType rel_res = abs_res / initial_residual;
 
                 if ( statistics_ )
@@ -275,8 +278,8 @@ class FGMRES
                     statistics_->add_row(
                         { { "tag", tag_ },
                           { "iteration", total_iters + 1 },
-                          { "relative_residual", rel_res },
-                          { "absolute_residual", abs_res } } );
+                          { "relative_residual", static_cast< double >( rel_res ) },
+                          { "absolute_residual", static_cast< double >( abs_res ) } } );
                 }
 
                 inner_its = j + 1;
@@ -312,7 +315,7 @@ class FGMRES
             // Recompute residual r = b - A*x for next restart
             apply( A, x, r );
             lincomb( r, { 1.0, -1.0 }, { b, r } );
-            beta0 = std::sqrt( dot( r, r ) );
+            beta0 = Kokkos::sqrt( dot( r, r ) );
 
             // Check for final convergence
             if ( beta0 <= options_.absolute_residual_tolerance ||

@@ -166,7 +166,7 @@ template < VectorLike Vector >
 ScalarOf< Vector > norm_2( const Vector& y )
 {
     const auto dot_prod = dot( y, y );
-    return std::sqrt( dot_prod );
+    return Kokkos::sqrt( dot_prod );
 }
 
 /// @brief Compute the scaled 2-norm of a vector.
@@ -178,7 +178,7 @@ template < VectorLike Vector >
 ScalarOf< Vector > norm_2_scaled( const Vector& y, const ScalarOf< Vector >& scaling_factor_under_the_root )
 {
     const auto dot_prod = dot( y, y );
-    return std::sqrt( dot_prod * scaling_factor_under_the_root );
+    return Kokkos::sqrt( dot_prod * scaling_factor_under_the_root );
 }
 
 /// @brief Check if a vector contains NaN or inf entries.
