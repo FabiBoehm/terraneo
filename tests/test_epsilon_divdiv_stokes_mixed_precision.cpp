@@ -1,4 +1,4 @@
-// Mixed-precision study of the viscous-block (A-block) multigrid solver.
+// Mixed-precision study of the Stokes solver.
 //
 // Two precisions are selectable at runtime and both default to double:
 //   --ablock-prec double|float|bf16|fp16   the working precision of the whole
@@ -11,6 +11,12 @@
 // Everything else -- the outer FGMRES, the Stokes operator, the pressure mass matrix
 // and the Schur block -- is double throughout, so each run measures what one
 // reduced-precision component costs in outer iterations.
+//
+// --hourglass C adds the rank-6 gamma correction to the EpsDivDiv operator on every
+// level. One-point quadrature leaves two zero-energy modes per wedge, so without it
+// the velocity block has a near-null space the V-cycle cannot resolve and the outer
+// residual stops descending well above the requested tolerance. --outer-tol sets how
+// far the outer FGMRES is asked to go.
 //
 // It doubles as the original A-block convergence study under increasing viscosity
 // contrast, with and without Galerkin coarse approximation (--gca).
@@ -360,7 +366,8 @@ class LowPrecABlock final
         BoundaryConditions&                                                      bcs,
         int                                                                      cheby_order,
         int                                                                      chebyshev_prepost,
-        double                                                                   coarse_tol )
+        double                                                                   coarse_tol,
+        double                                                                   hourglass_c )
     {
         const size_t num_levels = domains.size();
         const size_t fine       = num_levels - 1;
@@ -384,6 +391,7 @@ class LowPrecABlock final
                 tmp_e_.emplace_back( "mp_tmp_e_" + std::to_string( l ), domains[l], mask_data[l] );
                 a_c_.emplace_back( domains[l], coords_shell[l], coords_radii[l],
                                    boundary_mask_data[l], eta_m_[l].grid_data(), bcs, false );
+                a_c_.back().set_hourglass_coefficient( hourglass_c );
                 p_.emplace_back( linalg::OperatorApplyMode::Add );
                 r_.emplace_back( domains[l] );
             }
@@ -393,6 +401,7 @@ class LowPrecABlock final
         // and the one the outer solver passes is double, so this hierarchy owns its own.
         a_fine_ = std::make_unique< ViscM >( domains[fine], coords_shell[fine], coords_radii[fine],
                                              boundary_mask_data[fine], eta_m_[fine].grid_data(), bcs, false );
+        a_fine_->set_hourglass_coefficient( hourglass_c );
 
         for ( size_t l = 0; l < num_levels; ++l )
         {
@@ -631,7 +640,9 @@ RunResult run_ablock_mg( int    min_level,
                          bool   full_stokes,    // false = solve A-block with MG; true = full Stokes outer FGMRES
                          KrylovPrec krylov_prec, // Krylov-basis precision for the full-Stokes outer FGMRES
                          ABlockPrec  ablock_prec, // working precision of the A-block V-cycle preconditioner
-                         ABlockArith ablock_arith ) // fast-path arithmetic precision in that V-cycle
+                         ABlockArith ablock_arith, // fast-path arithmetic precision in that V-cycle
+                         double      hourglass_c, // rank-6 hourglass stabilization coefficient (0 = off)
+                         double      outer_tol )  // outer FGMRES relative residual tolerance
 {
     using ScalarType = double;
 
@@ -734,6 +745,12 @@ RunResult run_ablock_mg( int    min_level,
         boundary_mask_data[velocity_level], eta[velocity_level].grid_data(),
         bcs_neumann, false );
 
+    // The hourglass correction has to be on the operator the V-cycle actually solves
+    // as well as on its coarse levels, otherwise the smoother and the fine residual
+    // disagree about what the operator is.
+    K_op.block_11().set_hourglass_coefficient( hourglass_c );
+    K_op_neumann.block_11().set_hourglass_coefficient( hourglass_c );
+
     ViscousMass M( domains[velocity_level], coords_shell[velocity_level], coords_radii[velocity_level], false );
 
     // GCAElements map on the coarsest grid: which coarsest-grid elements get GCA.
@@ -767,6 +784,7 @@ RunResult run_ablock_mg( int    min_level,
             A_c.emplace_back(
                 domains[level], coords_shell[level], coords_radii[level],
                 boundary_mask_data[level], eta[level].grid_data(), bcs, false );
+            A_c.back().set_hourglass_coefficient( hourglass_c );
 
             if ( gca == 1 )
             {
@@ -964,7 +982,7 @@ RunResult run_ablock_mg( int    min_level,
     auto make_impl = [&]< typename M, typename ArithM >() -> ImplPtr {
         return std::make_shared< LowPrecABlock< M, ArithM > >(
             domains, coords_shell, coords_radii, mask_data, boundary_mask_data, eta,
-            inverse_diagonals, bcs, cheby_order, 3, coarse_tol );
+            inverse_diagonals, bcs, cheby_order, 3, coarse_tol, hourglass_c );
     };
     using Half           = Kokkos::Experimental::half_t;
     using BHalf          = Kokkos::Experimental::bhalf_t;
@@ -995,7 +1013,7 @@ RunResult run_ablock_mg( int    min_level,
     linalg::solvers::FGMRESOptions< ScalarType > outer_opts;
     outer_opts.restart                     = outer_restart;
     outer_opts.max_iterations              = max_cycles;  // reuse --max-cycles as outer iteration cap
-    outer_opts.relative_residual_tolerance = 1e-6;
+    outer_opts.relative_residual_tolerance = outer_tol;
     outer_opts.absolute_residual_tolerance = 1e-16;
     auto outer_table = std::make_shared< util::Table >();
 
@@ -1316,6 +1334,8 @@ int main( int argc, char** argv )
     KrylovPrec krylov_prec = KrylovPrec::DOUBLE; // --krylov-precision double|single|bf16|fp16 (full-Stokes only)
     ABlockPrec  ablock_prec  = ABlockPrec::DOUBLE;  // --ablock-prec double|float|fp16|bf16 (full-Stokes only)
     ABlockArith ablock_arith = ABlockArith::LOW; // --ablock-arith low|double (low = follow --ablock-prec)
+    double      hourglass_c  = 0.0;              // --hourglass C (0 = off, 0.3 as in EpsDivDivSimpleStab)
+    double      outer_tol    = 1e-6;             // --outer-tol T
     for ( int i = 1; i + 1 < argc; ++i )
     {
         const std::string a = argv[i];
@@ -1338,6 +1358,8 @@ int main( int argc, char** argv )
                                                                         : 0;
         else if ( a == "--coarse-tol" )    coarse_tol  = std::atof( argv[i + 1] );
         else if ( a == "--solve" )         full_stokes = ( std::string( argv[i + 1] ) == "stokes" );
+        else if ( a == "--hourglass" )      hourglass_c = std::atof( argv[i + 1] );
+        else if ( a == "--outer-tol" )      outer_tol   = std::atof( argv[i + 1] );
         else if ( a == "--ablock-arith" )
         {
             const std::string q = argv[i + 1];
@@ -1406,6 +1428,8 @@ int main( int argc, char** argv )
                                            + ", A-block prec = " + ablock_prec_name( ablock_prec )
                                            + ablock_prec_note( ablock_prec )
                                            + ", A-block arith = " + ablock_arith_name( ablock_arith )
+                                           + ", hourglass = " + std::to_string( hourglass_c )
+                                           + ", outer tol = " + std::to_string( outer_tol )
                                    : std::string() )
                   << ", BC = " << bc_name
                   << ", viscosity = "
@@ -1429,7 +1453,8 @@ int main( int argc, char** argv )
 
             const auto res =
                 run_ablock_mg( min_level, max_level, cheby_order, perturb_amp, rmu, s.gca, max_cycles, bc, s.interp,
-                               visc_profile, coarse_tol, full_stokes, krylov_prec, ablock_prec, ablock_arith );
+                               visc_profile, coarse_tol, full_stokes, krylov_prec, ablock_prec, ablock_arith,
+                               hourglass_c, outer_tol );
 
             summary->add_row(
                 { { "rmu", rmu },
@@ -1437,6 +1462,7 @@ int main( int argc, char** argv )
                   { "krylov", std::string( krylov_prec_name( krylov_prec ) ) },
                   { "ablock_prec", std::string( ablock_prec_name( ablock_prec ) ) },
                   { "ablock_arith", std::string( ablock_arith_name( ablock_arith ) ) },
+                  { "hourglass", hourglass_c },
                   { "scheme", std::string( s.name ) },
                   { "cycles", res.cycles },
                   { "final_rel_res", res.rel_residual_final },
