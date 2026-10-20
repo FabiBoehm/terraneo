@@ -407,8 +407,10 @@ class LowPrecABlock final
             inv_diag_overflow = inv_diag_overflow || linalg::has_nan_or_inf( inv_diag_m_[l] );
         }
         util::logroot << "[LowPrecABlock] M finite_max = "
-                      << static_cast< double >( Kokkos::Experimental::finite_max_v< M > )
-                      << ", norm_min = " << static_cast< double >( Kokkos::Experimental::norm_min_v< M > )
+                      // The numeric traits of the 16-bit types are bit_comparison_type, not M,
+                      // so they go through M's constructor before they can reach double.
+                      << static_cast< double >( M( Kokkos::Experimental::finite_max_v< M > ) )
+                      << ", norm_min = " << static_cast< double >( M( Kokkos::Experimental::norm_min_v< M > ) )
                       << "\n                max|eta| = " << eta_max << ( eta_overflow ? "  [OVERFLOWS M]" : "" )
                       << ", max|diag^-1| = " << inv_diag_max << ( inv_diag_overflow ? "  [OVERFLOWS M]" : "" )
                       << std::endl;
