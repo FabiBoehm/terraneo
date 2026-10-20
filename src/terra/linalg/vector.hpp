@@ -34,8 +34,9 @@ concept VectorLike = requires(
     // Required randomization
     { self.randomize_impl() } -> std::same_as< void >;
 
-    // Required max magnitude
-    { self_const.max_abs_entry_impl() } -> std::same_as< typename T::ScalarType >;
+    // Required max magnitude. Convertible, not identical: a 16-bit vector reports it
+    // in the wider util::Accumulator type, like its inner products.
+    { self_const.max_abs_entry_impl() } -> std::convertible_to< typename T::ScalarType >;
 
     // Required nan/inf check
     { self_const.has_nan_or_inf_impl() } -> std::same_as< bool >;
@@ -162,7 +163,7 @@ void randomize( Vector& y )
 /// @param y Input vector.
 /// @return Infinity norm value.
 template < VectorLike Vector >
-ScalarOf< Vector > norm_inf( const Vector& y )
+AccumulatorOf< Vector > norm_inf( const Vector& y )
 {
     return y.max_abs_entry_impl();
 }

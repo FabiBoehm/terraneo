@@ -118,7 +118,10 @@ class VectorQ1Scalar
     /// @brief Max absolute entry implementation for VectorLike concept.
     /// Computes: \f$ \max_i |y_i| \f$
     /// @return Maximum absolute value.
-    ScalarType max_abs_entry_impl() const { return kernels::common::max_abs_entry( grid_data_ ); }
+    util::Accumulator< ScalarType > max_abs_entry_impl() const
+    {
+        return kernels::common::max_abs_entry( grid_data_ );
+    }
 
     /// @brief NaN/inf check implementation for VectorLike concept.
     /// Returns true if any entry of grid_data is NaN/inf.
@@ -261,7 +264,10 @@ class VectorQ1Vec
     /// @brief Max absolute entry implementation for VectorLike concept.
     /// Computes: \f$ \max_i |y_i| \f$
     /// @return Maximum absolute value.
-    ScalarType max_abs_entry_impl() const { return kernels::common::max_abs_entry( grid_data_ ); }
+    util::Accumulator< ScalarType > max_abs_entry_impl() const
+    {
+        return kernels::common::max_abs_entry( grid_data_ );
+    }
 
     /// @brief NaN/inf check implementation for VectorLike concept.
     /// Returns true if any entry of grid_data is NaN/inf.

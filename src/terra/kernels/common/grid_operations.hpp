@@ -358,17 +358,23 @@ ScalarType min_abs_entry( const grid::Grid4DDataScalar< ScalarType >& x )
 }
 
 template < typename ScalarType >
-ScalarType max_abs_entry( const grid::Grid4DDataScalar< ScalarType >& x )
+util::Accumulator< ScalarType > max_abs_entry( const grid::Grid4DDataScalar< ScalarType >& x )
 {
-    ScalarType max_mag = 0.0;
+    // Reduced in util::Accumulator< ScalarType > (double for the 16-bit types). A
+    // maximum of representable entries is itself representable, but Kokkos::Max over a
+    // 16-bit type hands its result back through the host-side wrapper, and on ROCm that
+    // is the path that does not work. Reducing in double costs nothing here: the
+    // magnitude is only ever used to scale or to report.
+    using Acc   = util::Accumulator< ScalarType >;
+    Acc max_mag = 0.0;
     Kokkos::parallel_reduce(
         "max_abs_entry",
         Kokkos::MDRangePolicy( { 0, 0, 0, 0 }, { x.extent( 0 ), x.extent( 1 ), x.extent( 2 ), x.extent( 3 ) } ),
-        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, ScalarType& local_max ) {
-            ScalarType val = Kokkos::abs( x( local_subdomain, i, j, k ) );
-            local_max      = Kokkos::max( local_max, val );
+        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, Acc& local_max ) {
+            const Acc val = Kokkos::abs( static_cast< Acc >( x( local_subdomain, i, j, k ) ) );
+            local_max     = Kokkos::max( local_max, val );
         },
-        Kokkos::Max< ScalarType >( max_mag ) );
+        Kokkos::Max< Acc >( max_mag ) );
 
     Kokkos::fence();
 
@@ -378,37 +384,38 @@ ScalarType max_abs_entry( const grid::Grid4DDataScalar< ScalarType >& x )
 }
 
 template < typename ScalarType, int VecDim >
-ScalarType max_abs_entry( const grid::Grid4DDataVec< ScalarType, VecDim >& x )
+util::Accumulator< ScalarType > max_abs_entry( const grid::Grid4DDataVec< ScalarType, VecDim >& x )
 {
-    ScalarType max_mag = 0.0;
+    util::Accumulator< ScalarType > max_mag = 0.0;
     for ( int d = 0; d < VecDim; ++d )
     {
         // max_abs_entry for scalar internally does MPI_Allreduce,
         // so we call per-component and take the max on the host.
-        ScalarType comp_max = max_abs_entry( x.comp_[d] );
+        const auto comp_max = max_abs_entry( x.comp_[d] );
         max_mag             = std::max( max_mag, comp_max );
     }
     return max_mag;
 }
 
 template < typename ScalarType, util::FlagLike FlagType >
-ScalarType max_abs_entry(
+util::Accumulator< ScalarType > max_abs_entry(
     const grid::Grid4DDataScalar< ScalarType >& x,
     const grid::Grid4DDataScalar< FlagType >&   mask,
     const FlagType&                             mask_value )
 {
-    ScalarType max_mag = 0.0;
+    using Acc   = util::Accumulator< ScalarType >;
+    Acc max_mag = 0.0;
     Kokkos::parallel_reduce(
         "max_abs_entry",
         Kokkos::MDRangePolicy( { 0, 0, 0, 0 }, { x.extent( 0 ), x.extent( 1 ), x.extent( 2 ), x.extent( 3 ) } ),
-        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, ScalarType& local_max ) {
+        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, Acc& local_max ) {
             if ( util::has_flag( mask( local_subdomain, i, j, k ), mask_value ) )
             {
-                ScalarType val = Kokkos::abs( x( local_subdomain, i, j, k ) );
-                local_max      = Kokkos::max( local_max, val );
+                const Acc val = Kokkos::abs( static_cast< Acc >( x( local_subdomain, i, j, k ) ) );
+                local_max     = Kokkos::max( local_max, val );
             }
         },
-        Kokkos::Max< ScalarType >( max_mag ) );
+        Kokkos::Max< Acc >( max_mag ) );
 
     Kokkos::fence();
 
@@ -418,22 +425,23 @@ ScalarType max_abs_entry(
 }
 
 template < typename ScalarType >
-ScalarType max_abs_entry_subset(
+util::Accumulator< ScalarType > max_abs_entry_subset(
     const grid::Grid4DDataScalar< ScalarType >& x,
     dense::Vec< int, 4 >                        start,
     dense::Vec< int, 4 >                        end_excl )
 {
-    ScalarType max_mag = 0.0;
+    using Acc   = util::Accumulator< ScalarType >;
+    Acc max_mag = 0.0;
     Kokkos::parallel_reduce(
         "max_abs_entry",
         Kokkos::MDRangePolicy(
             { start( 0 ), start( 1 ), start( 2 ), start( 3 ) },
             { end_excl( 0 ), end_excl( 1 ), end_excl( 2 ), end_excl( 3 ) } ),
-        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, ScalarType& local_max ) {
-            ScalarType val = Kokkos::abs( x( local_subdomain, i, j, k ) );
-            local_max      = Kokkos::max( local_max, val );
+        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, Acc& local_max ) {
+            const Acc val = Kokkos::abs( static_cast< Acc >( x( local_subdomain, i, j, k ) ) );
+            local_max     = Kokkos::max( local_max, val );
         },
-        Kokkos::Max< ScalarType >( max_mag ) );
+        Kokkos::Max< Acc >( max_mag ) );
 
     Kokkos::fence();
 
@@ -443,22 +451,24 @@ ScalarType max_abs_entry_subset(
 }
 
 template < typename ScalarType, int VecDim >
-ScalarType max_vector_magnitude( const grid::Grid4DDataVec< ScalarType, VecDim >& x )
+util::Accumulator< ScalarType > max_vector_magnitude( const grid::Grid4DDataVec< ScalarType, VecDim >& x )
 {
-    ScalarType max_mag = 0.0;
+    using Acc   = util::Accumulator< ScalarType >;
+    Acc max_mag = 0.0;
     Kokkos::parallel_reduce(
         "max_vector_magnitude",
         Kokkos::MDRangePolicy( { 0, 0, 0, 0 }, { x.extent( 0 ), x.extent( 1 ), x.extent( 2 ), x.extent( 3 ) } ),
-        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, ScalarType& local_max ) {
-            ScalarType val = 0;
+        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, Acc& local_max ) {
+            Acc val = 0;
             for ( int d = 0; d < VecDim; ++d )
             {
-                val += x( local_subdomain, i, j, k, d ) * x( local_subdomain, i, j, k, d );
+                const Acc c = static_cast< Acc >( x( local_subdomain, i, j, k, d ) );
+                val += c * c;
             }
             val       = Kokkos::sqrt( val );
             local_max = Kokkos::max( local_max, val );
         },
-        Kokkos::Max< ScalarType >( max_mag ) );
+        Kokkos::Max< Acc >( max_mag ) );
 
     Kokkos::fence();
 

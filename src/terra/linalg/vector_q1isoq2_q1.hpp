@@ -105,7 +105,7 @@ class VectorQ1IsoQ2Q1
     /// @brief Max absolute entry implementation for Block2VectorLike concept.
     /// Computes: \( \max( \max_i |\text{block}_1|, \max_j |\text{block}_2| ) \)
     /// @return Maximum absolute value across both blocks.
-    ScalarType max_abs_entry_impl() const
+    util::Accumulator< ScalarType > max_abs_entry_impl() const
     {
         return std::max( block_1().max_abs_entry_impl(), block_2().max_abs_entry_impl() );
     }
