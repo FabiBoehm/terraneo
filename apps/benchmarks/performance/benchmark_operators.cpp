@@ -140,6 +140,7 @@ struct Parameters
     int  refinement_level_subdomains = 0;
     bool precision_sweep             = false;
     bool precision_matrix            = false;
+    bool precision_ablation          = false;
     bool tile_sweep                  = false;
 };
 
@@ -478,12 +479,13 @@ double modelled_bytes( long dofs_scalar )
 
 /// @tparam S storage precision of the fields (src, dst, coefficient)
 /// @tparam A arithmetic precision of the fast-path contraction
+/// @tparam G geometry precision: the stored coordinates and radii, i.e. CoordScalarT
 ///
 /// Keeping these separate is what attributes the cost: S alone changes the bytes
 /// moved and the load/store path, A alone changes the arithmetic. Kokkos' 16-bit
 /// scalar operators convert to float per operation, so an A = half arm pays a
 /// conversion on every multiply-add whether or not the storage is narrow.
-template < typename S, typename A = S >
+template < typename S, typename A = S, typename G = double >
 BenchmarkData run_precision( const int level,
                              const int executions,
                              const int refinement_level_subdomains,
@@ -494,9 +496,11 @@ BenchmarkData run_precision( const int level,
     const auto domain = grid::shell::DistributedDomain::create_uniform(
         level, level, 0.5, 1.0, refinement_level_subdomains, refinement_level_subdomains );
 
-    // Geometry in double, as in the solver: CoordScalarT = double.
-    const auto coords_shell = grid::shell::subdomain_unit_sphere_single_shell_coords< double >( domain );
-    const auto coords_radii = grid::shell::subdomain_shell_radii< double >( domain );
+    // Geometry in G. The solver runs this in double; G = S is what "everything in
+    // low precision" means, and flipping G back to double on its own is what
+    // separates the geometry's cost from the field's.
+    const auto coords_shell = grid::shell::subdomain_unit_sphere_single_shell_coords< G >( domain );
+    const auto coords_radii = grid::shell::subdomain_shell_radii< G >( domain );
 
     auto mask_data          = grid::setup_node_ownership_mask_data( domain );
     auto boundary_mask_data = grid::shell::setup_boundary_mask_data( domain );
@@ -516,8 +520,8 @@ BenchmarkData run_precision( const int level,
         { SURFACE, DIRICHLET },
     };
 
-    // Storage S, fast-path arithmetic A, geometry double.
-    EpsilonDivDivKerngen< S, 3, double, A > op(
+    // Storage S, fast-path arithmetic A, geometry G.
+    EpsilonDivDivKerngen< S, 3, G, A > op(
         domain, coords_shell, coords_radii, boundary_mask_data, coeff.grid_data(), bcs, false );
 
     if ( tile_lat > 0 )
@@ -535,8 +539,8 @@ BenchmarkData run_precision( const int level,
     return BenchmarkData{ level, dofs_vec, duration };
 }
 
-template < typename S, typename A = S >
-void sweep_one_precision( const char* name,
+template < typename S, typename A = S, typename G = double >
+void sweep_one_precision( const std::string& name,
                           const int   min_level,
                           const int   max_level,
                           const int   executions,
@@ -544,19 +548,20 @@ void sweep_one_precision( const char* name,
                           const int   world_size )
 {
     logroot << "EpsDivDivKerngen precision sweep: " << name << " (storage " << sizeof( S )
-            << " B, arithmetic " << sizeof( A ) << " B, geometry in double)" << std::endl;
+            << " B, arithmetic " << sizeof( A ) << " B, geometry " << sizeof( G ) << " B)" << std::endl;
 
     util::Table table;
 
     for ( int level = min_level; level <= max_level; ++level )
     {
-        const auto data = run_precision< S, A >( level, executions, refinement_level_subdomains );
+        const auto data = run_precision< S, A, G >( level, executions, refinement_level_subdomains );
         const double gdofs = data.dofs / data.duration / 1e9;
         const double gbs   = modelled_bytes< S >( data.dofs / 3 ) / data.duration / 1e9;
 
-        table.add_row( { { "precision", std::string( name ) },
+        table.add_row( { { "precision", name },
                          { "bytes", static_cast< long >( sizeof( S ) ) },
                          { "arith_bytes", static_cast< long >( sizeof( A ) ) },
+                         { "geom_bytes", static_cast< long >( sizeof( G ) ) },
                          { "level", level },
                          { "dofs", data.dofs },
                          { "duration (s)", data.duration },
@@ -568,7 +573,7 @@ void sweep_one_precision( const char* name,
 
     if ( mpi::rank() == 0 )
     {
-        std::ofstream out( "./csv/prec_" + std::string( name ) + "_np" + std::to_string( world_size ) + "_ml" +
+        std::ofstream out( "./csv/prec_" + name + "_np" + std::to_string( world_size ) + "_ml" +
                            std::to_string( max_level ) + ".csv" );
         table.print_csv( out );
     }
@@ -698,6 +703,60 @@ void run_tile_sweep( const int min_level,
     table.print_csv( logroot );
 }
 
+/// @brief Everything in low precision, then ablated back to double one component at
+///        a time.
+///
+/// The three independent precisions are the stored fields (S), the fast-path
+/// contraction (A) and the geometry (G: coordinates, radii and everything the
+/// Jacobian is built from). The all-low arm is the only one that answers "what does
+/// this cost if nothing is held back"; each single-component flip to double then says
+/// what that one component was worth. Reported for both 16-bit formats, since their
+/// conversion costs differ sharply on hardware without a native bf16 convert.
+template < typename H >
+void run_ablation_for( const char* tag,
+                       const int   mn,
+                       const int   mx,
+                       const int   ex,
+                       const int   r,
+                       const int   world_size )
+{
+    const auto nm = [tag]( const char* suffix ) { return std::string( tag ) + suffix; };
+
+    //                        S       A       G
+    sweep_one_precision< H, H, H >( nm( "_all_low" ), mn, mx, ex, r, world_size );
+    sweep_one_precision< double, H, H >( nm( "_store_dbl" ), mn, mx, ex, r, world_size );
+    sweep_one_precision< H, double, H >( nm( "_arith_dbl" ), mn, mx, ex, r, world_size );
+    sweep_one_precision< H, H, double >( nm( "_geom_dbl" ), mn, mx, ex, r, world_size );
+    sweep_one_precision< H, double, double >( nm( "_only_store_low" ), mn, mx, ex, r, world_size );
+    sweep_one_precision< double, H, double >( nm( "_only_arith_low" ), mn, mx, ex, r, world_size );
+    sweep_one_precision< double, double, H >( nm( "_only_geom_low" ), mn, mx, ex, r, world_size );
+}
+
+void run_precision_ablation( const int min_level,
+                             const int max_level,
+                             const int executions,
+                             const int refinement_level_subdomains )
+{
+    using half  = Kokkos::Experimental::half_t;
+    using bhalf = Kokkos::Experimental::bhalf_t;
+
+    logroot << "All-low-precision EpsDivDivKerngen, ablated to double component by "
+               "component (S = storage, A = arithmetic, G = geometry)."
+            << std::endl;
+    logroot << "min_level: " << min_level << ", max_level: " << max_level
+            << ", executions per level: " << executions << std::endl
+            << std::endl;
+
+    int world_size = 0;
+    MPI_Comm_size( MPI_COMM_WORLD, &world_size );
+    const int mn = min_level, mx = max_level, ex = executions, r = refinement_level_subdomains;
+
+    sweep_one_precision< double, double, double >( "all_double", mn, mx, ex, r, world_size );
+    sweep_one_precision< float, float, float >( "float_all_low", mn, mx, ex, r, world_size );
+    run_ablation_for< half >( "fp16", mn, mx, ex, r, world_size );
+    run_ablation_for< bhalf >( "bf16", mn, mx, ex, r, world_size );
+}
+
 void run_precision_matrix( const int min_level,
                            const int max_level,
                            const int executions,
@@ -813,6 +872,10 @@ int main( int argc, char** argv )
     app.add_flag( "--precision-matrix",
                   parameters.precision_matrix,
                   "Separate storage precision from arithmetic precision for each narrow type." );
+    app.add_flag( "--precision-ablation",
+                  parameters.precision_ablation,
+                  "Run everything in low precision, then return storage, arithmetic and "
+                  "geometry to double one at a time." );
     app.add_flag( "--precision-sweep",
                   parameters.precision_sweep,
                   "Instead of the operator list, sweep EpsDivDivKerngen over double/float/bf16/fp16 per level." );
@@ -833,6 +896,11 @@ int main( int argc, char** argv )
     if ( parameters.tile_sweep )
     {
         run_tile_sweep(
+            parameters.min_level, parameters.max_level, parameters.executions, parameters.refinement_level_subdomains );
+    }
+    else if ( parameters.precision_ablation )
+    {
+        run_precision_ablation(
             parameters.min_level, parameters.max_level, parameters.executions, parameters.refinement_level_subdomains );
     }
     else if ( parameters.precision_matrix )
