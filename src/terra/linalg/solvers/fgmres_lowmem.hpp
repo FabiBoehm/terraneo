@@ -128,6 +128,8 @@ class FGMRESLowMem
 
         while ( total_iters < options_.max_iterations )
         {
+            const int iters_at_cycle_start = total_iters;
+
             // V_0 = r / ||r||   (compute in double, store as reduced precision)
             lincomb( v_work, { util::narrow< ScalarType >( 1.0 / beta0 ) }, { r } );
             convert( v_work, basis_[offV + 0] );
@@ -190,6 +192,7 @@ class FGMRESLowMem
                                   << ", threshold = "
                                   << double( Kokkos::Experimental::epsilon_v< ScalarType > * initial_residual ) << ")"
                                   << std::endl;
+                    ++total_iters; // `break` skips the loop increment
                     break;
                 }
 
@@ -228,6 +231,7 @@ class FGMRESLowMem
                                       << "]: Stagnation after Givens. Terminating. (total_iters = " << total_iters
                                       << ", j = " << j << ", |H(j,j)| = " << double( Kokkos::abs( H( j, j ) ) ) << ")"
                                       << std::endl;
+                        ++total_iters; // `break` skips the loop increment
                         break;
                     }
 
@@ -264,6 +268,7 @@ class FGMRESLowMem
                 if ( rel_res <= options_.relative_residual_tolerance ||
                      abs_res < options_.absolute_residual_tolerance )
                 {
+                    ++total_iters; // `break` skips the loop increment
                     break;
                 }
             }
@@ -313,6 +318,17 @@ class FGMRESLowMem
 
             if ( hard_stop )
             {
+                return;
+            }
+
+            // See fgmres.hpp: make a cycle that advanced nothing terminal and loud.
+            if ( total_iters == iters_at_cycle_start )
+            {
+                util::logroot << "FGMRESLowMem[" << tag_
+                              << "]: restart cycle advanced no iteration. Terminating to avoid an "
+                                 "infinite loop. (total_iters = "
+                              << total_iters << ", beta0 = " << double( beta0 )
+                              << ", rel = " << double( beta0 / initial_residual ) << ")" << std::endl;
                 return;
             }
         }

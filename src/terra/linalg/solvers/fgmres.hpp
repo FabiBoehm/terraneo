@@ -180,6 +180,8 @@ class FGMRES
         // Outer restart loop
         while ( total_iters < options_.max_iterations )
         {
+            const int iters_at_cycle_start = total_iters;
+
             // Initialize Arnoldi: V_0 = r / ||r||
             auto& V0 = tmp_[offV + 0];
             lincomb( V0, { util::narrow< ScalarType >( 1.0 / beta0 ) }, { r } );
@@ -246,6 +248,7 @@ class FGMRES
                     H( j + 1, j ) = 0;
                     inner_its     = j + 1;
                     hard_stop     = true;
+                    ++total_iters; // `break` skips the loop increment
 
                     util::logroot << "FGMRES[" << tag_ << "]: Arnoldi breakdown. Terminating.\n"
                                      "        (Details: total_iters = "
@@ -288,6 +291,7 @@ class FGMRES
                     {
                         inner_its = j; // Don't include this column in the back-solve
                         hard_stop = true;
+                        ++total_iters; // `break` skips the loop increment
 
                         util::logroot << "FGMRES[" << tag_ << "]: Stagnation after Givens rotation. Terminating.\n"
                                          "        (Details: total_iters = "
@@ -322,6 +326,7 @@ class FGMRES
                 // Check for convergence
                 if ( rel_res <= options_.relative_residual_tolerance || abs_res < options_.absolute_residual_tolerance )
                 {
+                    ++total_iters; // `break` skips the loop increment
                     break;
                 }
             }
@@ -363,6 +368,21 @@ class FGMRES
             // A safe break has already contributed everything this basis can give.
             if ( hard_stop )
             {
+                return;
+            }
+
+            // Defence in depth. Nothing above should be able to leave the inner loop
+            // without counting an iteration any more, but when that happened the outer
+            // condition never moved and the solver re-ran an identical cycle forever --
+            // silently, for hours, since the statistics table only prints at the end.
+            // Make that state terminal and loud rather than invisible.
+            if ( total_iters == iters_at_cycle_start )
+            {
+                util::logroot << "FGMRES[" << tag_
+                              << "]: restart cycle advanced no iteration. Terminating to avoid an "
+                                 "infinite loop.\n        (Details: total_iters = "
+                              << total_iters << ", beta0 = " << double( beta0 )
+                              << ", rel = " << double( beta0 / initial_residual ) << ")" << std::endl;
                 return;
             }
         }
