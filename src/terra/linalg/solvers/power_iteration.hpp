@@ -1,5 +1,6 @@
 #pragma once
 
+#include "util/floating_point.hpp"
 #include "terra/linalg/operator.hpp"
 
 namespace terra::linalg::solvers {
@@ -30,7 +31,7 @@ double power_iteration(
 
     // normalize
     auto norm = linalg::norm_2( tmpIt );
-    lincomb( tmpIt, { static_cast< ScalarType >( 1.0 / norm ) }, { tmpIt }, ScalarType( 0 ) );
+    lincomb( tmpIt, { util::narrow< ScalarType >( 1.0 / norm ) }, { tmpIt }, util::narrow< ScalarType >( 0.0 ) );
 
     // apply operator
     apply( op, tmpIt, tmpAux );
@@ -40,7 +41,7 @@ double power_iteration(
     {
         // normalize
         norm = linalg::norm_2( tmpAux );
-        lincomb( tmpIt, { static_cast< ScalarType >( 1.0 / norm ) }, { tmpAux }, ScalarType( 0 ) );
+        lincomb( tmpIt, { util::narrow< ScalarType >( 1.0 / norm ) }, { tmpAux }, util::narrow< ScalarType >( 0.0 ) );
 
         // apply operator
         apply( op, tmpIt, tmpAux );

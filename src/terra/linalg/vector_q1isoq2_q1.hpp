@@ -1,4 +1,5 @@
 #pragma once
+#include "util/floating_point.hpp"
 #include <mpi.h>
 
 #include "communication/shell/communication.hpp"

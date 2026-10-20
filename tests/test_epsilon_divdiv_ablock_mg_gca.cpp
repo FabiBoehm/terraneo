@@ -392,7 +392,7 @@ class LowPrecABlock final
 
         // One V-cycle per application, no internal residual check.
         mg_ = std::make_unique< MGM >( p_, r_, a_c_, tmp_r_, tmp_e_, tmp_, smoothers_, smoothers_,
-                                       *coarse_solver_, 1, static_cast< M >( 1e-16 ) );
+                                       *coarse_solver_, 1, util::narrow< M >( 1e-16 ) );
 
         x_m_      = std::make_unique< VecM >( "mp_x", domains[fine], mask_data[fine] );
         b_m_      = std::make_unique< VecM >( "mp_b", domains[fine], mask_data[fine] );
@@ -437,7 +437,7 @@ class LowPrecABlock final
 
         linalg::lincomb( *b_scaled_, { 1.0 / scale }, { b } );
         linalg::convert( *b_scaled_, *b_m_ );
-        linalg::assign( *x_m_, static_cast< M >( 0 ) );
+        linalg::assign( *x_m_, util::narrow< M >( 0.0 ) );
 
         if ( probe_ )
         {
@@ -466,7 +466,7 @@ class LowPrecABlock final
         // is wrong": write a known constant, read one entry back on the host, and
         // max-reduce the same view once in M (what norm_inf does) and once in double.
         {
-            linalg::assign( *x_m_, static_cast< M >( 3.5 ) );
+            linalg::assign( *x_m_, util::narrow< M >( 3.5 ) );
             const auto& view = x_m_->grid_data().comp_[0];
             auto host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace{}, view );
             double mx_double = 0.0;
@@ -494,7 +494,7 @@ class LowPrecABlock final
             // in fp16 and 0x4060 in bf16; a wrong bit pattern means double -> M is
             // broken on the host, a wrong read-back means M -> double is.
             volatile double rt_in  = 3.5;
-            const M         rt     = static_cast< M >( rt_in );
+            const M         rt     = util::narrow< M >( rt_in );
             const double    rt_out = static_cast< double >( rt );
             uint16_t        rt_bits = 0;
             if constexpr ( sizeof( M ) == 2 )
@@ -508,7 +508,7 @@ class LowPrecABlock final
                           << std::hex << ref_bits << std::dec << "\n"
                           << "[probe]   norm_inf (Max<M>) -> double = " << static_cast< double >( nrm )
                           << ", bits = 0x" << std::hex << nrm_bits << std::dec << std::endl;
-            linalg::assign( *x_m_, static_cast< M >( 0 ) );
+            linalg::assign( *x_m_, util::narrow< M >( 0.0 ) );
         }
 
         rep( "b (converted to M)       ", *b_m_ );
@@ -523,17 +523,17 @@ class LowPrecABlock final
             linalg::DiagonallyScaledOperator< ViscM > dsa( *a_fine_, inv_diag_m_[fine] );
             const double lambda = linalg::solvers::power_iteration( dsa, tmp_[fine], *x_m_, 50 );
             util::logroot << "[probe] power_iteration lambda_max = " << lambda << std::endl;
-            linalg::assign( *x_m_, static_cast< M >( 0 ) );
+            linalg::assign( *x_m_, util::narrow< M >( 0.0 ) );
         }
 
         linalg::solvers::solve( smoothers_[fine], *a_fine_, *x_m_, *b_m_ );
         rep( "after one fine smoother  ", *x_m_ );
-        linalg::assign( *x_m_, static_cast< M >( 0 ) );
+        linalg::assign( *x_m_, util::narrow< M >( 0.0 ) );
 
-        linalg::assign( tmp_e_.empty() ? *x_m_ : tmp_e_[0], static_cast< M >( 0 ) );
+        linalg::assign( tmp_e_.empty() ? *x_m_ : tmp_e_[0], util::narrow< M >( 0.0 ) );
         if ( !tmp_r_.empty() )
         {
-            linalg::assign( tmp_r_[0], static_cast< M >( 1 ) );
+            linalg::assign( tmp_r_[0], util::narrow< M >( 1.0 ) );
             linalg::solvers::solve( *coarse_solver_, a_c_[0], tmp_e_[0], tmp_r_[0] );
             rep( "after coarse solve       ", tmp_e_[0] );
         }

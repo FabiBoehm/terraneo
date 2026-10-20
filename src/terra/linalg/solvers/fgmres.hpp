@@ -1,5 +1,6 @@
 #pragma once
 
+#include "util/floating_point.hpp"
 #include "eigen/eigen_wrapper.hpp"
 #include "identity_solver.hpp"
 #include "terra/linalg/operator.hpp"
@@ -174,7 +175,7 @@ class FGMRES
         {
             // Initialize Arnoldi: V_0 = r / ||r||
             auto& V0 = tmp_[offV + 0];
-            lincomb( V0, { static_cast< ScalarType >( 1.0 / beta0 ) }, { r } );
+            lincomb( V0, { util::narrow< ScalarType >( 1.0 / beta0 ) }, { r } );
 
             // Reset dense workspace for this restart cycle
             H.setZero();
@@ -219,7 +220,7 @@ class FGMRES
                     auto&            vi  = tmp_[offV + i];
                     const DenseScalar hij = dot( w, vi );
                     H( i, j )             = hij;
-                    lincomb( w, { static_cast< ScalarType >( 1.0 ), static_cast< ScalarType >( -hij ) }, { w, vi } );
+                    lincomb( w, { util::narrow< ScalarType >( 1.0 ), util::narrow< ScalarType >( -hij ) }, { w, vi } );
                 }
 
                 // Compute h_{j+1,j} and normalize to get v_{j+1}
@@ -245,7 +246,7 @@ class FGMRES
                 if ( h_jp1j > DenseScalar( 0 ) )
                 {
                     auto& vjp1 = tmp_[offV + j + 1];
-                    lincomb( vjp1, { static_cast< ScalarType >( 1.0 / h_jp1j ) }, { w } );
+                    lincomb( vjp1, { util::narrow< ScalarType >( 1.0 / h_jp1j ) }, { w } );
                 }
 
                 // Apply previous Givens rotations to column j of H
@@ -324,7 +325,7 @@ class FGMRES
             for ( int i = 0; i < inner_its; ++i )
             {
                 auto& zi = tmp_[offZ + i];
-                lincomb( acc, { static_cast< ScalarType >( 1.0 ), static_cast< ScalarType >( y( i ) ) },
+                lincomb( acc, { util::narrow< ScalarType >( 1.0 ), util::narrow< ScalarType >( y( i ) ) },
                          { acc, zi } );
             }
             lincomb( x, { 1.0, 1.0 }, { x, acc } );

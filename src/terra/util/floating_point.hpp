@@ -1,6 +1,8 @@
 #pragma once
 
 #include <concepts>
+#include <cstdint>
+#include <cstring>
 #include <type_traits>
 
 #include "kokkos/kokkos_wrapper.hpp"
@@ -47,6 +49,70 @@ constexpr double epsilon_of()
         return 0x1p-10;
     else
         return 0x1p-7;
+}
+
+/// @brief Narrow @p v to @p T, correctly on the host as well as inside a kernel.
+///
+/// hipcc (ROCm 6.3.4, gfx90a, -O3) miscompiles the host-side double -> half_t
+/// conversion: a value it cannot constant-fold comes out as the bit pattern 0x0000.
+/// A literal is folded and therefore right, which is what makes this so quiet -- a
+/// Chebyshev or FGMRES coefficient computed at runtime on the host silently becomes
+/// zero, the V-cycle returns nothing, and the outer solver reports NaN from the
+/// preconditioner. bf16 (__hip_bfloat16) is unaffected, as is every conversion that
+/// happens on the device.
+///
+/// So encode IEEE-754 binary16 by hand on that one path, round-to-nearest-even.
+/// Everywhere else this is the plain static_cast it looks like.
+template < FloatingPoint T >
+KOKKOS_INLINE_FUNCTION T narrow( double v )
+{
+#if defined( KOKKOS_ENABLE_HIP ) && !defined( __HIP_DEVICE_COMPILE__ )
+    if constexpr ( std::is_same_v< T, Kokkos::Experimental::half_t > && !std::floating_point< T > )
+    {
+        static_assert( sizeof( T ) == 2 );
+
+        const float f = static_cast< float >( v );
+        uint32_t    b = 0;
+        std::memcpy( &b, &f, sizeof( b ) );
+
+        const uint32_t sign      = ( b >> 16 ) & 0x8000u;
+        const uint32_t biased    = ( b >> 23 ) & 0xFFu;
+        const uint32_t mantissa  = b & 0x7FFFFFu;
+        const int32_t  exponent  = static_cast< int32_t >( biased ) - 127 + 15;
+        uint16_t       bits      = 0;
+
+        if ( biased == 0xFFu ) // inf or NaN
+            bits = static_cast< uint16_t >( sign | 0x7C00u | ( mantissa ? 0x200u : 0u ) );
+        else if ( exponent >= 0x1F ) // overflows binary16
+            bits = static_cast< uint16_t >( sign | 0x7C00u );
+        else if ( exponent <= 0 ) // subnormal, or too small to represent at all
+        {
+            if ( exponent < -10 )
+                bits = static_cast< uint16_t >( sign );
+            else
+            {
+                const uint32_t m     = mantissa | 0x800000u;
+                const int      shift = 14 - exponent;
+                uint32_t       q     = m >> shift;
+                if ( ( m >> ( shift - 1 ) ) & 1u )
+                    ++q;
+                bits = static_cast< uint16_t >( sign | q );
+            }
+        }
+        else
+        {
+            uint32_t q = ( static_cast< uint32_t >( exponent ) << 10 ) | ( mantissa >> 13 );
+            if ( ( mantissa >> 12 ) & 1u )
+                ++q;
+            bits = static_cast< uint16_t >( sign | q );
+        }
+
+        T out;
+        std::memcpy( &out, &bits, sizeof( bits ) );
+        return out;
+    }
+#endif
+    return static_cast< T >( v );
 }
 
 } // namespace terra::util

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "util/floating_point.hpp"
+
 namespace terra::linalg {
 
 /// @brief Concept for types that behave like vectors.

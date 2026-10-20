@@ -1,5 +1,6 @@
 #pragma once
 
+#include "util/floating_point.hpp"
 #include "linalg/diagonally_scaled_operator.hpp"
 #include "linalg/operator.hpp"
 #include "power_iteration.hpp"
@@ -129,7 +130,7 @@ class Chebyshev
             // d = z / theta;   // first Chebyshev direction
             // x = x + d;
 
-            lincomb( d, { static_cast< ScalarType >( 1.0 / theta ) }, { z } );
+            lincomb( d, { util::narrow< ScalarType >( 1.0 / theta ) }, { z } );
             lincomb( x, { 1.0, 1.0 }, { x, d } );
 
             // cheby recurrence
@@ -148,7 +149,7 @@ class Chebyshev
                 // d = alpha * z + beta * d;
                 // x = x + d;
 
-                lincomb( d, { static_cast< ScalarType >( alpha ), static_cast< ScalarType >( beta ) },
+                lincomb( d, { util::narrow< ScalarType >( alpha ), util::narrow< ScalarType >( beta ) },
                          { z, d } );
                 lincomb( x, { 1.0, 1.0 }, { x, d } );
 
