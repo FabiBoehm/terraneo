@@ -279,12 +279,17 @@ struct InverseDiagonalPreconditioner
 /// operator always stay in double; only this hierarchy changes.
 enum class ABlockPrec { DOUBLE, FLOAT, FP16, BF16 };
 
-/// Arithmetic precision inside the EpsDivDiv fast Dirichlet/Neumann kernel, chosen
-/// independently of the storage precision above. DOUBLE keeps the historical
-/// behaviour -- the team-scratch tiles and the local contraction are double whatever
-/// the field precision is -- so --ablock-prec alone measures memory traffic. LOW moves
-/// the field tiles and the contraction to the field precision as well, leaving only
-/// the geometry (coordinates, Jacobian, shape-function gradients) in double.
+/// Arithmetic precision inside the EpsDivDiv fast Dirichlet/Neumann kernel.
+///
+/// LOW is the default and the sensible end state: one precision knob per component,
+/// so --ablock-prec fp16 means an fp16 V-cycle rather than fp16 storage feeding
+/// double arithmetic. Only the geometry (coordinates, radii, Jacobian and the
+/// shape-function gradients derived from it) stays in double.
+///
+/// DOUBLE exists because the two are worth separating when a low-precision arm
+/// misbehaves: it reproduces what the kernel did unconditionally before, 2-byte
+/// storage with 8-byte arithmetic, which is a pure memory-traffic experiment. Running
+/// both tells you whether a degradation came from the bus or from the contraction.
 enum class ABlockArith { DOUBLE, LOW };
 
 inline const char* ablock_arith_name( ABlockArith a )
@@ -1310,7 +1315,7 @@ int main( int argc, char** argv )
     bool   full_stokes  = false; // --solve stokes: outer FGMRES on full saddle point
     KrylovPrec krylov_prec = KrylovPrec::DOUBLE; // --krylov-precision double|single|bf16|fp16 (full-Stokes only)
     ABlockPrec  ablock_prec  = ABlockPrec::DOUBLE;  // --ablock-prec double|float|fp16|bf16 (full-Stokes only)
-    ABlockArith ablock_arith = ABlockArith::DOUBLE; // --ablock-arith double|low
+    ABlockArith ablock_arith = ABlockArith::LOW; // --ablock-arith low|double (low = follow --ablock-prec)
     for ( int i = 1; i + 1 < argc; ++i )
     {
         const std::string a = argv[i];
