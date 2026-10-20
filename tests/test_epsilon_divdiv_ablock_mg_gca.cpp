@@ -434,12 +434,58 @@ class LowPrecABlock final
         linalg::lincomb( *b_scaled_, { 1.0 / scale }, { b } );
         linalg::convert( *b_scaled_, *b_m_ );
         linalg::assign( *x_m_, static_cast< M >( 0 ) );
+
+        if ( probe_ )
+        {
+            probe_stages();
+            probe_ = false;
+        }
+
         linalg::solvers::solve( *mg_, *a_fine_, *x_m_, *b_m_ );
         linalg::convert( *x_m_, x );
         linalg::lincomb( x, { scale }, { x } );
     }
 
   private:
+    /// @brief Walk the V-cycle one stage at a time on the first application and report
+    ///        magnitudes and NaN/Inf, so a diverging low-precision arm can be pinned to
+    ///        a stage instead of guessed at. Runs once, on scratch vectors.
+    void probe_stages()
+    {
+        const size_t fine = tmp_.size() - 1;
+        auto         rep  = [&]( const char* what, auto& v ) {
+            util::logroot << "[probe] " << what << ": max|.| = " << static_cast< double >( linalg::norm_inf( v ) )
+                          << ( linalg::has_nan_or_inf( v ) ? "   <-- NaN/Inf" : "" ) << std::endl;
+        };
+
+        rep( "b (converted to M)       ", *b_m_ );
+        rep( "diag^-1 (fine, in M)     ", inv_diag_m_[fine] );
+
+        linalg::apply( *a_fine_, *b_m_, tmp_[fine] );
+        rep( "A_fine * b               ", tmp_[fine] );
+
+        // The eigenvalue bound the Chebyshev smoother will use, computed exactly as it
+        // does internally -- this is the step that consumes a full-level inner product.
+        {
+            linalg::DiagonallyScaledOperator< ViscM > dsa( *a_fine_, inv_diag_m_[fine] );
+            const double lambda = linalg::solvers::power_iteration( dsa, tmp_[fine], *x_m_, 50 );
+            util::logroot << "[probe] power_iteration lambda_max = " << lambda << std::endl;
+            linalg::assign( *x_m_, static_cast< M >( 0 ) );
+        }
+
+        linalg::solvers::solve( smoothers_[fine], *a_fine_, *x_m_, *b_m_ );
+        rep( "after one fine smoother  ", *x_m_ );
+        linalg::assign( *x_m_, static_cast< M >( 0 ) );
+
+        linalg::assign( tmp_e_.empty() ? *x_m_ : tmp_e_[0], static_cast< M >( 0 ) );
+        if ( !tmp_r_.empty() )
+        {
+            linalg::assign( tmp_r_[0], static_cast< M >( 1 ) );
+            linalg::solvers::solve( *coarse_solver_, a_c_[0], tmp_e_[0], tmp_r_[0] );
+            rep( "after coarse solve       ", tmp_e_[0] );
+        }
+    }
+
     std::vector< ScalM > eta_m_;
     std::vector< VecM >  inv_diag_m_;
     std::vector< VecM >  tmp_, tmp_r_, tmp_e_;
@@ -455,6 +501,7 @@ class LowPrecABlock final
     std::unique_ptr< MGM >         mg_;
     std::unique_ptr< VecM >        x_m_, b_m_;
     std::unique_ptr< OuterVec >    b_scaled_;
+    bool                           probe_ = true;
 };
 
 enum class BCKind { DIRICHLET, FREESLIP };
