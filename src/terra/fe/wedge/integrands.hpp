@@ -172,8 +172,8 @@ KOKKOS_INLINE_FUNCTION constexpr T shape( const int node_idx, const dense::Vec< 
 template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr T grad_shape_rad( const int node_idx )
 {
-    constexpr T grad_N_rad[2] = { -0.5, 0.5 };
-    return grad_N_rad[node_idx / 3];
+    constexpr double grad_N_rad[2] = { -0.5, 0.5 };
+    return static_cast< T >( grad_N_rad[node_idx / 3] );
 }
 
 /// @brief Gradient of the lateral part of the shape function, in xi direction
@@ -188,8 +188,8 @@ KOKKOS_INLINE_FUNCTION constexpr T grad_shape_rad( const int node_idx )
 template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr T grad_shape_lat_xi( const int node_idx )
 {
-    constexpr T grad_N_lat_xi[3] = { -1.0, 1.0, 0.0 };
-    return grad_N_lat_xi[node_idx % 3];
+    constexpr double grad_N_lat_xi[3] = { -1.0, 1.0, 0.0 };
+    return static_cast< T >( grad_N_lat_xi[node_idx % 3] );
 }
 
 /// @brief Gradient of the lateral part of the shape function, in eta direction
@@ -204,8 +204,8 @@ KOKKOS_INLINE_FUNCTION constexpr T grad_shape_lat_xi( const int node_idx )
 template < util::FloatingPoint T >
 KOKKOS_INLINE_FUNCTION constexpr T grad_shape_lat_eta( const int node_idx )
 {
-    constexpr T grad_N_lat_eta[3] = { -1.0, 0.0, 1.0 };
-    return grad_N_lat_eta[node_idx % 3];
+    constexpr double grad_N_lat_eta[3] = { -1.0, 0.0, 1.0 };
+    return static_cast< T >( grad_N_lat_eta[node_idx % 3] );
 }
 
 /// @brief Gradient of the full shape function:

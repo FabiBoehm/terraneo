@@ -1068,13 +1068,21 @@ class EpsilonDivDivKerngen
 
                     for ( int boundary_node_idx = 0; boundary_node_idx < 3; boundary_node_idx++ )
                     {
-                        dense::Vec< double, 3 > normal = grid::shell::coords(
+                        // coords() comes back in GeomT. The rotation itself stays in
+                        // double: a narrower coordinate *store* should not quietly
+                        // narrow the boundary algebra built on top of it.
+                        const auto stored_normal = grid::shell::coords(
                             local_subdomain_id,
                             x_cell + layer_hex_offset_x[wedge][boundary_node_idx],
                             y_cell + layer_hex_offset_y[wedge][boundary_node_idx],
                             r_cell + ( at_cmb ? 0 : 1 ),
                             grid_,
                             radii_ );
+
+                        dense::Vec< double, 3 > normal;
+                        normal( 0 ) = static_cast< double >( stored_normal( 0 ) );
+                        normal( 1 ) = static_cast< double >( stored_normal( 1 ) );
+                        normal( 2 ) = static_cast< double >( stored_normal( 2 ) );
 
                         auto R_i = trafo_mat_cartesian_to_normal_tangential( normal );
 
