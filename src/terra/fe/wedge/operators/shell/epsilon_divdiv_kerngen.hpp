@@ -1295,8 +1295,8 @@ class EpsilonDivDivKerngen
             if ( r_cell >= hex_rad_ )
                 break;
 
-            const double r_0 = r_sh( lvl0 );
-            const double r_1 = r_sh( lvl0 + 1 );
+            const double r_0 = static_cast< double >( r_sh( lvl0 ) );
+            const double r_1 = static_cast< double >( r_sh( lvl0 + 1 ) );
 
             const bool at_cmb     = has_flag( local_subdomain_id, x_cell, y_cell, r_cell, CMB );
             const bool at_surface = has_flag( local_subdomain_id, x_cell, y_cell, r_cell + 1, SURFACE );
@@ -1755,7 +1755,7 @@ class EpsilonDivDivKerngen
 
         Kokkos::parallel_for( Kokkos::TeamThreadRange( team, nlev ), [&]( int lvl ) {
             const int rr = r0 + lvl;
-            r_sh( lvl )  = ( rr <= hex_rad_ ) ? radii_( local_subdomain_id, rr ) : 0.0;
+            r_sh( lvl )  = ( rr <= hex_rad_ ) ? static_cast< double >( radii_( local_subdomain_id, rr ) ) : 0.0;
         } );
 
         const int total_pairs = nxy * nlev;
