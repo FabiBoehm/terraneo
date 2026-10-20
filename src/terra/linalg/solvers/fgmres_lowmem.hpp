@@ -120,7 +120,7 @@ class FGMRESLowMem
         while ( total_iters < options_.max_iterations )
         {
             // V_0 = r / ||r||   (compute in double, store as reduced precision)
-            lincomb( v_work, { 1.0 / beta0 }, { r } );
+            lincomb( v_work, { static_cast< ScalarType >( 1.0 / beta0 ) }, { r } );
             convert( v_work, basis_[offV + 0] );
 
             H.setZero();
@@ -185,7 +185,7 @@ class FGMRESLowMem
                 if ( h_jp1j > ScalarType( 0 ) )
                 {
                     util::Timer t_gs( "fgmres_gram_schmidt" );
-                    lincomb( v_work, { 1.0 / h_jp1j }, { w } ); // v_{j+1} in double
+                    lincomb( v_work, { static_cast< ScalarType >( 1.0 / h_jp1j ) }, { w } ); // v_{j+1} in double
                     convert( v_work, basis_[offV + j + 1] );    // store reduced precision
                 }
 

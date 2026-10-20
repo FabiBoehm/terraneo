@@ -129,7 +129,7 @@ class Chebyshev
             // d = z / theta;   // first Chebyshev direction
             // x = x + d;
 
-            lincomb( d, { 1.0 / theta }, { z } );
+            lincomb( d, { static_cast< ScalarType >( 1.0 / theta ) }, { z } );
             lincomb( x, { 1.0, 1.0 }, { x, d } );
 
             // cheby recurrence
@@ -148,7 +148,8 @@ class Chebyshev
                 // d = alpha * z + beta * d;
                 // x = x + d;
 
-                lincomb( d, { alpha, beta }, { z, d } );
+                lincomb( d, { static_cast< ScalarType >( alpha ), static_cast< ScalarType >( beta ) },
+                         { z, d } );
                 lincomb( x, { 1.0, 1.0 }, { x, d } );
 
                 rho = rho_new;

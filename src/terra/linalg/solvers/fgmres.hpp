@@ -157,7 +157,7 @@ class FGMRES
         {
             // Initialize Arnoldi: V_0 = r / ||r||
             auto& V0 = tmp_[offV + 0];
-            lincomb( V0, { 1.0 / beta0 }, { r } );
+            lincomb( V0, { static_cast< ScalarType >( 1.0 / beta0 ) }, { r } );
 
             // Reset dense workspace for this restart cycle
             H.setZero();
@@ -226,7 +226,7 @@ class FGMRES
                 if ( h_jp1j > ScalarType( 0 ) )
                 {
                     auto& vjp1 = tmp_[offV + j + 1];
-                    lincomb( vjp1, { 1.0 / h_jp1j }, { w } );
+                    lincomb( vjp1, { static_cast< ScalarType >( 1.0 / h_jp1j ) }, { w } );
                 }
 
                 // Apply previous Givens rotations to column j of H

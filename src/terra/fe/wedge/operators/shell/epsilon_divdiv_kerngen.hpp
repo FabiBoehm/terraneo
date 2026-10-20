@@ -1134,10 +1134,14 @@ class EpsilonDivDivKerngen
 
             if ( xi <= hex_lat_ && yi <= hex_lat_ && rr <= hex_rad_ )
             {
-                k_sh( node, lvl )      = k_( local_subdomain_id, xi, yi, rr );
-                src_sh( node, 0, lvl ) = src_( local_subdomain_id, xi, yi, rr, 0 );
-                src_sh( node, 1, lvl ) = src_( local_subdomain_id, xi, yi, rr, 1 );
-                src_sh( node, 2, lvl ) = src_( local_subdomain_id, xi, yi, rr, 2 );
+                // The team scratch tiles are double regardless of ScalarT (see
+                // team_shmem_size), so the gather from the stored fields is the one
+                // place the field precision is widened. The 16-bit Kokkos types only
+                // convert out of themselves explicitly, hence the casts.
+                k_sh( node, lvl )      = static_cast< double >( k_( local_subdomain_id, xi, yi, rr ) );
+                src_sh( node, 0, lvl ) = static_cast< double >( src_( local_subdomain_id, xi, yi, rr, 0 ) );
+                src_sh( node, 1, lvl ) = static_cast< double >( src_( local_subdomain_id, xi, yi, rr, 1 ) );
+                src_sh( node, 2, lvl ) = static_cast< double >( src_( local_subdomain_id, xi, yi, rr, 2 ) );
             }
             else
             {
@@ -1528,10 +1532,14 @@ class EpsilonDivDivKerngen
 
             if ( xi <= hex_lat_ && yi <= hex_lat_ && rr <= hex_rad_ )
             {
-                k_sh( node, lvl )      = k_( local_subdomain_id, xi, yi, rr );
-                src_sh( node, 0, lvl ) = src_( local_subdomain_id, xi, yi, rr, 0 );
-                src_sh( node, 1, lvl ) = src_( local_subdomain_id, xi, yi, rr, 1 );
-                src_sh( node, 2, lvl ) = src_( local_subdomain_id, xi, yi, rr, 2 );
+                // The team scratch tiles are double regardless of ScalarT (see
+                // team_shmem_size), so the gather from the stored fields is the one
+                // place the field precision is widened. The 16-bit Kokkos types only
+                // convert out of themselves explicitly, hence the casts.
+                k_sh( node, lvl )      = static_cast< double >( k_( local_subdomain_id, xi, yi, rr ) );
+                src_sh( node, 0, lvl ) = static_cast< double >( src_( local_subdomain_id, xi, yi, rr, 0 ) );
+                src_sh( node, 1, lvl ) = static_cast< double >( src_( local_subdomain_id, xi, yi, rr, 1 ) );
+                src_sh( node, 2, lvl ) = static_cast< double >( src_( local_subdomain_id, xi, yi, rr, 2 ) );
             }
             else
             {

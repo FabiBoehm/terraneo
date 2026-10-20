@@ -20,28 +20,33 @@ double power_iteration(
 {
     // TODO typecheck on src dst
 
+    // Coefficients are formed in double and narrowed once: the 16-bit Kokkos types
+    // only convert out of themselves explicitly, and clang rejects an implicit
+    // double -> float narrowing inside a braced initializer list.
+    using ScalarType = ScalarOf< SrcOf< OperatorT > >;
+
     // randomize start
     randomize( tmpIt );
 
     // normalize
     auto norm = linalg::norm_2( tmpIt );
-    lincomb( tmpIt, { 1.0 / norm }, { tmpIt }, 0.0 );
+    lincomb( tmpIt, { static_cast< ScalarType >( 1.0 / norm ) }, { tmpIt }, ScalarType( 0 ) );
 
     // apply operator
     apply( op, tmpIt, tmpAux );
 
-    auto radius = 0.0;
+    double radius = 0.0;
     for ( int iteration = 0; iteration < iterations; ++iteration )
     {
         // normalize
         norm = linalg::norm_2( tmpAux );
-        lincomb( tmpIt, { 1.0 / norm }, { tmpAux }, 0.0 );
+        lincomb( tmpIt, { static_cast< ScalarType >( 1.0 / norm ) }, { tmpAux }, ScalarType( 0 ) );
 
         // apply operator
         apply( op, tmpIt, tmpAux );
 
         // compute radius
-        radius = dot( tmpIt, tmpAux );
+        radius = static_cast< double >( dot( tmpIt, tmpAux ) );
     }
     return radius;
 }
