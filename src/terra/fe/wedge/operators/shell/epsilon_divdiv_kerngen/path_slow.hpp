@@ -192,26 +192,7 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
 
         if ( bcf == DIRICHLET )
         {
-            for ( int dimi = 0; dimi < 3; ++dimi )
-            {
-                for ( int dimj = 0; dimj < 3; ++dimj )
-                {
-                    for ( int i = 0; i < num_nodes_per_wedge; i++ )
-                    {
-                        for ( int j = 0; j < num_nodes_per_wedge; j++ )
-                        {
-                            if ( ( at_cmb && ( ( dimi == dimj && i != j && ( i < 3 || j < 3 ) ) ||
-                                               ( dimi != dimj && ( i < 3 || j < 3 ) ) ) ) ||
-                                 ( at_surface && ( ( dimi == dimj && i != j && ( i >= 3 || j >= 3 ) ) ||
-                                                   ( dimi != dimj && ( i >= 3 || j >= 3 ) ) ) ) )
-                            {
-                                boundary_mask( i + dimi * num_nodes_per_wedge, j + dimj * num_nodes_per_wedge ) =
-                                    0.0;
-                            }
-                        }
-                    }
-                }
-            }
+            dirichlet_boundary_mask( at_cmb, at_surface, boundary_mask );
         }
         else if ( bcf == FREESLIP )
         {
@@ -238,47 +219,12 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                 reorder_local_dofs( DoFOrdering::DIMENSIONWISE, DoFOrdering::NODEWISE, src[wedge] );
             }
 
-            constexpr int layer_hex_offset_x[2][3] = { { 0, 1, 0 }, { 1, 0, 1 } };
-            constexpr int layer_hex_offset_y[2][3] = { { 0, 0, 1 }, { 1, 1, 0 } };
-
             for ( int wedge = 0; wedge < 2; ++wedge )
             {
-                for ( int i = 0; i < LocalMatrixDim; ++i )
-                {
-                    R[wedge]( i, i ) = 1.0;
-                }
-
-                for ( int boundary_node_idx = 0; boundary_node_idx < 3; boundary_node_idx++ )
-                {
-                    // coords() comes back in GeomT. The rotation itself stays in
-                    // double: a narrower coordinate *store* should not quietly
-                    // narrow the boundary algebra built on top of it.
-                    const auto stored_normal = grid::shell::coords(
-                        local_subdomain_id,
-                        x_cell + layer_hex_offset_x[wedge][boundary_node_idx],
-                        y_cell + layer_hex_offset_y[wedge][boundary_node_idx],
-                        r_cell + ( at_cmb ? 0 : 1 ),
-                        grid_,
-                        radii_ );
-
-                    dense::Vec< double, 3 > normal;
-                    normal( 0 ) = static_cast< double >( stored_normal( 0 ) );
-                    normal( 1 ) = static_cast< double >( stored_normal( 1 ) );
-                    normal( 2 ) = static_cast< double >( stored_normal( 2 ) );
-
-                    auto R_i = trafo_mat_cartesian_to_normal_tangential( normal );
-
-                    const int offset_in_R = at_cmb ? 0 : 9;
-                    for ( int dimi = 0; dimi < 3; ++dimi )
-                    {
-                        for ( int dimj = 0; dimj < 3; ++dimj )
-                        {
-                            R[wedge](
-                                offset_in_R + boundary_node_idx * 3 + dimi,
-                                offset_in_R + boundary_node_idx * 3 + dimj ) = R_i( dimi, dimj );
-                        }
-                    }
-                }
+                // coords() comes back in GeomT. The rotation itself stays in double: a
+                // narrower coordinate *store* should not quietly narrow the boundary
+                // algebra built on top of it.
+                freeslip_rotation( wedge, local_subdomain_id, x_cell, y_cell, r_cell, at_cmb, R[wedge] );
 
                 A[wedge] = R[wedge] * A_tmp[wedge] * R[wedge].transposed();
 

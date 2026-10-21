@@ -87,6 +87,7 @@ add_terra_test(test_vector_laplace_cg)
 add_terra_test(test_vector_laplace_compare)
 add_terra_test(test_epsilon_divdiv_freeslip_fast_vs_slow)
 add_terra_test(test_epsilon_divdiv_kerngen_precision)
+add_terra_test(test_epsilon_divdiv_stored_vs_matrixfree)
 add_terra_test(test_xdmf_writer)
 
 # Adding target for all the tests.

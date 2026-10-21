@@ -206,8 +206,33 @@ class EpsilonDivDivKerngen
         Slow,
         FastDirichletNeumann,
         FastFreeslip,
+        StoredLocalMatrices,
     };
     KernelPath kernel_path_ = KernelPath::FastDirichletNeumann;
+
+    static const char* kernel_path_name( KernelPath p )
+    {
+        switch ( p )
+        {
+        case KernelPath::Slow:
+            return "slow";
+        case KernelPath::FastFreeslip:
+            return "fast-freeslip";
+        case KernelPath::StoredLocalMatrices:
+            return "stored-local-matrices";
+        default:
+            return "fast-dirichlet-neumann";
+        }
+    }
+
+    // ---- Stored-local-matrix path (epsilon_divdiv_kerngen/path_stored_local_matrices.hpp)
+    /// Packed symmetric 18x18: the upper triangle, row-major from the diagonal.
+    static constexpr int PackedLocalMatrixSize = LocalMatrixDim * ( LocalMatrixDim + 1 ) / 2;
+    /// stored_matrices_( entry, cell ), entry-major: 2 * PackedLocalMatrixSize entries per hex cell.
+    Kokkos::View< MatT**, Kokkos::LayoutRight > stored_matrices_;
+    bool use_stored_matrices_      = false;
+    bool stored_matrices_valid_    = false;
+    bool stored_matrices_hourglass_ = false;
 
     // Rotation null-space penalty (active only for fs/fs)
     bool                                              penalty_active_  = false;
@@ -224,27 +249,31 @@ class EpsilonDivDivKerngen
      * - Else if any free-slip BC on CMB or SURFACE => fast free-slip path
      * - Else => fast Dirichlet/Neumann path
      */
-    void update_kernel_path_flag_host_only()
+    /// The path that recomputes the geometry on every apply: what the stored-local-
+    /// matrix path stands in for, and what it falls back to for the diagonal.
+    KernelPath matrix_free_kernel_path() const
     {
         // Serial backend: always use slow path (fast paths require shared memory / larger teams).
         if constexpr ( std::is_same_v< Kokkos::DefaultExecutionSpace, Kokkos::Serial > )
-        {
-            kernel_path_ = KernelPath::Slow;
-            return;
-        }
+            return KernelPath::Slow;
 
         const BoundaryConditionFlag cmb_bc     = get_boundary_condition_flag( bcs_, CMB );
         const BoundaryConditionFlag surface_bc = get_boundary_condition_flag( bcs_, SURFACE );
 
-        const bool has_freeslip        = ( cmb_bc == FREESLIP ) || ( surface_bc == FREESLIP );
+        const bool has_freeslip = ( cmb_bc == FREESLIP ) || ( surface_bc == FREESLIP );
+        return has_freeslip ? KernelPath::FastFreeslip : KernelPath::FastDirichletNeumann;
+    }
+
+    void update_kernel_path_flag_host_only()
+    {
         const bool has_stored_matrices = ( operator_stored_matrix_mode_ != linalg::OperatorStoredMatrixMode::Off );
 
         if ( has_stored_matrices )
             kernel_path_ = KernelPath::Slow;
-        else if ( has_freeslip )
-            kernel_path_ = KernelPath::FastFreeslip;
+        else if ( use_stored_matrices_ )
+            kernel_path_ = KernelPath::StoredLocalMatrices;
         else
-            kernel_path_ = KernelPath::FastDirichletNeumann;
+            kernel_path_ = matrix_free_kernel_path();
     }
 
 
@@ -310,10 +339,7 @@ class EpsilonDivDivKerngen
                       << "), r_passes=" << r_passes_ << std::endl;
         util::logroot << "[EpsilonDivDiv] number of tiles (x,y,r)=(" << lat_tiles_ << "," << lat_tiles_ << ","
                       << r_tiles_ << "), team_size=" << team_size_ << ", blocks=" << blocks_ << std::endl;
-        const char* path_name = ( kernel_path_ == KernelPath::Slow )         ? "slow" :
-                                ( kernel_path_ == KernelPath::FastFreeslip ) ? "fast-freeslip" :
-                                                                               "fast-dirichlet-neumann";
-        util::logroot << "[EpsilonDivDiv] kernel path = " << path_name << std::endl;
+        util::logroot << "[EpsilonDivDiv] kernel path = " << kernel_path_name( kernel_path_ ) << std::endl;
 
         init_penalty();
     }
@@ -524,17 +550,77 @@ class EpsilonDivDivKerngen
 
     /// @brief Set the hourglass stabilization coefficient (0 disables; 0.3 is the
     ///        value EpsilonDivDivSimpleStab uses).
-    void   set_hourglass_coefficient( double c ) { stab_c_ = c; }
+    void set_hourglass_coefficient( double c )
+    {
+        stab_c_                = c;
+        stored_matrices_valid_ = false;
+    }
     double hourglass_coefficient() const { return stab_c_; }
 
     void set_boundary_conditions( BoundaryConditions bcs )
     {
         bcs_[0] = bcs[0];
         bcs_[1] = bcs[1];
+        stored_matrices_valid_ = false;
 
         // Recompute host-side dispatch mode whenever BCs change
         update_kernel_path_flag_host_only();
     }
+
+    // ---- Stored-local-matrix path --------------------------------------------------
+    /// Select the stored-local-matrix path (matvec only; the diagonal keeps using the
+    /// matrix-free path). The matrices are built on the first apply, or explicitly
+    /// with precompute_stored_local_matrices(). They reflect the coefficient field,
+    /// boundary conditions and hourglass coefficient at that time: changing the
+    /// coefficient afterwards needs invalidate_stored_local_matrices().
+    void set_stored_local_matrices( bool on );
+    bool stored_local_matrices() const { return use_stored_matrices_; }
+    void precompute_stored_local_matrices();
+    void invalidate_stored_local_matrices() { stored_matrices_valid_ = false; }
+    size_t stored_local_matrices_bytes() const;
+
+    int num_cells() const { return local_subdomains_ * hex_lat_ * hex_lat_ * hex_rad_; }
+
+    /// Cell numbering of the stored matrices: r fastest, so consecutive threads are
+    /// radial neighbours and their entries sit next to each other in memory.
+    KOKKOS_INLINE_FUNCTION
+    void decode_cell_index( const int cell, int& local_subdomain_id, int& x_cell, int& y_cell, int& r_cell ) const
+    {
+        int tmp            = cell;
+        r_cell             = tmp % hex_rad_;
+        tmp               /= hex_rad_;
+        y_cell             = tmp % hex_lat_;
+        tmp               /= hex_lat_;
+        x_cell             = tmp % hex_lat_;
+        local_subdomain_id = tmp / hex_lat_;
+    }
+
+    /// Position of ( i, j ), i <= j, in the packed upper triangle.
+    static KOKKOS_INLINE_FUNCTION constexpr int packed_index( const int i, const int j )
+    {
+        return i * LocalMatrixDim - ( i * ( i - 1 ) ) / 2 + ( j - i );
+    }
+
+    template < typename T >
+    static KOKKOS_INLINE_FUNCTION void dirichlet_boundary_mask(
+        bool at_cmb, bool at_surface, dense::Mat< T, LocalMatrixDim, LocalMatrixDim >& mask );
+
+    template < typename T >
+    KOKKOS_INLINE_FUNCTION void freeslip_rotation(
+        int                                              wedge,
+        int                                              local_subdomain_id,
+        int                                              x_cell,
+        int                                              y_cell,
+        int                                              r_cell,
+        bool                                             at_cmb,
+        dense::Mat< T, LocalMatrixDim, LocalMatrixDim >& R ) const;
+
+    KOKKOS_INLINE_FUNCTION
+    dense::Mat< GeoT, LocalMatrixDim, LocalMatrixDim > effective_local_matrix(
+        int local_subdomain_id, int x_cell, int y_cell, int r_cell, int wedge, bool at_cmb, bool at_surface ) const;
+
+    KOKKOS_INLINE_FUNCTION
+    void run_stored_local_matrices( int cell ) const;
 
     const grid::Grid4DDataScalar< ScalarType >& k_grid_data() { return k_; }
     const grid::shell::DistributedDomain&       get_domain() const { return domain_; }
@@ -558,6 +644,7 @@ class EpsilonDivDivKerngen
         grid::Grid4DDataScalar< ScalarType > GCAElements )
     {
         operator_stored_matrix_mode_ = operator_stored_matrix_mode;
+        stored_matrices_valid_       = false;
 
         if ( operator_stored_matrix_mode_ != linalg::OperatorStoredMatrixMode::Off )
         {
@@ -568,10 +655,7 @@ class EpsilonDivDivKerngen
         // Recompute host-side dispatch mode whenever storage mode changes
         update_kernel_path_flag_host_only();
 
-        util::logroot << "[EpsilonDivDiv] (set_stored_matrix_mode) kernel path = "
-                      << (( kernel_path_ == KernelPath::Slow ) ? "slow" :
-                          ( kernel_path_ == KernelPath::FastFreeslip ) ? "fast-freeslip" :
-                                                                         "fast-dirichlet-neumann")
+        util::logroot << "[EpsilonDivDiv] (set_stored_matrix_mode) kernel path = " << kernel_path_name( kernel_path_ )
                       << std::endl;
     }
 
@@ -637,21 +721,37 @@ class EpsilonDivDivKerngen
         util::Timer          timer_kernel( "epsilon_divdiv_kernel" );
         Kokkos::TeamPolicy<> policy( blocks_, team_size_ );
 
+        // The stored matrices serve the matvec; the diagonal is defined by the
+        // matrix-free path and falls back to it.
+        const bool       stored = ( kernel_path_ == KernelPath::StoredLocalMatrices ) && !diagonal_;
+        const KernelPath path   = ( kernel_path_ == KernelPath::StoredLocalMatrices ) ? matrix_free_kernel_path()
+                                                                                       : kernel_path_;
+
         // Fast paths use shared-memory slab staging
-        if ( kernel_path_ != KernelPath::Slow )
+        if ( path != KernelPath::Slow )
         {
             policy.set_scratch_size( 0, Kokkos::PerTeam( team_shmem_size( team_size_ ) ) );
         }
 
         // Host-side dispatch => no per-team path branching in device code
-        if ( kernel_path_ == KernelPath::Slow )
+        if ( stored )
+        {
+            if ( !stored_matrices_valid_ )
+                precompute_stored_local_matrices();
+
+            Kokkos::parallel_for(
+                "epsilon_divdiv_apply_kernel_stored_local_matrices",
+                Kokkos::RangePolicy<>( 0, num_cells() ),
+                KOKKOS_CLASS_LAMBDA( const int cell ) { this->run_stored_local_matrices( cell ); } );
+        }
+        else if ( path == KernelPath::Slow )
         {
             Kokkos::parallel_for(
                 "epsilon_divdiv_apply_kernel_slow", policy, KOKKOS_CLASS_LAMBDA( const Team& team ) {
                     this->run_team_slow( team );
                 } );
         }
-        else if ( kernel_path_ == KernelPath::FastFreeslip )
+        else if ( path == KernelPath::FastFreeslip )
         {
             if ( diagonal_ )
             {
@@ -1172,3 +1272,4 @@ static_assert( linalg::OperatorLike< EpsilonDivDivKerngen< float, 3, double > > 
 #include "epsilon_divdiv_kerngen/path_slow.hpp"
 #include "epsilon_divdiv_kerngen/path_fast_dirichlet_neumann.hpp"
 #include "epsilon_divdiv_kerngen/path_fast_freeslip.hpp"
+#include "epsilon_divdiv_kerngen/path_stored_local_matrices.hpp"
