@@ -179,7 +179,7 @@ BenchmarkData run_precision( const int level,
     {
         // The warp-owner scatter only has lat-8, r-1 shapes; any other tile in a
         // mode-2 sweep is "not launchable" rather than silently retiled.
-        if ( tile_scatter_override == 2 && !( tile_lat == 8 && tile_r == 1 ) )
+        if ( tile_scatter_override == 2 && !( ( tile_lat == 8 || tile_lat == 16 ) && tile_r == 1 ) )
             return BenchmarkData{ level, dofs_vec, -1.0 };
         op.set_tile_scatter( tile_scatter_override );
     }

@@ -30,6 +30,7 @@ void run_tile_sweep( const int min_level,
         // r = 1 column walks for the warp-owner scatter (--tile-scatter 2); its radial
         // run is streamed, so any length launches.
         { 8, 1, 8 },  { 8, 1, 16 }, { 8, 1, 32 },  { 8, 1, 64 }, { 8, 1, 128 }, { 8, 1, 256 },
+        { 16, 1, 32 }, { 16, 1, 64 }, { 16, 1, 128 }, { 16, 1, 256 },
         // Teams above 128 threads: set_tiling rejects these unless the operator was
         // built with a raised TERRA_EPSDIVDIV_MAX_TEAM, and a rejected shape is skipped.
         { 2, 64, 1 }, { 4, 16, 1 }, { 4, 32, 1 },  { 8, 4, 1 },  { 8, 8, 1 },

@@ -383,11 +383,18 @@ class EpsilonDivDivKerngen
             util::logroot << "[EpsilonDivDiv] set_tiling rejected: tiles must be >= 1" << std::endl;
             return false;
         }
-        if ( lat_tile * lat_tile * r_tile > TERRA_EPSDIVDIV_MAX_TEAM )
+        // The warp-owner path has its own launch bounds (teams of 64 or 256) and
+        // streams its levels, so its scratch does not grow with the radial run; when
+        // it is the path that will run, its limits are the ones that count.
+        const bool warp_only =
+            ( tile_scatter_ == 2 ) && ( matrix_free_kernel_path() == KernelPath::FastDirichletNeumann );
+        const int    max_team  = warp_only ? warp_max_team : TERRA_EPSDIVDIV_MAX_TEAM;
+        const size_t max_shmem = warp_only ? warp_max_shmem : 64u * 1024u;
+        if ( lat_tile * lat_tile * r_tile > max_team )
         {
             util::logroot << "[EpsilonDivDiv] set_tiling rejected (" << lat_tile << "," << lat_tile << ","
                           << r_tile << "): team_size " << lat_tile * lat_tile * r_tile
-                          << " exceeds the LaunchBounds of " << TERRA_EPSDIVDIV_MAX_TEAM << std::endl;
+                          << " exceeds the LaunchBounds of " << max_team << std::endl;
             return false;
         }
 
@@ -397,18 +404,15 @@ class EpsilonDivDivKerngen
         r_passes_ = r_passes;
         recompute_tiling();
 
-        // The warp-owner path streams its levels, so its scratch does not grow with the
-        // radial run; when it is the path that will run, only its size counts.
-        const bool   warp_only = ( tile_scatter_ == 2 ) && ( matrix_free_kernel_path() == KernelPath::FastDirichletNeumann );
-        const size_t shmem     = warp_only ? team_shmem_size_dn( team_size_ )
-                                 : team_shmem_size( team_size_ ) > team_shmem_size_dn( team_size_ )
-                                     ? team_shmem_size( team_size_ )
-                                     : team_shmem_size_dn( team_size_ );
-        if ( shmem > 64u * 1024u )
+        const size_t shmem = warp_only ? team_shmem_size_dn( team_size_ )
+                             : team_shmem_size( team_size_ ) > team_shmem_size_dn( team_size_ )
+                                 ? team_shmem_size( team_size_ )
+                                 : team_shmem_size_dn( team_size_ );
+        if ( shmem > max_shmem )
         {
             util::logroot << "[EpsilonDivDiv] set_tiling rejected (" << lat_tile << "," << lat_tile << ","
-                          << r_tile << "," << r_passes << "): " << shmem << " B of scratch exceeds 64 KiB"
-                          << std::endl;
+                          << r_tile << "," << r_passes << "): " << shmem << " B of scratch exceeds "
+                          << max_shmem / 1024 << " KiB" << std::endl;
             lat_tile_ = saved_lat;
             r_tile_   = saved_r;
             r_passes_ = saved_p;
@@ -631,9 +635,12 @@ class EpsilonDivDivKerngen
 #endif
     }
 
-    /// The warp-owner path is compiled for lat 8 with r_tile 1 (one thread per column);
-    /// the radial run (r_passes) is a runtime length, staged in windows.
-    bool warp_shape_ok() const { return lat_tile_ == 8 && r_tile_ == 1; }
+    /// The warp-owner path is compiled for lat 8 and lat 16 with r_tile 1 (one thread
+    /// per column, teams of 64 or 256); the radial run (r_passes) is a runtime length,
+    /// staged in windows, so its scratch is small and the 227 KB of an H100 is the limit.
+    bool warp_shape_ok() const { return ( lat_tile_ == 8 || lat_tile_ == 16 ) && r_tile_ == 1; }
+    static constexpr int    warp_max_team  = 256;
+    static constexpr size_t warp_max_shmem = 200u * 1024u;
     double hourglass_coefficient() const { return stab_c_; }
 
     void set_boundary_conditions( BoundaryConditions bcs )
@@ -869,10 +876,20 @@ class EpsilonDivDivKerngen
                             : launch_fast_dirichlet_neumann< true, false >( dn_policy );
             else if ( tile_scatter_ == 2 && warp_shape_ok() )
             {
-                // 64-thread teams: eight of them per SM still leave 128 registers each.
-                Kokkos::TeamPolicy< Kokkos::LaunchBounds< 64, 8 > > warp_policy( blocks_, team_size_ );
-                warp_policy.set_scratch_size( 0, Kokkos::PerTeam( team_shmem_size_dn( team_size_ ) ) );
-                launch_fast_dn_warp( warp_policy );
+                // 128 registers per thread either way: eight 64-thread teams or two
+                // 256-thread teams per SM.
+                if ( team_size_ == 256 )
+                {
+                    Kokkos::TeamPolicy< Kokkos::LaunchBounds< 256, 2 > > warp_policy( blocks_, team_size_ );
+                    warp_policy.set_scratch_size( 0, Kokkos::PerTeam( team_shmem_size_dn( team_size_ ) ) );
+                    launch_fast_dn_warp( warp_policy );
+                }
+                else
+                {
+                    Kokkos::TeamPolicy< Kokkos::LaunchBounds< 64, 8 > > warp_policy( blocks_, team_size_ );
+                    warp_policy.set_scratch_size( 0, Kokkos::PerTeam( team_shmem_size_dn( team_size_ ) ) );
+                    launch_fast_dn_warp( warp_policy );
+                }
             }
             else
                 tile_buffer ? launch_fast_dirichlet_neumann< false, true >( dn_policy )
@@ -1157,6 +1174,12 @@ class EpsilonDivDivKerngen
     template < typename Policy >
     void launch_fast_dn_warp( const Policy& policy )
     {
+        if ( lat_tile_ == 16 )
+        {
+            if ( warp_window_ == 4 )
+                return launch_fast_dn_warp_shape< 16, 4 >( policy );
+            return launch_fast_dn_warp_shape< 16, 8 >( policy );
+        }
         if ( warp_window_ == 4 )
             return launch_fast_dn_warp_shape< 8, 4 >( policy );
         launch_fast_dn_warp_shape< 8, 8 >( policy );
