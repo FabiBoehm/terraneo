@@ -90,6 +90,31 @@ KOKKOS_INLINE_FUNCTION void atomic_add_lockfree( T* dest, U value )
     }
 }
 
+/// Asynchronous global-to-shared copy of one 4- or 8-byte element (cp.async on
+/// sm_80+): no register round trip, and the load latency is hidden behind whatever
+/// the thread does next until cp_async_wait_all(). Elsewhere a plain copy.
+template < typename T >
+KOKKOS_INLINE_FUNCTION void cp_async( T* smem, const T* gmem )
+{
+    static_assert( sizeof( T ) == 4 || sizeof( T ) == 8, "cp.async granules are 4, 8 or 16 bytes" );
+#if defined( __CUDA_ARCH__ ) && __CUDA_ARCH__ >= 800
+    const unsigned s = static_cast< unsigned >( __cvta_generic_to_shared( smem ) );
+    if constexpr ( sizeof( T ) == 4 )
+        asm volatile( "cp.async.ca.shared.global [%0], [%1], 4;" ::"r"( s ), "l"( gmem ) : "memory" );
+    else
+        asm volatile( "cp.async.ca.shared.global [%0], [%1], 8;" ::"r"( s ), "l"( gmem ) : "memory" );
+#else
+    *smem = *gmem;
+#endif
+}
+
+KOKKOS_INLINE_FUNCTION void cp_async_wait_all()
+{
+#if defined( __CUDA_ARCH__ ) && __CUDA_ARCH__ >= 800
+    asm volatile( "cp.async.commit_group;\ncp.async.wait_all;" ::: "memory" );
+#endif
+}
+
 /// Adds two values to two adjacent 16-bit fields that together fill one aligned
 /// 32-bit word, `lower` being the word's first half. On CUDA this is one native
 /// packed reduction (f16x2 / bf16x2), the lock-free form the scalar 2-byte add does

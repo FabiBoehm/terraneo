@@ -119,6 +119,11 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
         r_sh( lvl )  = ( rr <= hex_rad_ ) ? static_cast< double >( radii_( local_subdomain_id, rr ) ) : 0.0;
     } );
 
+    // Field staging goes through cp.async when the tile holds the stored type and the
+    // element is a cp.async granule; 2-byte fields and converting tiles use plain loads.
+    constexpr bool AsyncStaging =
+        std::is_same_v< ArithT, ScalarType > && ( sizeof( ScalarType ) == 4 || sizeof( ScalarType ) == 8 );
+
     const int total_pairs = nxy * nlev;
     Kokkos::parallel_for( Kokkos::TeamThreadRange( team, total_pairs ), [&]( int t ) {
         const int node = t / nlev;
@@ -133,15 +138,29 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
 
         if ( xi <= hex_lat_ && yi <= hex_lat_ && rr <= hex_rad_ )
         {
-            // Straight into the tile's own type. Going through double here is a
-            // leftover from when the tiles were double whatever ScalarT was; with
-            // ArithT tiles it makes a 16-bit gather a half->double->half round
-            // trip, four per node and level. The 16-bit Kokkos types only convert
-            // out of themselves explicitly, hence the casts.
-            k_sh( node, lvl )      = static_cast< ArithT >( k_( local_subdomain_id, xi, yi, rr ) );
-            src_sh( node, 0, lvl ) = static_cast< ArithT >( src_( local_subdomain_id, xi, yi, rr, 0 ) );
-            src_sh( node, 1, lvl ) = static_cast< ArithT >( src_( local_subdomain_id, xi, yi, rr, 1 ) );
-            src_sh( node, 2, lvl ) = static_cast< ArithT >( src_( local_subdomain_id, xi, yi, rr, 2 ) );
+            if constexpr ( AsyncStaging )
+            {
+                // Same type on both sides and a 4- or 8-byte element: copy straight
+                // from global into the tile with cp.async, no register in between,
+                // and let the loads overlap until cp_async_wait_all() below. The
+                // staging stores were the kernel's hottest stall point.
+                util::cp_async( &k_sh( node, lvl ), &k_( local_subdomain_id, xi, yi, rr ) );
+                util::cp_async( &src_sh( node, 0, lvl ), &src_( local_subdomain_id, xi, yi, rr, 0 ) );
+                util::cp_async( &src_sh( node, 1, lvl ), &src_( local_subdomain_id, xi, yi, rr, 1 ) );
+                util::cp_async( &src_sh( node, 2, lvl ), &src_( local_subdomain_id, xi, yi, rr, 2 ) );
+            }
+            else
+            {
+                // Straight into the tile's own type. Going through double here is a
+                // leftover from when the tiles were double whatever ScalarT was; with
+                // ArithT tiles it makes a 16-bit gather a half->double->half round
+                // trip, four per node and level. The 16-bit Kokkos types only convert
+                // out of themselves explicitly, hence the casts.
+                k_sh( node, lvl )      = static_cast< ArithT >( k_( local_subdomain_id, xi, yi, rr ) );
+                src_sh( node, 0, lvl ) = static_cast< ArithT >( src_( local_subdomain_id, xi, yi, rr, 0 ) );
+                src_sh( node, 1, lvl ) = static_cast< ArithT >( src_( local_subdomain_id, xi, yi, rr, 1 ) );
+                src_sh( node, 2, lvl ) = static_cast< ArithT >( src_( local_subdomain_id, xi, yi, rr, 2 ) );
+            }
         }
         else
         {
@@ -153,6 +172,8 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
             dst_sh( node, 0, lvl ) = dst_sh( node, 1, lvl ) = dst_sh( node, 2, lvl ) = AccT( 0 );
     } );
 
+    if constexpr ( AsyncStaging )
+        util::cp_async_wait_all();
     team.team_barrier();
 
     // Not a return: every thread must reach the team barrier before the tile
