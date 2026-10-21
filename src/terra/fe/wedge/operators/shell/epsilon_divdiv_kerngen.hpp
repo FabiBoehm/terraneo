@@ -121,7 +121,7 @@ class EpsilonDivDivKerngen
     /// storage the global atomic is already native, and the buffer is then pure
     /// overhead -- it costs shared memory, hence occupancy, plus a barrier and a
     /// second pass, and measured 0.83x (double) and 0.81x (float) on H100.
-    static constexpr bool use_tile_scatter = ( sizeof( ScalarType ) < 4 );
+    static constexpr bool default_tile_scatter = ( sizeof( ScalarType ) < 4 );
     static constexpr int LocalMatrixDim = 18;
     using Grid4DDataLocalMatrices = terra::grid::Grid4DDataMatrices< ScalarType, LocalMatrixDim, LocalMatrixDim, 2 >;
     using LocalMatrixStorage      = linalg::solvers::LocalMatrixStorage< ScalarType, LocalMatrixDim >;
@@ -140,6 +140,7 @@ class EpsilonDivDivKerngen
     BoundaryConditions                                       bcs_;    ///< CMB and SURFACE boundary conditions
 
     bool diagonal_; ///< If true, apply diagonal-only action
+    bool tile_scatter_ = default_tile_scatter; ///< Fast DN path: accumulate in the tile buffer first
 
     /// Hourglass (rank-6 gamma) stabilization coefficient; 0 disables it entirely.
     /// One-point quadrature on the wedge leaves two zero-energy modes per element,
@@ -558,6 +559,13 @@ class EpsilonDivDivKerngen
         stab_c_                = c;
         stored_matrices_valid_ = false;
     }
+
+    /// Route the Dirichlet/Neumann scatter through the team's tile buffer (one global
+    /// atomic per node) instead of straight to global memory (one per wedge-node).
+    /// Defaults to on for 16-bit storage only; both variants are compiled, so this is
+    /// a measurement switch as much as a setting. Call before the first apply().
+    void set_tile_scatter( bool on ) { tile_scatter_ = on; }
+    bool tile_scatter() const { return tile_scatter_; }
     double hourglass_coefficient() const { return stab_c_; }
 
     void set_boundary_conditions( BoundaryConditions bcs )
@@ -785,24 +793,13 @@ class EpsilonDivDivKerngen
         {
             Kokkos::TeamPolicy< Kokkos::LaunchBounds< TERRA_EPSDIVDIV_MAX_TEAM, TERRA_EPSDIVDIV_MIN_WAVES > > dn_policy( blocks_, team_size_ );
             dn_policy.set_scratch_size( 0, Kokkos::PerTeam( team_shmem_size_dn( team_size_ ) ) );
+            // Four variants: matvec or diagonal, scatter through the tile buffer or not.
             if ( diagonal_ )
-            {
-                Kokkos::parallel_for(
-                    "epsilon_divdiv_apply_kernel_fast_dn_diag",
-                    dn_policy,
-                    KOKKOS_CLASS_LAMBDA( const Team& team ) {
-                        this->template run_team_fast_dirichlet_neumann< true >( team );
-                    } );
-            }
+                tile_scatter_ ? launch_fast_dirichlet_neumann< true, true >( dn_policy )
+                              : launch_fast_dirichlet_neumann< true, false >( dn_policy );
             else
-            {
-                Kokkos::parallel_for(
-                    "epsilon_divdiv_apply_kernel_fast_dn_matvec",
-                    dn_policy,
-                    KOKKOS_CLASS_LAMBDA( const Team& team ) {
-                        this->template run_team_fast_dirichlet_neumann< false >( team );
-                    } );
-            }
+                tile_scatter_ ? launch_fast_dirichlet_neumann< false, true >( dn_policy )
+                              : launch_fast_dirichlet_neumann< false, false >( dn_policy );
         }
 
         Kokkos::fence();
@@ -934,7 +931,7 @@ class EpsilonDivDivKerngen
         // stops being double, and the apply then reads garbage and produces NaN.
         const size_t geom_scalars  = size_t( nxy ) * 3 + size_t( nlev );
         const size_t field_scalars = size_t( nxy ) * 3 * nlev + size_t( nxy ) * nlev;
-        const size_t acc_scalars   = use_tile_scatter ? size_t( nxy ) * 3 * nlev : 0;
+        const size_t acc_scalars   = tile_scatter_ ? size_t( nxy ) * 3 * nlev : 0;
 
         return shmem_block_bytes( sizeof( GeomT ) * geom_scalars ) +
                shmem_block_bytes( sizeof( ArithT ) * field_scalars ) +
@@ -1027,13 +1024,28 @@ class EpsilonDivDivKerngen
         }
     }
 
+  public:
+    /// Public only because nvcc requires the function enclosing an extended lambda
+    /// to be; not part of the interface.
+    template < bool Diagonal, bool TileScatter, typename Policy >
+    void launch_fast_dirichlet_neumann( const Policy& dn_policy )
+    {
+        Kokkos::parallel_for(
+            Diagonal ? "epsilon_divdiv_apply_kernel_fast_dn_diag" : "epsilon_divdiv_apply_kernel_fast_dn_matvec",
+            dn_policy,
+            KOKKOS_CLASS_LAMBDA( const Team& team ) {
+                this->template run_team_fast_dirichlet_neumann< Diagonal, TileScatter >( team );
+            } );
+    }
+
+  private:
     /**
      * @brief Team entry for fast Dirichlet/Neumann matrix-free path.
      *
      * Templated on Diagonal so the compiler can dead-code-eliminate the
      * unused matvec or diagonal-only path, reducing register pressure.
      */
-    template < bool Diagonal >
+    template < bool Diagonal, bool TileScatter >
     KOKKOS_INLINE_FUNCTION
     void run_team_fast_dirichlet_neumann( const Team& team ) const
     {
@@ -1043,7 +1055,7 @@ class EpsilonDivDivKerngen
         if ( tr >= r_tile_ )
             return;
 
-        operator_fast_dirichlet_neumann_path< Diagonal >(
+        operator_fast_dirichlet_neumann_path< Diagonal, TileScatter >(
             team, local_subdomain_id, x0, y0, r0, tx, ty, tr, x_cell, y_cell );
     }
 
@@ -1095,20 +1107,38 @@ class EpsilonDivDivKerngen
     /// before paying for a per-cell register accumulation that may or may not stay
     /// in registers. Never define this for a run whose numbers matter.
 #ifdef TERRA_EPSDIVDIV_DIAG_NONATOMIC
-    template < typename T, typename V >
+    template < bool TileScatter, typename T, typename V >
     static KOKKOS_INLINE_FUNCTION void tile_accumulate( T* p, const V& v )
     {
         *p += static_cast< T >( v );
     }
 #else
-    template < typename T, typename V >
+    /// One contribution into the tile buffer (TileScatter) or global memory. On CUDA
+    /// the tile buffer gets a shared-space reduction: through the generic pointer
+    /// Kokkos' scratch hands out the compiler can only emit a generic ATOM that the
+    /// hardware resolves at run time, where red.shared is the native instruction.
+    template < bool TileScatter, typename T, typename V >
     static KOKKOS_INLINE_FUNCTION void tile_accumulate( T* p, const V& v )
     {
+#if defined( __CUDA_ARCH__ )
+        if constexpr ( TileScatter && std::is_same_v< T, float > )
+        {
+            const unsigned s = static_cast< unsigned >( __cvta_generic_to_shared( p ) );
+            asm volatile( "red.shared.add.f32 [%0], %1;" ::"r"( s ), "f"( static_cast< float >( v ) ) : "memory" );
+            return;
+        }
+        else if constexpr ( TileScatter && std::is_same_v< T, double > )
+        {
+            const unsigned s = static_cast< unsigned >( __cvta_generic_to_shared( p ) );
+            asm volatile( "red.shared.add.f64 [%0], %1;" ::"r"( s ), "d"( static_cast< double >( v ) ) : "memory" );
+            return;
+        }
+#endif
         util::atomic_add_lockfree( p, v );
     }
 #endif
 
-    template < typename Buf >
+    template < bool TileScatter, typename Buf >
     KOKKOS_INLINE_FUNCTION auto* scatter_target( const Buf& tile,
                                                  const int  lnode,
                                                  const int  d,
@@ -1118,7 +1148,7 @@ class EpsilonDivDivKerngen
                                                  const int  yi,
                                                  const int  rr ) const
     {
-        if constexpr ( use_tile_scatter )
+        if constexpr ( TileScatter )
         {
             return &tile( lnode, d, llvl );
         }
@@ -1128,7 +1158,7 @@ class EpsilonDivDivKerngen
         }
     }
 
-    template < bool Diagonal >
+    template < bool Diagonal, bool TileScatter >
     KOKKOS_INLINE_FUNCTION
     void operator_fast_dirichlet_neumann_path(
         const Team& team,
@@ -1229,10 +1259,10 @@ class EpsilonDivDivKerngen
         else
         {
             if ( diagonal_ )
-                operator_fast_dirichlet_neumann_path< true >(
+                operator_fast_dirichlet_neumann_path< true, default_tile_scatter >(
                     team, local_subdomain_id, x0, y0, r0, tx, ty, tr, x_cell, y_cell );
             else
-                operator_fast_dirichlet_neumann_path< false >(
+                operator_fast_dirichlet_neumann_path< false, default_tile_scatter >(
                     team, local_subdomain_id, x0, y0, r0, tx, ty, tr, x_cell, y_cell );
         }
     }

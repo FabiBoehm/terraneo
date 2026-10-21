@@ -123,6 +123,10 @@ struct TileOverride
 };
 inline TileOverride tile_override{};
 
+/// -1 keeps each precision's default (on for 16-bit storage), 0/1 force the DN tile
+/// scatter off/on. Set once from the command line.
+inline int tile_scatter_override = -1;
+
 template < typename S, typename A = S, typename G = DefaultGeom< S > >
 BenchmarkData run_precision( const int level,
                              const int executions,
@@ -171,6 +175,11 @@ BenchmarkData run_precision( const int level,
             return BenchmarkData{ level, dofs_vec, -1.0 };
         }
     }
+    if ( tile_scatter_override >= 0 )
+    {
+        op.set_tile_scatter( tile_scatter_override == 1 );
+    }
+    logroot << "[run_precision] tile scatter " << ( op.tile_scatter() ? "on" : "off" ) << std::endl;
 
     // set_tiling() checks the team size against the launch bounds but not the
     // scratch against the device: a wide-arithmetic arm on a tall tile can stage
@@ -244,6 +253,7 @@ struct SweepParameters
     int tile_lat                    = 0;
     int tile_r                      = 0;
     int tile_passes                 = 0;
+    int tile_scatter                = -1;
 };
 
 /// MPI and Kokkos setup, the common options, the tile override, then `run( p )`.
@@ -268,10 +278,13 @@ int sweep_main( int argc, char** argv, const char* description, Run&& run )
     util::add_option_with_default( app, "--tile-lat", p.tile_lat, "Lateral tile size (0: operator default)." );
     util::add_option_with_default( app, "--tile-r", p.tile_r, "Radial tile size (0: operator default)." );
     util::add_option_with_default( app, "--tile-passes", p.tile_passes, "Radial passes per team (0: operator default)." );
+    util::add_option_with_default(
+        app, "--tile-scatter", p.tile_scatter, "DN scatter through the tile buffer: -1 per-precision default, 0 off, 1 on." );
 
     CLI11_PARSE( app, argc, argv );
 
     tile_override = { p.tile_lat, p.tile_r, p.tile_passes };
+    tile_scatter_override = p.tile_scatter;
 
     if ( p.min_level < 1 )
     {

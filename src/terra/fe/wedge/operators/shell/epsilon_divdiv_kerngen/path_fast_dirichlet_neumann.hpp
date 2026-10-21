@@ -9,7 +9,7 @@
 namespace terra::fe::wedge::operators::shell {
 
 template < typename ScalarT, int VecDim, typename CoordScalarT, typename ArithScalarT, typename MatrixScalarT >
-template < bool Diagonal >
+template < bool Diagonal, bool TileScatter >
 KOKKOS_INLINE_FUNCTION void
 EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT >::operator_fast_dirichlet_neumann_path(
     const Team& team,
@@ -34,7 +34,7 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
         sizeof( ArithT ) * ( size_t( nxy ) * 3 * nlev + size_t( nxy ) * nlev ) ) ) );
 
     auto* acc_mem = reinterpret_cast< AccT* >( team.team_shmem().get_shmem(
-        shmem_block_bytes( sizeof( AccT ) * ( use_tile_scatter ? size_t( nxy ) * 3 * nlev : 0 ) ) ) );
+        shmem_block_bytes( sizeof( AccT ) * ( TileScatter ? size_t( nxy ) * 3 * nlev : 0 ) ) ) );
 
     using ScratchCoords =
         Kokkos::View< GeomT**, Kokkos::LayoutRight, typename Team::scratch_memory_space, Kokkos::MemoryUnmanaged >;
@@ -56,7 +56,7 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
     // memory as one atomic per node instead of one per wedge-node.
     using ScratchDst =
         Kokkos::View< AccT***, Kokkos::LayoutRight, typename Team::scratch_memory_space, Kokkos::MemoryUnmanaged >;
-    ScratchDst dst_sh( acc_mem, use_tile_scatter ? nxy : 0, 3, use_tile_scatter ? nlev : 0 );
+    ScratchDst dst_sh( acc_mem, TileScatter ? nxy : 0, 3, TileScatter ? nlev : 0 );
 
     auto node_id = [&]( int nx, int ny ) -> int { return nx + ( lat_tile_ + 1 ) * ny; };
 
@@ -113,7 +113,7 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
             src_sh( node, 0, lvl ) = src_sh( node, 1, lvl ) = src_sh( node, 2, lvl ) = 0.0;
         }
 
-        if constexpr ( use_tile_scatter )
+        if constexpr ( TileScatter )
             dst_sh( node, 0, lvl ) = dst_sh( node, 1, lvl ) = dst_sh( node, 2, lvl ) = AccT( 0 );
     } );
 
@@ -338,16 +338,16 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                         const int ddx = WEDGE_NODE_OFF[w][n][0];
                         const int ddy = WEDGE_NODE_OFF[w][n][1];
                         const int ddr = WEDGE_NODE_OFF[w][n][2];
-                        tile_accumulate(
-                            scatter_target( dst_sh, node_id( tx + ddx, ty + ddy ), 0, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
+                        tile_accumulate< TileScatter >(
+                            scatter_target< TileScatter >( dst_sh, node_id( tx + ddx, ty + ddy ), 0, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
                             static_cast< ScalarType >(
                                 kwJ * ( two * ( a0 * gu00 + a1 * gu10 + a2 * gu20 ) + ntt * a0 * div_u ) ) );
-                        tile_accumulate(
-                            scatter_target( dst_sh, node_id( tx + ddx, ty + ddy ), 1, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
+                        tile_accumulate< TileScatter >(
+                            scatter_target< TileScatter >( dst_sh, node_id( tx + ddx, ty + ddy ), 1, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
                             static_cast< ScalarType >(
                                 kwJ * ( two * ( a0 * gu10 + a1 * gu11 + a2 * gu21 ) + ntt * a1 * div_u ) ) );
-                        tile_accumulate(
-                            scatter_target( dst_sh, node_id( tx + ddx, ty + ddy ), 2, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
+                        tile_accumulate< TileScatter >(
+                            scatter_target< TileScatter >( dst_sh, node_id( tx + ddx, ty + ddy ), 2, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
                             static_cast< ScalarType >(
                                 kwJ * ( two * ( a0 * gu20 + a1 * gu21 + a2 * gu22 ) + ntt * a2 * div_u ) ) );
                     }
@@ -420,8 +420,8 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                             const int ddx = WEDGE_NODE_OFF[w][n][0];
                             const int ddy = WEDGE_NODE_OFF[w][n][1];
                             const int ddr = WEDGE_NODE_OFF[w][n][2];
-                            tile_accumulate(
-                                scatter_target( dst_sh, node_id( tx + ddx, ty + ddy ), d, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
+                            tile_accumulate< TileScatter >(
+                                scatter_target< TileScatter >( dst_sh, node_id( tx + ddx, ty + ddy ), d, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
                                 static_cast< ScalarType >( eps * ( static_cast< ArithT >( G1[n] ) * c1 +
                                                                    static_cast< ArithT >( G2[n] ) * c2 ) ) );
                         }
@@ -458,14 +458,14 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                         const int ddx = WEDGE_NODE_OFF[w][n][0];
                         const int ddy = WEDGE_NODE_OFF[w][n][1];
                         const int ddr = WEDGE_NODE_OFF[w][n][2];
-                        tile_accumulate(
-                            scatter_target( dst_sh, node_id( tx + ddx, ty + ddy ), 0, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
+                        tile_accumulate< TileScatter >(
+                            scatter_target< TileScatter >( dst_sh, node_id( tx + ddx, ty + ddy ), 0, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
                             static_cast< ScalarType >( kwJ * sv0 * d0 ) );
-                        tile_accumulate(
-                            scatter_target( dst_sh, node_id( tx + ddx, ty + ddy ), 1, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
+                        tile_accumulate< TileScatter >(
+                            scatter_target< TileScatter >( dst_sh, node_id( tx + ddx, ty + ddy ), 1, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
                             static_cast< ScalarType >( kwJ * sv1 * d1 ) );
-                        tile_accumulate(
-                            scatter_target( dst_sh, node_id( tx + ddx, ty + ddy ), 2, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
+                        tile_accumulate< TileScatter >(
+                            scatter_target< TileScatter >( dst_sh, node_id( tx + ddx, ty + ddy ), 2, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
                             static_cast< ScalarType >( kwJ * sv2 * d2 ) );
                     }
 
@@ -504,8 +504,8 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                             const int ddy = WEDGE_NODE_OFF[w][n][1];
                             const int ddr = WEDGE_NODE_OFF[w][n][2];
                             for ( int d = 0; d < 3; ++d )
-                                tile_accumulate(
-                                    scatter_target( dst_sh, node_id( tx + ddx, ty + ddy ), d, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
+                                tile_accumulate< TileScatter >(
+                                    scatter_target< TileScatter >( dst_sh, node_id( tx + ddx, ty + ddy ), d, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
                                     static_cast< ScalarType >( eps * gdiag ) );
                         }
                     }
@@ -520,7 +520,7 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
     // the only place a 16-bit field precision is narrowed on the way out, so the
     // 2-byte atomic -- which has no lock-free form and falls back to a warp spin
     // lock -- is gone from the inner loops entirely.
-    if constexpr ( use_tile_scatter )
+    if constexpr ( TileScatter )
     {
         team.team_barrier();
 
