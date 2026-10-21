@@ -1027,15 +1027,35 @@ class EpsilonDivDivKerngen
   public:
     /// Public only because nvcc requires the function enclosing an extended lambda
     /// to be; not part of the interface.
-    template < bool Diagonal, bool TileScatter, typename Policy >
-    void launch_fast_dirichlet_neumann( const Policy& dn_policy )
+    template < bool Diagonal, bool TileScatter, int LatTileC, int NlevC, typename Policy >
+    void launch_fast_dirichlet_neumann_shape( const Policy& dn_policy )
     {
         Kokkos::parallel_for(
             Diagonal ? "epsilon_divdiv_apply_kernel_fast_dn_diag" : "epsilon_divdiv_apply_kernel_fast_dn_matvec",
             dn_policy,
             KOKKOS_CLASS_LAMBDA( const Team& team ) {
-                this->template run_team_fast_dirichlet_neumann< Diagonal, TileScatter >( team );
+                this->template run_team_fast_dirichlet_neumann< Diagonal, TileScatter, LatTileC, NlevC >( team );
             } );
+    }
+
+    /// The matvec has compile-time instantiations for the tile shapes the sweeps found
+    /// best -- (lat, levels per team) = (4, 33) for 4/8/4 and the 4/4/8 default,
+    /// (8, 9) for 8/2/4, (8, 17) for 8/2/8 -- and a runtime-shape fallback for every
+    /// other tile. The diagonal is computed once and only uses the fallback.
+    template < bool Diagonal, bool TileScatter, typename Policy >
+    void launch_fast_dirichlet_neumann( const Policy& dn_policy )
+    {
+        const int nlev = r_tile_block_ + 1;
+        if constexpr ( !Diagonal )
+        {
+            if ( lat_tile_ == 4 && nlev == 33 )
+                return launch_fast_dirichlet_neumann_shape< Diagonal, TileScatter, 4, 33 >( dn_policy );
+            if ( lat_tile_ == 8 && nlev == 9 )
+                return launch_fast_dirichlet_neumann_shape< Diagonal, TileScatter, 8, 9 >( dn_policy );
+            if ( lat_tile_ == 8 && nlev == 17 )
+                return launch_fast_dirichlet_neumann_shape< Diagonal, TileScatter, 8, 17 >( dn_policy );
+        }
+        launch_fast_dirichlet_neumann_shape< Diagonal, TileScatter, 0, 0 >( dn_policy );
     }
 
   private:
@@ -1045,7 +1065,7 @@ class EpsilonDivDivKerngen
      * Templated on Diagonal so the compiler can dead-code-eliminate the
      * unused matvec or diagonal-only path, reducing register pressure.
      */
-    template < bool Diagonal, bool TileScatter >
+    template < bool Diagonal, bool TileScatter, int LatTileC, int NlevC >
     KOKKOS_INLINE_FUNCTION
     void run_team_fast_dirichlet_neumann( const Team& team ) const
     {
@@ -1055,7 +1075,7 @@ class EpsilonDivDivKerngen
         if ( tr >= r_tile_ )
             return;
 
-        operator_fast_dirichlet_neumann_path< Diagonal, TileScatter >(
+        operator_fast_dirichlet_neumann_path< Diagonal, TileScatter, LatTileC, NlevC >(
             team, local_subdomain_id, x0, y0, r0, tx, ty, tr, x_cell, y_cell );
     }
 
@@ -1158,7 +1178,7 @@ class EpsilonDivDivKerngen
         }
     }
 
-    template < bool Diagonal, bool TileScatter >
+    template < bool Diagonal, bool TileScatter, int LatTileC, int NlevC >
     KOKKOS_INLINE_FUNCTION
     void operator_fast_dirichlet_neumann_path(
         const Team& team,
@@ -1259,10 +1279,10 @@ class EpsilonDivDivKerngen
         else
         {
             if ( diagonal_ )
-                operator_fast_dirichlet_neumann_path< true, default_tile_scatter >(
+                operator_fast_dirichlet_neumann_path< true, default_tile_scatter, 0, 0 >(
                     team, local_subdomain_id, x0, y0, r0, tx, ty, tr, x_cell, y_cell );
             else
-                operator_fast_dirichlet_neumann_path< false, default_tile_scatter >(
+                operator_fast_dirichlet_neumann_path< false, default_tile_scatter, 0, 0 >(
                     team, local_subdomain_id, x0, y0, r0, tx, ty, tr, x_cell, y_cell );
         }
     }

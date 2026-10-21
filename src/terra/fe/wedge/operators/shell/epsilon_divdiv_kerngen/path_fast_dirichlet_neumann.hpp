@@ -9,7 +9,7 @@
 namespace terra::fe::wedge::operators::shell {
 
 template < typename ScalarT, int VecDim, typename CoordScalarT, typename ArithScalarT, typename MatrixScalarT >
-template < bool Diagonal, bool TileScatter >
+template < bool Diagonal, bool TileScatter, int LatTileC, int NlevC >
 KOKKOS_INLINE_FUNCTION void
 EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT >::operator_fast_dirichlet_neumann_path(
     const Team& team,
@@ -23,8 +23,14 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
     const int   x_cell,
     const int   y_cell ) const
 {
-    const int nlev = r_tile_block_ + 1;
-    const int nxy  = ( lat_tile_ + 1 ) * ( lat_tile_ + 1 );
+    // Tile shape as immediates when this instantiation has one (LatTileC, NlevC > 0):
+    // every scratch stride, the node numbering and the staging loops' div/mod then
+    // fold; the (0, 0) instantiation keeps the runtime shape for any other tile.
+    constexpr bool StaticTile = ( LatTileC > 0 && NlevC > 0 );
+    const int lat_tile = StaticTile ? LatTileC : lat_tile_;
+    const int nlev     = StaticTile ? NlevC : r_tile_block_ + 1;
+    const int nxy      = ( lat_tile + 1 ) * ( lat_tile + 1 );
+    constexpr int NxyC = ( LatTileC + 1 ) * ( LatTileC + 1 );
 
     // Geometry and fields come from two separate scratch blocks so they can have
     // different element types (see team_shmem_size_dn).
@@ -36,33 +42,63 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
     auto* acc_mem = reinterpret_cast< AccT* >( team.team_shmem().get_shmem(
         shmem_block_bytes( sizeof( AccT ) * ( TileScatter ? size_t( nxy ) * 3 * nlev : 0 ) ) ) );
 
-    using ScratchCoords =
-        Kokkos::View< GeomT**, Kokkos::LayoutRight, typename Team::scratch_memory_space, Kokkos::MemoryUnmanaged >;
-    using ScratchR =
-        Kokkos::View< GeomT*, Kokkos::LayoutRight, typename Team::scratch_memory_space, Kokkos::MemoryUnmanaged >;
-    using ScratchSrc = Kokkos::
-        View< ArithT***, Kokkos::LayoutRight, typename Team::scratch_memory_space, Kokkos::MemoryUnmanaged >;
-    using ScratchK =
-        Kokkos::View< ArithT**, Kokkos::LayoutRight, typename Team::scratch_memory_space, Kokkos::MemoryUnmanaged >;
+    using Scratch = typename Team::scratch_memory_space;
+    using ScratchCoords = std::conditional_t<
+        StaticTile,
+        Kokkos::View< GeomT[NxyC][3], Kokkos::LayoutRight, Scratch, Kokkos::MemoryUnmanaged >,
+        Kokkos::View< GeomT**, Kokkos::LayoutRight, Scratch, Kokkos::MemoryUnmanaged > >;
+    using ScratchR = std::conditional_t<
+        StaticTile,
+        Kokkos::View< GeomT[NlevC], Kokkos::LayoutRight, Scratch, Kokkos::MemoryUnmanaged >,
+        Kokkos::View< GeomT*, Kokkos::LayoutRight, Scratch, Kokkos::MemoryUnmanaged > >;
+    using ScratchSrc = std::conditional_t<
+        StaticTile,
+        Kokkos::View< ArithT[NxyC][3][NlevC], Kokkos::LayoutRight, Scratch, Kokkos::MemoryUnmanaged >,
+        Kokkos::View< ArithT***, Kokkos::LayoutRight, Scratch, Kokkos::MemoryUnmanaged > >;
+    using ScratchK = std::conditional_t<
+        StaticTile,
+        Kokkos::View< ArithT[NxyC][NlevC], Kokkos::LayoutRight, Scratch, Kokkos::MemoryUnmanaged >,
+        Kokkos::View< ArithT**, Kokkos::LayoutRight, Scratch, Kokkos::MemoryUnmanaged > >;
 
-    ScratchCoords coords_sh( geom_mem, nxy, 3 );
-    ScratchR      r_sh( geom_mem + size_t( nxy ) * 3, nlev );
-
-    ScratchSrc src_sh( field_mem, nxy, 3, nlev );
-    ScratchK   k_sh( field_mem + size_t( nxy ) * 3 * nlev, nxy, nlev );
+    auto make_coords = [&]() {
+        if constexpr ( StaticTile ) return ScratchCoords( geom_mem );
+        else return ScratchCoords( geom_mem, nxy, 3 );
+    };
+    auto make_r = [&]() {
+        if constexpr ( StaticTile ) return ScratchR( geom_mem + size_t( nxy ) * 3 );
+        else return ScratchR( geom_mem + size_t( nxy ) * 3, nlev );
+    };
+    auto make_src = [&]() {
+        if constexpr ( StaticTile ) return ScratchSrc( field_mem );
+        else return ScratchSrc( field_mem, nxy, 3, nlev );
+    };
+    auto make_k = [&]() {
+        if constexpr ( StaticTile ) return ScratchK( field_mem + size_t( nxy ) * 3 * nlev );
+        else return ScratchK( field_mem + size_t( nxy ) * 3 * nlev, nxy, nlev );
+    };
+    ScratchCoords coords_sh = make_coords();
+    ScratchR      r_sh      = make_r();
+    ScratchSrc    src_sh    = make_src();
+    ScratchK      k_sh      = make_k();
 
     // Tile-local scatter buffer: every cell this team owns writes only to nodes the
     // team already stages, so the whole tile accumulates here and reaches global
     // memory as one atomic per node instead of one per wedge-node.
-    using ScratchDst =
-        Kokkos::View< AccT***, Kokkos::LayoutRight, typename Team::scratch_memory_space, Kokkos::MemoryUnmanaged >;
-    ScratchDst dst_sh( acc_mem, TileScatter ? nxy : 0, 3, TileScatter ? nlev : 0 );
+    using ScratchDst = std::conditional_t<
+        StaticTile && TileScatter,
+        Kokkos::View< AccT[NxyC][3][NlevC], Kokkos::LayoutRight, Scratch, Kokkos::MemoryUnmanaged >,
+        Kokkos::View< AccT***, Kokkos::LayoutRight, Scratch, Kokkos::MemoryUnmanaged > >;
+    auto make_dst = [&]() {
+        if constexpr ( StaticTile && TileScatter ) return ScratchDst( acc_mem );
+        else return ScratchDst( acc_mem, TileScatter ? nxy : 0, 3, TileScatter ? nlev : 0 );
+    };
+    ScratchDst dst_sh = make_dst();
 
-    auto node_id = [&]( int nx, int ny ) -> int { return nx + ( lat_tile_ + 1 ) * ny; };
+    auto node_id = [&]( int nx, int ny ) -> int { return nx + ( lat_tile + 1 ) * ny; };
 
     Kokkos::parallel_for( Kokkos::TeamThreadRange( team, nxy ), [&]( int n ) {
-        const int dxn = n % ( lat_tile_ + 1 );
-        const int dyn = n / ( lat_tile_ + 1 );
+        const int dxn = n % ( lat_tile + 1 );
+        const int dyn = n / ( lat_tile + 1 );
         const int xi  = x0 + dxn;
         const int yi  = y0 + dyn;
 
@@ -88,8 +124,8 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
         const int node = t / nlev;
         const int lvl  = t - node * nlev;
 
-        const int dxn = node % ( lat_tile_ + 1 );
-        const int dyn = node / ( lat_tile_ + 1 );
+        const int dxn = node % ( lat_tile + 1 );
+        const int dyn = node / ( lat_tile + 1 );
 
         const int xi = x0 + dxn;
         const int yi = y0 + dyn;
@@ -504,8 +540,8 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                 const int w    = t % nwords;
                 const int d    = ( t / nwords ) % 3;
                 const int node = t / ( 3 * nwords );
-                const int xi   = x0 + node % ( lat_tile_ + 1 );
-                const int yi   = y0 + node / ( lat_tile_ + 1 );
+                const int xi   = x0 + node % ( lat_tile + 1 );
+                const int yi   = y0 + node / ( lat_tile + 1 );
 
                 if ( xi > hex_lat_ || yi > hex_lat_ )
                     return;
@@ -530,8 +566,8 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
             Kokkos::parallel_for( Kokkos::TeamThreadRange( team, total_pairs ), [&]( int t ) {
                 const int node = t / nlev;
                 const int lvl  = t - node * nlev;
-                const int xi   = x0 + node % ( lat_tile_ + 1 );
-                const int yi   = y0 + node / ( lat_tile_ + 1 );
+                const int xi   = x0 + node % ( lat_tile + 1 );
+                const int yi   = y0 + node / ( lat_tile + 1 );
                 const int rr   = r0 + lvl;
 
                 if ( xi > hex_lat_ || yi > hex_lat_ || rr > hex_rad_ )
