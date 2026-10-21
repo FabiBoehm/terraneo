@@ -9,6 +9,24 @@
 
 namespace terra::kernels::common {
 
+/// Whole-grid elementwise kernels run as one flat range over the view's contiguous
+/// span. The rank-4 MDRange they used before (CUDA default tile 4x2x2x16) zeroed a
+/// level-8 field at 23 GB/s on an H100: the three component fills that precede
+/// every operator apply took longer than the matvec itself. The MDRange form stays
+/// as the fallback for a non-contiguous (sub)view.
+template < typename ViewType, typename... Views >
+bool flat_ok( const ViewType& v, const Views&... others )
+{
+    return v.span_is_contiguous() && ( ( others.span_is_contiguous() && others.span() == v.span() ) && ... );
+}
+
+template < typename F >
+void flat_for( const char* name, const size_t n, const F& f )
+{
+    Kokkos::parallel_for( name, Kokkos::RangePolicy<>( 0, n ), f );
+    Kokkos::fence();
+}
+
 template < typename ScalarType >
 void set_constant( const grid::Grid2DDataScalar< ScalarType >& x, ScalarType value )
 {
@@ -34,6 +52,12 @@ void set_constant( const grid::Grid3DDataScalar< ScalarType >& x, ScalarType val
 template < typename ScalarType >
 void set_constant( const grid::Grid4DDataScalar< ScalarType >& x, ScalarType value )
 {
+    if ( flat_ok( x ) )
+    {
+        ScalarType* xp = x.data();
+        flat_for( "set_constant (Grid4DDataScalar, flat)", x.span(), KOKKOS_LAMBDA( const size_t i ) { xp[i] = value; } );
+        return;
+    }
     Kokkos::parallel_for(
         "set_constant (Grid4DDataScalar)",
         Kokkos::MDRangePolicy( { 0, 0, 0, 0 }, { x.extent( 0 ), x.extent( 1 ), x.extent( 2 ), x.extent( 3 ) } ),
@@ -64,6 +88,12 @@ void set_constant( const grid::Grid5DDataScalar< ScalarType >& x, ScalarType val
 template < typename ScalarType >
 void scale( const grid::Grid4DDataScalar< ScalarType >& x, ScalarType value )
 {
+    if ( flat_ok( x ) )
+    {
+        ScalarType* xp = x.data();
+        flat_for( "scale (flat)", x.span(), KOKKOS_LAMBDA( const size_t i ) { xp[i] *= value; } );
+        return;
+    }
     Kokkos::parallel_for(
         "scale (Grid3DDataScalar)",
         Kokkos::MDRangePolicy( { 0, 0, 0, 0 }, { x.extent( 0 ), x.extent( 1 ), x.extent( 2 ), x.extent( 3 ) } ),
@@ -158,6 +188,13 @@ void lincomb(
     ScalarType                                  c_1,
     const grid::Grid4DDataScalar< ScalarType >& x_1 )
 {
+    if ( flat_ok( y, x_1 ) )
+    {
+        ScalarType*       yp = y.data();
+        const ScalarType* x1 = x_1.data();
+        flat_for( "lincomb 1 arg (flat)", y.span(), KOKKOS_LAMBDA( const size_t i ) { yp[i] = c_0 + c_1 * x1[i]; } );
+        return;
+    }
     Kokkos::parallel_for(
         "lincomb 1 arg (Grid4DDataScalar)",
         Kokkos::MDRangePolicy( { 0, 0, 0, 0 }, { y.extent( 0 ), y.extent( 1 ), y.extent( 2 ), y.extent( 3 ) } ),
@@ -177,6 +214,16 @@ void lincomb(
     ScalarType                                  c_2,
     const grid::Grid4DDataScalar< ScalarType >& x_2 )
 {
+    if ( flat_ok( y, x_1, x_2 ) )
+    {
+        ScalarType*       yp = y.data();
+        const ScalarType* x1 = x_1.data();
+        const ScalarType* x2 = x_2.data();
+        flat_for( "lincomb 2 args (flat)", y.span(), KOKKOS_LAMBDA( const size_t i ) {
+            yp[i] = c_0 + c_1 * x1[i] + c_2 * x2[i];
+        } );
+        return;
+    }
     Kokkos::parallel_for(
         "lincomb 2 args (Grid4DDataScalar)",
         Kokkos::MDRangePolicy( { 0, 0, 0, 0 }, { y.extent( 0 ), y.extent( 1 ), y.extent( 2 ), y.extent( 3 ) } ),
@@ -199,6 +246,17 @@ void lincomb(
     ScalarType                                  c_3,
     const grid::Grid4DDataScalar< ScalarType >& x_3 )
 {
+    if ( flat_ok( y, x_1, x_2, x_3 ) )
+    {
+        ScalarType*       yp = y.data();
+        const ScalarType* x1 = x_1.data();
+        const ScalarType* x2 = x_2.data();
+        const ScalarType* x3 = x_3.data();
+        flat_for( "lincomb 3 args (flat)", y.span(), KOKKOS_LAMBDA( const size_t i ) {
+            yp[i] = c_0 + c_1 * x1[i] + c_2 * x2[i] + c_3 * x3[i];
+        } );
+        return;
+    }
     Kokkos::parallel_for(
         "lincomb 3 args (Grid4DDataScalar)",
         Kokkos::MDRangePolicy( { 0, 0, 0, 0 }, { y.extent( 0 ), y.extent( 1 ), y.extent( 2 ), y.extent( 3 ) } ),
@@ -253,6 +311,12 @@ void lincomb(
 template < typename ScalarType >
 void invert_inplace( const grid::Grid4DDataScalar< ScalarType >& y )
 {
+    if ( flat_ok( y ) )
+    {
+        ScalarType* yp = y.data();
+        flat_for( "invert (flat)", y.span(), KOKKOS_LAMBDA( const size_t i ) { yp[i] = 1.0 / yp[i]; } );
+        return;
+    }
     Kokkos::parallel_for(
         "invert",
         Kokkos::MDRangePolicy( { 0, 0, 0, 0 }, { y.extent( 0 ), y.extent( 1 ), y.extent( 2 ), y.extent( 3 ) } ),
@@ -275,6 +339,15 @@ void invert_inplace( const grid::Grid4DDataVec< ScalarType, VecDim >& y )
 template < typename DstScalar, typename SrcScalar >
 void copy_convert( const grid::Grid4DDataScalar< SrcScalar >& src, const grid::Grid4DDataScalar< DstScalar >& dst )
 {
+    if ( flat_ok( src, dst ) )
+    {
+        const SrcScalar* sp = src.data();
+        DstScalar*       dp = dst.data();
+        flat_for( "copy_convert (flat)", src.span(), KOKKOS_LAMBDA( const size_t i ) {
+            dp[i] = static_cast< DstScalar >( sp[i] );
+        } );
+        return;
+    }
     Kokkos::parallel_for(
         "copy_convert",
         Kokkos::MDRangePolicy(
@@ -298,6 +371,13 @@ void mult_elementwise_inplace(
     const grid::Grid4DDataScalar< ScalarType >& y,
     const grid::Grid4DDataScalar< ScalarType >& x )
 {
+    if ( flat_ok( y, x ) )
+    {
+        ScalarType*       yp = y.data();
+        const ScalarType* xp = x.data();
+        flat_for( "mult_elementwise_inplace (flat)", y.span(), KOKKOS_LAMBDA( const size_t i ) { yp[i] *= xp[i]; } );
+        return;
+    }
     Kokkos::parallel_for(
         "mult_elementwise_inplace",
         Kokkos::MDRangePolicy( { 0, 0, 0, 0 }, { y.extent( 0 ), y.extent( 1 ), y.extent( 2 ), y.extent( 3 ) } ),
