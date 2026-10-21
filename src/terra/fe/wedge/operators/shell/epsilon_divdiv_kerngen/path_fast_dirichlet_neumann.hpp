@@ -169,8 +169,6 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
         const int surface_shift =
             ( ( at_boundary && treat_boundary_dirichlet && ( !Diagonal ) && at_surface ) ? 3 : 0 );
 
-        // Unrolled: with w an immediate the wedge node tables are constants.
-#pragma unroll
         for ( int w = 0; w < 2; ++w )
         {
             const int v0 = w == 0 ? n00 : n11;
@@ -235,12 +233,8 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                 if ( !Diagonal )
                 {
 #pragma unroll
-                    for ( int n = 0; n < 6; ++n )
+                    for ( int n = cmb_shift; n < 6 - surface_shift; ++n )
                     {
-                        // Constant trip count so the loop unrolls and the node tables fold into
-                        // immediates; the Dirichlet rows are skipped by predicate instead.
-                        if ( n < cmb_shift || n >= 6 - surface_shift )
-                            continue;
                         const GeoT gx = dN_ref[n][0];
                         const GeoT gy = dN_ref[n][1];
                         const GeoT gz = dN_ref[n][2];
@@ -317,12 +311,8 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                 {
                     constexpr double NEG_TWO_THIRDS = -0.66666666666666663;
 #pragma unroll
-                    for ( int n = 0; n < 6; ++n )
+                    for ( int n = cmb_shift; n < 6 - surface_shift; ++n )
                     {
-                        // Constant trip count so the loop unrolls and the node tables fold into
-                        // immediates; the Dirichlet rows are skipped by predicate instead.
-                        if ( n < cmb_shift || n >= 6 - surface_shift )
-                            continue;
                         const GeoT gx = dN_ref[n][0];
                         const GeoT gy = dN_ref[n][1];
                         const GeoT gz = dN_ref[n][2];
@@ -397,12 +387,8 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                     {
                         ArithT c1 = 0.0, c2 = 0.0;
 #pragma unroll
-                        for ( int n = 0; n < 6; ++n )
+                        for ( int n = cmb_shift; n < 6 - surface_shift; ++n )
                         {
-                            // Constant trip count so the loop unrolls and the node tables fold into
-                            // immediates; the Dirichlet rows are skipped by predicate instead.
-                            if ( n < cmb_shift || n >= 6 - surface_shift )
-                                continue;
                             const int nid =
                                 node_id( tx + WEDGE_NODE_OFF[w][n][0], ty + WEDGE_NODE_OFF[w][n][1] );
                             const int    lvl = lvl0 + WEDGE_NODE_OFF[w][n][2];
@@ -411,12 +397,8 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                             c2 += static_cast< ArithT >( G2[n] ) * u;
                         }
 #pragma unroll
-                        for ( int n = 0; n < 6; ++n )
+                        for ( int n = cmb_shift; n < 6 - surface_shift; ++n )
                         {
-                            // Constant trip count so the loop unrolls and the node tables fold into
-                            // immediates; the Dirichlet rows are skipped by predicate instead.
-                            if ( n < cmb_shift || n >= 6 - surface_shift )
-                                continue;
                             const int ddx = WEDGE_NODE_OFF[w][n][0];
                             const int ddy = WEDGE_NODE_OFF[w][n][1];
                             const int ddr = WEDGE_NODE_OFF[w][n][2];
@@ -432,10 +414,8 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                 if ( Diagonal || ( treat_boundary_dirichlet && at_boundary ) )
                 {
 #pragma unroll
-                    for ( int n = 0; n < 6; ++n )
+                    for ( int n = surface_shift; n < 6 - cmb_shift; ++n )
                     {
-                        if ( n < surface_shift || n >= 6 - cmb_shift )
-                            continue;
                         const GeoT gx = dN_ref[n][0];
                         const GeoT gy = dN_ref[n][1];
                         const GeoT gz = dN_ref[n][2];
@@ -494,10 +474,8 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                         const GeoT diag_mean = static_cast< GeoT >( kwJ ) * static_cast< GeoT >( 10.0 / 54.0 ) * sum_gg;
                         const ArithT eps       = static_cast< ArithT >( static_cast< GeoT >( stab_c_ ) * diag_mean / static_cast< GeoT >( NORM2_G ) );
 #pragma unroll
-                        for ( int n = 0; n < 6; ++n )
+                        for ( int n = surface_shift; n < 6 - cmb_shift; ++n )
                         {
-                            if ( n < surface_shift || n >= 6 - cmb_shift )
-                                continue;
                             const ArithT gdiag =
                                 static_cast< ArithT >( G1[n] * G1[n] + G2[n] * G2[n] );
                             const int ddx = WEDGE_NODE_OFF[w][n][0];
