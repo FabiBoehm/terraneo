@@ -28,13 +28,19 @@
 // The gather side profits as well: the 4 columns' field values at the upper level
 // are the lower level of the next cell, so each cell loads 4 x (3 + 1) values from
 // the staged tile instead of 2 x 6 x (3 + 1).
+//
+// Staging is streamed: the fields of the (lat+1)^2 columns are staged in windows of
+// WinC levels into a ring of three windows (cp.async for 4/8-byte fields), two
+// windows ahead of the walk, so the radial run of a team is a runtime length and
+// a long run has no level-boundary atomics inside it. One team barrier per level
+// (the seam's) also orders the ring reuse.
 
 #include "../epsilon_divdiv_kerngen.hpp"
 
 namespace terra::fe::wedge::operators::shell {
 
 template < typename ScalarT, int VecDim, typename CoordScalarT, typename ArithScalarT, typename MatrixScalarT >
-template < int LatTileC, int NlevC >
+template < int LatTileC, int WinC >
 KOKKOS_INLINE_FUNCTION void
 EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT >::operator_fast_dn_warp_path(
     const Team& team,
@@ -47,23 +53,26 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
     const int   x_cell,
     const int   y_cell ) const
 {
-    static_assert( LatTileC > 0 && NlevC > 1, "the warp-owner path has compile-time tile shapes only" );
+    static_assert( LatTileC > 0 && WinC >= 4, "the warp-owner path has compile-time lateral shapes and windows" );
     static_assert( 32 % LatTileC == 0 && LatTileC * LatTileC >= 32, "a warp must tile the lateral patch" );
 
     constexpr int lat_tile = LatTileC;
-    constexpr int nlev     = NlevC;
+    constexpr int W        = WinC;  // levels per staged window
+    constexpr int RING     = 3 * W; // resident levels: the two windows in use and the one in flight
     constexpr int nxy      = ( lat_tile + 1 ) * ( lat_tile + 1 );
     constexpr int PW       = LatTileC;      // warp patch width (columns in x)
     constexpr int PH       = 32 / LatTileC; // warp patch height (columns in y)
+    constexpr int NW       = ( lat_tile * lat_tile ) / 32; // warps per team
 
-    // ---------------- staging (same tile as the tile-buffer path, no dst buffer) ----------------
-    auto* geom_mem = reinterpret_cast< GeomT* >( team.team_shmem().get_shmem(
-        shmem_block_bytes( sizeof( GeomT ) * ( size_t( nxy ) * 3 + size_t( nlev ) ) ) ) );
-    auto* field_mem = reinterpret_cast< ArithT* >( team.team_shmem().get_shmem( shmem_block_bytes(
-        sizeof( ArithT ) * ( size_t( nxy ) * 3 * nlev + size_t( nxy ) * nlev ) ) ) );
+    // Cells of this team's run inside the grid (uniform over the team).
+    const int ncell = ( r_tile_block_ < hex_rad_ - r0 ) ? r_tile_block_ : hex_rad_ - r0;
 
-    constexpr int NW = ( lat_tile * lat_tile ) / 32; // warps per team
-    AccT*         seam_mem = nullptr;
+    // ---------------- scratch: coordinates, field ring, seam ----------------
+    auto* geom_mem = reinterpret_cast< GeomT* >(
+        team.team_shmem().get_shmem( shmem_block_bytes( sizeof( GeomT ) * ( size_t( nxy ) * 3 ) ) ) );
+    auto* field_mem = reinterpret_cast< ArithT* >(
+        team.team_shmem().get_shmem( shmem_block_bytes( sizeof( ArithT ) * ( size_t( nxy ) * 4 * RING ) ) ) );
+    AccT* seam_mem = nullptr;
     if constexpr ( NW > 1 )
         seam_mem = reinterpret_cast< AccT* >(
             team.team_shmem().get_shmem( shmem_block_bytes( sizeof( AccT ) * size_t( 2 ) * ( NW - 1 ) * PW * 6 ) ) );
@@ -74,14 +83,12 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
 
     using Scratch       = typename Team::scratch_memory_space;
     using ScratchCoords = Kokkos::View< GeomT[nxy][3], Kokkos::LayoutRight, Scratch, Kokkos::MemoryUnmanaged >;
-    using ScratchR      = Kokkos::View< GeomT[nlev], Kokkos::LayoutRight, Scratch, Kokkos::MemoryUnmanaged >;
-    using ScratchSrc = Kokkos::View< ArithT[nxy][3][nlev], Kokkos::LayoutRight, Scratch, Kokkos::MemoryUnmanaged >;
-    using ScratchK   = Kokkos::View< ArithT[nxy][nlev], Kokkos::LayoutRight, Scratch, Kokkos::MemoryUnmanaged >;
+    using ScratchSrc = Kokkos::View< ArithT[nxy][3][RING], Kokkos::LayoutRight, Scratch, Kokkos::MemoryUnmanaged >;
+    using ScratchK   = Kokkos::View< ArithT[nxy][RING], Kokkos::LayoutRight, Scratch, Kokkos::MemoryUnmanaged >;
 
     ScratchCoords coords_sh( geom_mem );
-    ScratchR      r_sh( geom_mem + size_t( nxy ) * 3 );
     ScratchSrc    src_sh( field_mem );
-    ScratchK      k_sh( field_mem + size_t( nxy ) * 3 * nlev );
+    ScratchK      k_sh( field_mem + size_t( nxy ) * 3 * RING );
 
     auto node_id = []( int nx, int ny ) -> int { return nx + ( lat_tile + 1 ) * ny; };
 
@@ -100,47 +107,58 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
         }
     } );
 
-    Kokkos::parallel_for( Kokkos::TeamThreadRange( team, nlev ), [&]( int lvl ) {
-        const int rr = r0 + lvl;
-        r_sh( lvl )  = ( rr <= hex_rad_ ) ? static_cast< double >( radii_( local_subdomain_id, rr ) ) : 0.0;
-    } );
-
     constexpr bool AsyncStaging =
         std::is_same_v< ArithT, ScalarType > && ( sizeof( ScalarType ) == 4 || sizeof( ScalarType ) == 8 );
 
-    Kokkos::parallel_for( Kokkos::TeamThreadRange( team, nxy * nlev ), [&]( int t ) {
-        const int node = t / nlev;
-        const int lvl  = t - node * nlev;
-        const int xi   = x0 + node % ( lat_tile + 1 );
-        const int yi   = y0 + node / ( lat_tile + 1 );
-        const int rr   = r0 + lvl;
-
-        if ( xi <= hex_lat_ && yi <= hex_lat_ && rr <= hex_rad_ )
+    // Stage window `w` (levels w*W .. w*W+W-1 of the run) into its ring slots and
+    // close it as one cp.async group. Levels past the run are never read and are
+    // skipped; a column outside the grid is staged as zero.
+    auto stage_window = [&]( const int w ) {
+        for ( int t = team.team_rank(); t < nxy * W; t += team.team_size() )
         {
-            if constexpr ( AsyncStaging )
+            const int node = t / W;
+            const int j    = t - node * W;
+            const int lvl  = w * W + j;
+            if ( lvl > ncell )
+                continue;
+            const int slot = lvl % RING;
+            const int xi   = x0 + node % ( lat_tile + 1 );
+            const int yi   = y0 + node / ( lat_tile + 1 );
+            const int rr   = r0 + lvl;
+
+            if ( xi <= hex_lat_ && yi <= hex_lat_ && rr <= hex_rad_ )
             {
-                util::cp_async( &k_sh( node, lvl ), &k_( local_subdomain_id, xi, yi, rr ) );
-                util::cp_async( &src_sh( node, 0, lvl ), &src_( local_subdomain_id, xi, yi, rr, 0 ) );
-                util::cp_async( &src_sh( node, 1, lvl ), &src_( local_subdomain_id, xi, yi, rr, 1 ) );
-                util::cp_async( &src_sh( node, 2, lvl ), &src_( local_subdomain_id, xi, yi, rr, 2 ) );
+                if constexpr ( AsyncStaging )
+                {
+                    util::cp_async( &k_sh( node, slot ), &k_( local_subdomain_id, xi, yi, rr ) );
+                    util::cp_async( &src_sh( node, 0, slot ), &src_( local_subdomain_id, xi, yi, rr, 0 ) );
+                    util::cp_async( &src_sh( node, 1, slot ), &src_( local_subdomain_id, xi, yi, rr, 1 ) );
+                    util::cp_async( &src_sh( node, 2, slot ), &src_( local_subdomain_id, xi, yi, rr, 2 ) );
+                }
+                else
+                {
+                    k_sh( node, slot )      = static_cast< ArithT >( k_( local_subdomain_id, xi, yi, rr ) );
+                    src_sh( node, 0, slot ) = static_cast< ArithT >( src_( local_subdomain_id, xi, yi, rr, 0 ) );
+                    src_sh( node, 1, slot ) = static_cast< ArithT >( src_( local_subdomain_id, xi, yi, rr, 1 ) );
+                    src_sh( node, 2, slot ) = static_cast< ArithT >( src_( local_subdomain_id, xi, yi, rr, 2 ) );
+                }
             }
             else
             {
-                k_sh( node, lvl )      = static_cast< ArithT >( k_( local_subdomain_id, xi, yi, rr ) );
-                src_sh( node, 0, lvl ) = static_cast< ArithT >( src_( local_subdomain_id, xi, yi, rr, 0 ) );
-                src_sh( node, 1, lvl ) = static_cast< ArithT >( src_( local_subdomain_id, xi, yi, rr, 1 ) );
-                src_sh( node, 2, lvl ) = static_cast< ArithT >( src_( local_subdomain_id, xi, yi, rr, 2 ) );
+                k_sh( node, slot )      = 0.0;
+                src_sh( node, 0, slot ) = src_sh( node, 1, slot ) = src_sh( node, 2, slot ) = 0.0;
             }
         }
-        else
-        {
-            k_sh( node, lvl )      = 0.0;
-            src_sh( node, 0, lvl ) = src_sh( node, 1, lvl ) = src_sh( node, 2, lvl ) = 0.0;
-        }
-    } );
+        if constexpr ( AsyncStaging )
+            util::cp_async_commit();
+    };
 
+    // Prologue: windows 0 and 1 landed, window 2 in flight.
+    stage_window( 0 );
+    stage_window( 1 );
+    stage_window( 2 );
     if constexpr ( AsyncStaging )
-        util::cp_async_wait_all();
+        util::cp_async_wait_pending< 1 >();
     team.team_barrier();
 
     // ---------------- per-thread column walk ----------------
@@ -185,7 +203,7 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
 #pragma unroll
     for ( int c = 0; c < 4; ++c )
     {
-        kl[c] = k_sh( corner_node[c], 0 );
+        kl[c] = k_sh( corner_node[c], 0 ); // level 0 sits in ring slot 0
 #pragma unroll
         for ( int d = 0; d < 3; ++d )
             sl[c][d] = src_sh( corner_node[c], d, 0 );
@@ -247,6 +265,10 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                 }
             }
         }
+        else
+        {
+            team.team_barrier(); // orders the ring reuse (see stage_window)
+        }
 
         if ( cell_active && rr <= hex_rad_ )
         {
@@ -281,28 +303,27 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
         }
     };
 
-    for ( int c = 0; c < nlev - 1; ++c )
+    for ( int c = 0; c < ncell; ++c )
     {
         const int r_cell = r0 + c;
-        if ( r_cell >= hex_rad_ ) // uniform over the team
-            break;
+        const int up_slot = ( c + 1 ) % RING;
 
 #pragma unroll
         for ( int cc = 0; cc < 4; ++cc )
         {
-            ku[cc] = k_sh( corner_node[cc], c + 1 );
+            ku[cc] = k_sh( corner_node[cc], up_slot );
 #pragma unroll
             for ( int d = 0; d < 3; ++d )
             {
-                su[cc][d] = src_sh( corner_node[cc], d, c + 1 );
+                su[cc][d] = src_sh( corner_node[cc], d, up_slot );
                 up[cc][d] = AccT( 0 );
             }
         }
 
         if ( cell_active )
         {
-            const GeoT r_0 = static_cast< GeoT >( r_sh( c ) );
-            const GeoT r_1 = static_cast< GeoT >( r_sh( c + 1 ) );
+            const GeoT r_0 = static_cast< GeoT >( radii_( local_subdomain_id, r_cell ) );
+            const GeoT r_1 = static_cast< GeoT >( radii_( local_subdomain_id, r_cell + 1 ) );
 
             const bool at_cmb     = has_flag( local_subdomain_id, x_cell, y_cell, r_cell, CMB );
             const bool at_surface = has_flag( local_subdomain_id, x_cell, y_cell, r_cell + 1, SURFACE );
@@ -479,10 +500,23 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
             } // wedge loop
         }
 
+        // The window after next must have landed before the next cell of the next
+        // window reads it: wait before the barrier inside the flush, two cells
+        // ahead of the first read (cell (w+1)W - 1 reads level (w+1)W).
+        if constexpr ( AsyncStaging )
+            if ( c % W == W - 2 )
+                util::cp_async_wait_pending< 1 >();
+
         // Node level c is complete for this team: it got the previous cell's upper
         // and this cell's lower contributions. Level 0 of the run also belongs to
-        // the radial tile below, so it is a boundary level.
-        flush_level( acc, c, c == 0 );
+        // the radial run below, unless this run starts at the CMB.
+        flush_level( acc, c, c == 0 && r0 > 0 );
+
+        // Past the barrier of the last cell of window w every thread is done with
+        // window w's slots: refill them with window w + 3... i.e. issue window w + 2
+        // + 1 = the window two ahead of the one the walk enters now.
+        if ( ( c + 1 ) % W == 0 )
+            stage_window( ( c + 1 ) / W + 2 );
 
 #pragma unroll
         for ( int cc = 0; cc < 4; ++cc )
@@ -497,13 +531,8 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
         }
     }
 
-    // The run's top level: shared with the radial tile above.
-    {
-        int last = nlev - 1;
-        if ( r0 + last > hex_rad_ )
-            last = hex_rad_ - r0;
-        flush_level( acc, last, true );
-    }
+    // The run's top level: shared with the radial run above unless it is the surface.
+    flush_level( acc, ncell, r0 + ncell < hex_rad_ );
 }
 
 } // namespace terra::fe::wedge::operators::shell

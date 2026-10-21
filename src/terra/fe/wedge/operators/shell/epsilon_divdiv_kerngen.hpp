@@ -147,6 +147,7 @@ class EpsilonDivDivKerngen
 
     bool diagonal_; ///< If true, apply diagonal-only action
     int tile_scatter_ = default_tile_scatter; ///< Fast DN path scatter mode (see default_tile_scatter)
+    int warp_window_  = 8;                    ///< Levels per staged window of the warp-owner path (4 or 8)
 
     /// Hourglass (rank-6 gamma) stabilization coefficient; 0 disables it entirely.
     /// One-point quadrature on the wedge leaves two zero-energy modes per element,
@@ -346,6 +347,10 @@ class EpsilonDivDivKerngen
         update_kernel_path_flag_host_only();
 
         // Measurement switch without a code change: TERRA_EPSDIVDIV_TILE_SCATTER=0|1|2.
+        if ( const char* env = std::getenv( "TERRA_EPSDIVDIV_WARP_WINDOW" ) )
+        {
+            set_warp_window( std::atoi( env ) );
+        }
         if ( const char* env = std::getenv( "TERRA_EPSDIVDIV_TILE_SCATTER" ) )
         {
             set_tile_scatter( std::atoi( env ) );
@@ -392,9 +397,13 @@ class EpsilonDivDivKerngen
         r_passes_ = r_passes;
         recompute_tiling();
 
-        const size_t shmem = team_shmem_size( team_size_ ) > team_shmem_size_dn( team_size_ )
-                                 ? team_shmem_size( team_size_ )
-                                 : team_shmem_size_dn( team_size_ );
+        // The warp-owner path streams its levels, so its scratch does not grow with the
+        // radial run; when it is the path that will run, only its size counts.
+        const bool   warp_only = ( tile_scatter_ == 2 ) && ( matrix_free_kernel_path() == KernelPath::FastDirichletNeumann );
+        const size_t shmem     = warp_only ? team_shmem_size_dn( team_size_ )
+                                 : team_shmem_size( team_size_ ) > team_shmem_size_dn( team_size_ )
+                                     ? team_shmem_size( team_size_ )
+                                     : team_shmem_size_dn( team_size_ );
         if ( shmem > 64u * 1024u )
         {
             util::logroot << "[EpsilonDivDiv] set_tiling rejected (" << lat_tile << "," << lat_tile << ","
@@ -588,8 +597,9 @@ class EpsilonDivDivKerngen
         }
         if ( mode == 2 && !warp_shape_ok() )
         {
-            // The warp path has compile-time shapes only: lat 8, r_tile 1, 8/16/32/64 cells.
-            if ( hex_lat_ < 8 || !set_tiling( 8, 1, 8, false ) )
+            // The warp path is compiled for lat 8 with r_tile 1; the radial run is free
+            // (streamed), 64 cells keeps enough teams at the coarser levels.
+            if ( hex_lat_ < 8 || !set_tiling( 8, 1, 64, false ) )
             {
                 util::logroot << "[EpsilonDivDiv] warp-owner scatter: no usable tile at this size; using the tile buffer"
                               << std::endl;
@@ -598,6 +608,19 @@ class EpsilonDivDivKerngen
         }
     }
     int tile_scatter() const { return tile_scatter_; }
+
+    /// Levels per staged window of the warp-owner path: 4 or 8 (compiled shapes).
+    void set_warp_window( int w )
+    {
+        if ( w != 4 && w != 8 )
+        {
+            util::logroot << "[EpsilonDivDiv] warp window " << w << " is not compiled (4 or 8); keeping " << warp_window_
+                          << std::endl;
+            return;
+        }
+        warp_window_ = w;
+    }
+    int warp_window() const { return warp_window_; }
 
     static constexpr bool warp_scatter_available()
     {
@@ -608,13 +631,9 @@ class EpsilonDivDivKerngen
 #endif
     }
 
-    /// The warp-owner path is compiled for (lat, levels per team) = (8, 9), (8, 17),
-    /// (8, 33) and (8, 65), i.e. tiles 8/1/8, 8/1/16, 8/1/32, 8/1/64.
-    bool warp_shape_ok() const
-    {
-        const int nlev = r_tile_block_ + 1;
-        return lat_tile_ == 8 && r_tile_ == 1 && ( nlev == 9 || nlev == 17 || nlev == 33 || nlev == 65 );
-    }
+    /// The warp-owner path is compiled for lat 8 with r_tile 1 (one thread per column);
+    /// the radial run (r_passes) is a runtime length, staged in windows.
+    bool warp_shape_ok() const { return lat_tile_ == 8 && r_tile_ == 1; }
     double hourglass_coefficient() const { return stab_c_; }
 
     void set_boundary_conditions( BoundaryConditions bcs )
@@ -987,14 +1006,18 @@ class EpsilonDivDivKerngen
         // sized with its own sizeof and rounded up, so they can never overlap -- a
         // single sizeof(double) * nscalars silently under-allocates the moment one tile
         // stops being double, and the apply then reads garbage and produces NaN.
-        const size_t geom_scalars  = size_t( nxy ) * 3 + size_t( nlev );
-        const size_t field_scalars = size_t( nxy ) * 3 * nlev + size_t( nxy ) * nlev;
-        // Mode 1: the accumulation buffer. Mode 2: the seam between the warps of a
+        // Mode 2 (warp-owner, streamed): coordinates only in the geometry block, a ring
+        // of three staged windows for the fields, and the seam between the warps of a
         // team (two parities x (warps - 1) rows x lat columns x 3 components x 2 corners).
+        const bool   warp         = ( tile_scatter_ == 2 );
+        const int    ring         = 3 * warp_window_;
+        const size_t geom_scalars = warp ? size_t( nxy ) * 3 : size_t( nxy ) * 3 + size_t( nlev );
+        const size_t field_scalars =
+            warp ? size_t( nxy ) * 4 * ring : size_t( nxy ) * 3 * nlev + size_t( nxy ) * nlev;
         const int    nwarps      = ( lat_tile_ * lat_tile_ ) / 32;
         const size_t acc_scalars = ( tile_scatter_ == 1 ) ? size_t( nxy ) * 3 * nlev
-                                   : ( tile_scatter_ == 2 && nwarps > 1 ) ? size_t( 2 ) * ( nwarps - 1 ) * lat_tile_ * 6
-                                                                          : 0;
+                                   : ( warp && nwarps > 1 ) ? size_t( 2 ) * ( nwarps - 1 ) * lat_tile_ * 6
+                                                            : 0;
 
         return shmem_block_bytes( sizeof( GeomT ) * geom_scalars ) +
                shmem_block_bytes( sizeof( ArithT ) * field_scalars ) +
@@ -1122,35 +1145,30 @@ class EpsilonDivDivKerngen
     }
 
     /// Public for the same nvcc reason as launch_fast_dirichlet_neumann_shape.
-    template < int LatTileC, int NlevC, typename Policy >
+    template < int LatTileC, int WinC, typename Policy >
     void launch_fast_dn_warp_shape( const Policy& policy )
     {
         Kokkos::parallel_for(
             "epsilon_divdiv_apply_kernel_fast_dn_warp", policy, KOKKOS_CLASS_LAMBDA( const Team& team ) {
-                this->template run_team_fast_dn_warp< LatTileC, NlevC >( team );
+                this->template run_team_fast_dn_warp< LatTileC, WinC >( team );
             } );
     }
 
     template < typename Policy >
     void launch_fast_dn_warp( const Policy& policy )
     {
-        const int nlev = r_tile_block_ + 1;
-        if ( nlev == 9 )
-            return launch_fast_dn_warp_shape< 8, 9 >( policy );
-        if ( nlev == 17 )
-            return launch_fast_dn_warp_shape< 8, 17 >( policy );
-        if ( nlev == 33 )
-            return launch_fast_dn_warp_shape< 8, 33 >( policy );
-        launch_fast_dn_warp_shape< 8, 65 >( policy );
+        if ( warp_window_ == 4 )
+            return launch_fast_dn_warp_shape< 8, 4 >( policy );
+        launch_fast_dn_warp_shape< 8, 8 >( policy );
     }
 
   private:
-    template < int LatTileC, int NlevC >
+    template < int LatTileC, int WinC >
     KOKKOS_INLINE_FUNCTION void run_team_fast_dn_warp( const Team& team ) const
     {
         int local_subdomain_id, x0, y0, r0, tx, ty, tr, x_cell, y_cell, r_cell;
         decode_team_indices( team, local_subdomain_id, x0, y0, r0, tx, ty, tr, x_cell, y_cell, r_cell );
-        operator_fast_dn_warp_path< LatTileC, NlevC >( team, local_subdomain_id, x0, y0, r0, tx, ty, x_cell, y_cell );
+        operator_fast_dn_warp_path< LatTileC, WinC >( team, local_subdomain_id, x0, y0, r0, tx, ty, x_cell, y_cell );
     }
 
     /// One contribution straight into the global field, in the accumulation type.
@@ -1306,7 +1324,7 @@ class EpsilonDivDivKerngen
         const int   x_cell,
         const int   y_cell ) const;
 
-    template < int LatTileC, int NlevC >
+    template < int LatTileC, int WinC >
     KOKKOS_INLINE_FUNCTION void operator_fast_dn_warp_path(
         const Team& team,
         const int   local_subdomain_id,

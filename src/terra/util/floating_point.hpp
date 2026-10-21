@@ -158,6 +158,24 @@ KOKKOS_INLINE_FUNCTION void cp_async_wait_all()
 #endif
 }
 
+/// Closes the cp.async group of everything issued since the last commit.
+KOKKOS_INLINE_FUNCTION void cp_async_commit()
+{
+#if defined( __CUDA_ARCH__ ) && __CUDA_ARCH__ >= 800
+    asm volatile( "cp.async.commit_group;" ::: "memory" );
+#endif
+}
+
+/// Waits until at most @p Pending of the thread's committed cp.async groups are
+/// still in flight (the oldest groups complete first).
+template < int Pending >
+KOKKOS_INLINE_FUNCTION void cp_async_wait_pending()
+{
+#if defined( __CUDA_ARCH__ ) && __CUDA_ARCH__ >= 800
+    asm volatile( "cp.async.wait_group %0;" ::"n"( Pending ) : "memory" );
+#endif
+}
+
 /// Adds two values to two adjacent 16-bit fields that together fill one aligned
 /// 32-bit word, `lower` being the word's first half. On CUDA this is one native
 /// packed reduction (f16x2 / bf16x2), the lock-free form the scalar 2-byte add does
