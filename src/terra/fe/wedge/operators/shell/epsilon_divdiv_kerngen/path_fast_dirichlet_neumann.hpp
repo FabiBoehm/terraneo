@@ -137,6 +137,11 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
     static constexpr int WEDGE_NODE_OFF[2][6][3] = {
         { { 0, 0, 0 }, { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 }, { 1, 0, 1 }, { 0, 1, 1 } },
         { { 1, 1, 0 }, { 0, 1, 0 }, { 1, 0, 0 }, { 1, 1, 1 }, { 0, 1, 1 }, { 1, 0, 1 } } };
+    // Read through a select on the wedge: with the node index an immediate (the loops
+    // have constant trip counts) both operands are constants and nothing is loaded.
+    auto wedge_off = [&]( const int w, const int n, const int k ) -> int {
+        return w == 0 ? WEDGE_NODE_OFF[0][n][k] : WEDGE_NODE_OFF[1][n][k];
+    };
 
     const int n00 = node_id( tx, ty );
     const int n01 = node_id( tx, ty + 1 );
@@ -179,8 +184,8 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
 #pragma unroll
             for ( int node = 0; node < 6; ++node )
             {
-                const int nid = node_id( tx + WEDGE_NODE_OFF[w][node][0], ty + WEDGE_NODE_OFF[w][node][1] );
-                k_sum += k_sh( nid, lvl0 + WEDGE_NODE_OFF[w][node][2] );
+                const int nid = node_id( tx + wedge_off( w, node, 0 ), ty + wedge_off( w, node, 1 ) );
+                k_sum += k_sh( nid, lvl0 + wedge_off( w, node, 2 ) );
             }
             const ArithT k_eval = static_cast< ArithT >( static_cast< double >( k_sum ) * ( 1.0 / 6.0 ) );
 
@@ -233,8 +238,12 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
             if ( !Diagonal )
             {
 #pragma unroll
-                for ( int n = cmb_shift; n < 6 - surface_shift; ++n )
+                for ( int n = 0; n < 6; ++n )
                 {
+                    // Constant trip count so the node tables fold into immediates; the
+                    // Dirichlet rows are skipped by predicate instead.
+                    if ( n < cmb_shift || n >= 6 - surface_shift )
+                        continue;
                     const GeoT gx = dN_ref[n][0];
                     const GeoT gy = dN_ref[n][1];
                     const GeoT gz = dN_ref[n][2];
@@ -249,9 +258,9 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                     const ArithT a2 = static_cast< ArithT >( g2 );
                     const ArithT half = static_cast< ArithT >( 0.5 );
 
-                    const int ddx = WEDGE_NODE_OFF[w][n][0];
-                    const int ddy = WEDGE_NODE_OFF[w][n][1];
-                    const int ddr = WEDGE_NODE_OFF[w][n][2];
+                    const int ddx = wedge_off( w, n, 0 );
+                    const int ddy = wedge_off( w, n, 1 );
+                    const int ddr = wedge_off( w, n, 2 );
                     const int nid = node_id( tx + ddx, ty + ddy );
                     const int lvl = lvl0 + ddr;
 
@@ -275,8 +284,12 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                 {
                     constexpr double NEG_TWO_THIRDS = -0.66666666666666663;
 #pragma unroll
-                    for ( int n = cmb_shift; n < 6 - surface_shift; ++n )
+                    for ( int n = 0; n < 6; ++n )
                     {
+                        // Constant trip count so the node tables fold into immediates; the
+                        // Dirichlet rows are skipped by predicate instead.
+                        if ( n < cmb_shift || n >= 6 - surface_shift )
+                            continue;
                         const GeoT gx = dN_ref[n][0];
                         const GeoT gy = dN_ref[n][1];
                         const GeoT gz = dN_ref[n][2];
@@ -289,9 +302,9 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                         const ArithT two = static_cast< ArithT >( 2.0 );
                         const ArithT ntt = static_cast< ArithT >( NEG_TWO_THIRDS );
 
-                        const int ddx = WEDGE_NODE_OFF[w][n][0];
-                        const int ddy = WEDGE_NODE_OFF[w][n][1];
-                        const int ddr = WEDGE_NODE_OFF[w][n][2];
+                        const int ddx = wedge_off( w, n, 0 );
+                        const int ddy = wedge_off( w, n, 1 );
+                        const int ddr = wedge_off( w, n, 2 );
                         tile_accumulate< TileScatter >(
                             scatter_target< TileScatter >( dst_sh, node_id( tx + ddx, ty + ddy ), 0, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
                             static_cast< ScalarType >(
@@ -351,21 +364,29 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                     {
                         ArithT c1 = 0.0, c2 = 0.0;
 #pragma unroll
-                        for ( int n = cmb_shift; n < 6 - surface_shift; ++n )
+                        for ( int n = 0; n < 6; ++n )
                         {
+                            // Constant trip count so the node tables fold into immediates; the
+                            // Dirichlet rows are skipped by predicate instead.
+                            if ( n < cmb_shift || n >= 6 - surface_shift )
+                                continue;
                             const int nid =
-                                node_id( tx + WEDGE_NODE_OFF[w][n][0], ty + WEDGE_NODE_OFF[w][n][1] );
-                            const int    lvl = lvl0 + WEDGE_NODE_OFF[w][n][2];
+                                node_id( tx + wedge_off( w, n, 0 ), ty + wedge_off( w, n, 1 ) );
+                            const int    lvl = lvl0 + wedge_off( w, n, 2 );
                             const ArithT u   = src_sh( nid, d, lvl );
                             c1 += static_cast< ArithT >( G1[n] ) * u;
                             c2 += static_cast< ArithT >( G2[n] ) * u;
                         }
 #pragma unroll
-                        for ( int n = cmb_shift; n < 6 - surface_shift; ++n )
+                        for ( int n = 0; n < 6; ++n )
                         {
-                            const int ddx = WEDGE_NODE_OFF[w][n][0];
-                            const int ddy = WEDGE_NODE_OFF[w][n][1];
-                            const int ddr = WEDGE_NODE_OFF[w][n][2];
+                            // Constant trip count so the node tables fold into immediates; the
+                            // Dirichlet rows are skipped by predicate instead.
+                            if ( n < cmb_shift || n >= 6 - surface_shift )
+                                continue;
+                            const int ddx = wedge_off( w, n, 0 );
+                            const int ddy = wedge_off( w, n, 1 );
+                            const int ddr = wedge_off( w, n, 2 );
                             tile_accumulate< TileScatter >(
                                 scatter_target< TileScatter >( dst_sh, node_id( tx + ddx, ty + ddy ), d, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
                                 static_cast< ScalarType >( eps * ( static_cast< ArithT >( G1[n] ) * c1 +
@@ -378,8 +399,10 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                 if ( Diagonal || ( treat_boundary_dirichlet && at_boundary ) )
                 {
 #pragma unroll
-                    for ( int n = surface_shift; n < 6 - cmb_shift; ++n )
+                    for ( int n = 0; n < 6; ++n )
                     {
+                        if ( n < surface_shift || n >= 6 - cmb_shift )
+                            continue;
                         const GeoT gx = dN_ref[n][0];
                         const GeoT gy = dN_ref[n][1];
                         const GeoT gz = dN_ref[n][2];
@@ -392,16 +415,16 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                         const ArithT d1 = static_cast< ArithT >( gg + ONE_THIRD * g1 * g1 );
                         const ArithT d2 = static_cast< ArithT >( gg + ONE_THIRD * g2 * g2 );
 
-                        const int nid = node_id( tx + WEDGE_NODE_OFF[w][n][0], ty + WEDGE_NODE_OFF[w][n][1] );
-                        const int lvl = lvl0 + WEDGE_NODE_OFF[w][n][2];
+                        const int nid = node_id( tx + wedge_off( w, n, 0 ), ty + wedge_off( w, n, 1 ) );
+                        const int lvl = lvl0 + wedge_off( w, n, 2 );
 
                         const ArithT sv0 = src_sh( nid, 0, lvl );
                         const ArithT sv1 = src_sh( nid, 1, lvl );
                         const ArithT sv2 = src_sh( nid, 2, lvl );
 
-                        const int ddx = WEDGE_NODE_OFF[w][n][0];
-                        const int ddy = WEDGE_NODE_OFF[w][n][1];
-                        const int ddr = WEDGE_NODE_OFF[w][n][2];
+                        const int ddx = wedge_off( w, n, 0 );
+                        const int ddy = wedge_off( w, n, 1 );
+                        const int ddr = wedge_off( w, n, 2 );
                         tile_accumulate< TileScatter >(
                             scatter_target< TileScatter >( dst_sh, node_id( tx + ddx, ty + ddy ), 0, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
                             static_cast< ScalarType >( kwJ * sv0 * d0 ) );
@@ -438,13 +461,15 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                         const GeoT diag_mean = static_cast< GeoT >( kwJ ) * static_cast< GeoT >( 10.0 / 54.0 ) * sum_gg;
                         const ArithT eps       = static_cast< ArithT >( static_cast< GeoT >( stab_c_ ) * diag_mean / static_cast< GeoT >( NORM2_G ) );
 #pragma unroll
-                        for ( int n = surface_shift; n < 6 - cmb_shift; ++n )
+                        for ( int n = 0; n < 6; ++n )
                         {
+                            if ( n < surface_shift || n >= 6 - cmb_shift )
+                                continue;
                             const ArithT gdiag =
                                 static_cast< ArithT >( G1[n] * G1[n] + G2[n] * G2[n] );
-                            const int ddx = WEDGE_NODE_OFF[w][n][0];
-                            const int ddy = WEDGE_NODE_OFF[w][n][1];
-                            const int ddr = WEDGE_NODE_OFF[w][n][2];
+                            const int ddx = wedge_off( w, n, 0 );
+                            const int ddy = wedge_off( w, n, 1 );
+                            const int ddr = wedge_off( w, n, 2 );
                             for ( int d = 0; d < 3; ++d )
                                 tile_accumulate< TileScatter >(
                                     scatter_target< TileScatter >( dst_sh, node_id( tx + ddx, ty + ddy ), d, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
