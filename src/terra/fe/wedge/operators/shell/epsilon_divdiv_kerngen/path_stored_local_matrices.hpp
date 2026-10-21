@@ -14,7 +14,8 @@
 // Layout. Each wedge matrix is symmetric, so only the upper triangle is kept, 171
 // entries, row-major from the diagonal. The view is entry-major, stored_( entry,
 // cell ): a warp of consecutive cells then reads consecutive addresses for each
-// entry, which is what keeps the kernel at memory bandwidth.
+// entry, which is what keeps the kernel at memory bandwidth. It is one flat view
+// indexed by hand in size_t: at level 7 the matrices run past 2^32 entries.
 //
 // Semantics. The matrix is the one the matrix-free path would apply: the on-demand
 // assembly in GeoT, the hourglass term when the Dirichlet/Neumann path would add it,
@@ -218,11 +219,15 @@ void EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixSc
     util::Timer timer( "epsilon_divdiv_stored_matrices_precompute" );
 
     const int ncells = num_cells();
-    if ( static_cast< int >( stored_matrices_.extent( 1 ) ) != ncells )
+    if ( num_cells_ != ncells )
     {
-        stored_matrices_ = Kokkos::View< MatT**, Kokkos::LayoutRight >(
-            "epsilon_divdiv_stored_local_matrices", num_wedges_per_hex_cell * PackedLocalMatrixSize, ncells );
+        num_cells_       = ncells;
+        stored_matrices_ = Kokkos::View< MatT* >(
+            "epsilon_divdiv_stored_local_matrices",
+            size_t( num_wedges_per_hex_cell ) * PackedLocalMatrixSize * size_t( ncells ) );
     }
+    util::logroot << "[EpsilonDivDiv] precomputing stored local matrices: " << ncells << " cells, "
+                  << stored_local_matrices_bytes() / 1.0e9 << " GB" << std::endl;
 
     // The matrices stand in for the matrix-free path this build would otherwise run,
     // and only the Dirichlet/Neumann kernel carries the hourglass term: the free-slip
@@ -246,7 +251,7 @@ void EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixSc
                     local_subdomain_id, x_cell, y_cell, r_cell, wedge, at_cmb, at_surface );
                 for ( int i = 0; i < LocalMatrixDim; ++i )
                     for ( int j = i; j < LocalMatrixDim; ++j )
-                        stored_matrices_( wedge * PackedLocalMatrixSize + packed_index( i, j ), cell ) =
+                        this->stored_entry( wedge * PackedLocalMatrixSize + packed_index( i, j ), cell ) =
                             static_cast< MatT >( A( i, j ) );
             }
         } );
@@ -289,12 +294,12 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
 #pragma unroll
         for ( int i = 0; i < LocalMatrixDim; ++i )
         {
-            const ArithT a_ii = static_cast< ArithT >( stored_matrices_( base + packed_index( i, i ), cell ) );
+            const ArithT a_ii = static_cast< ArithT >( stored_entry( base + packed_index( i, i ), cell ) );
             y[wedge][i] += a_ii * x[wedge][i];
 #pragma unroll
             for ( int j = i + 1; j < LocalMatrixDim; ++j )
             {
-                const ArithT a = static_cast< ArithT >( stored_matrices_( base + packed_index( i, j ), cell ) );
+                const ArithT a = static_cast< ArithT >( stored_entry( base + packed_index( i, j ), cell ) );
                 y[wedge][i] += a * x[wedge][j];
                 y[wedge][j] += a * x[wedge][i];
             }

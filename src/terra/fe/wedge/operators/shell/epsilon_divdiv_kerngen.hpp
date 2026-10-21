@@ -228,8 +228,11 @@ class EpsilonDivDivKerngen
     // ---- Stored-local-matrix path (epsilon_divdiv_kerngen/path_stored_local_matrices.hpp)
     /// Packed symmetric 18x18: the upper triangle, row-major from the diagonal.
     static constexpr int PackedLocalMatrixSize = LocalMatrixDim * ( LocalMatrixDim + 1 ) / 2;
-    /// stored_matrices_( entry, cell ), entry-major: 2 * PackedLocalMatrixSize entries per hex cell.
-    Kokkos::View< MatT**, Kokkos::LayoutRight > stored_matrices_;
+    /// Entry-major, stored_entry( entry, cell ): 2 * PackedLocalMatrixSize entries per hex
+    /// cell. One flat view, indexed in size_t by hand: at level 7 the matrices run past
+    /// 2^32 entries, which is more than a rank-2 offset is guaranteed to carry.
+    Kokkos::View< MatT* > stored_matrices_;
+    int  num_cells_                = 0; ///< extent of the stored matrices' cell axis
     bool use_stored_matrices_      = false;
     bool stored_matrices_valid_    = false;
     bool stored_matrices_hourglass_ = false;
@@ -593,6 +596,12 @@ class EpsilonDivDivKerngen
         tmp               /= hex_lat_;
         x_cell             = tmp % hex_lat_;
         local_subdomain_id = tmp / hex_lat_;
+    }
+
+    KOKKOS_INLINE_FUNCTION
+    MatT& stored_entry( const int entry, const int cell ) const
+    {
+        return stored_matrices_( size_t( entry ) * size_t( num_cells_ ) + size_t( cell ) );
     }
 
     /// Position of ( i, j ), i <= j, in the packed upper triangle.
