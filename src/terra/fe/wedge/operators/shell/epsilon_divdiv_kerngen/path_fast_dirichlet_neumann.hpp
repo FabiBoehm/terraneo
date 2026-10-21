@@ -187,126 +187,90 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
             ArithT kwJ;
 
             // ==== Phase 1: Jacobian + Gather (gu tensor) ====
-            // invJ lives only in this scope so the compiler can reclaim its registers.
+            // The inverse Jacobian stays live into the scatter: recomputing it there saved
+            // registers, but the kernel is issue-bound and the ~100 instructions cost more.
             ArithT gu00 = 0.0;
             ArithT gu10 = 0.0, gu11 = 0.0;
             ArithT gu20 = 0.0, gu21 = 0.0, gu22 = 0.0;
             ArithT div_u = 0.0;
+            const GeoT half_dr = static_cast< GeoT >( 0.5 ) * ( r_1 - r_0 );
+            const GeoT r_mid   = static_cast< GeoT >( 0.5 ) * ( r_0 + r_1 );
+
+            const GeoT J_0_0 = r_mid * ( -coords_sh( v0, 0 ) + coords_sh( v1, 0 ) );
+            const GeoT J_0_1 = r_mid * ( -coords_sh( v0, 0 ) + coords_sh( v2, 0 ) );
+            const GeoT J_0_2 =
+                half_dr * ( ONE_THIRD * ( coords_sh( v0, 0 ) + coords_sh( v1, 0 ) + coords_sh( v2, 0 ) ) );
+
+            const GeoT J_1_0 = r_mid * ( -coords_sh( v0, 1 ) + coords_sh( v1, 1 ) );
+            const GeoT J_1_1 = r_mid * ( -coords_sh( v0, 1 ) + coords_sh( v2, 1 ) );
+            const GeoT J_1_2 =
+                half_dr * ( ONE_THIRD * ( coords_sh( v0, 1 ) + coords_sh( v1, 1 ) + coords_sh( v2, 1 ) ) );
+
+            const GeoT J_2_0 = r_mid * ( -coords_sh( v0, 2 ) + coords_sh( v1, 2 ) );
+            const GeoT J_2_1 = r_mid * ( -coords_sh( v0, 2 ) + coords_sh( v2, 2 ) );
+            const GeoT J_2_2 =
+                half_dr * ( ONE_THIRD * ( coords_sh( v0, 2 ) + coords_sh( v1, 2 ) + coords_sh( v2, 2 ) ) );
+
+            const GeoT J_det = J_0_0 * J_1_1 * J_2_2 - J_0_0 * J_1_2 * J_2_1 -
+                                 J_0_1 * J_1_0 * J_2_2 + J_0_1 * J_1_2 * J_2_0 +
+                                 J_0_2 * J_1_0 * J_2_1 - J_0_2 * J_1_1 * J_2_0;
+
+            // |J| is geometry, so form the weight in GeoT and narrow once.
+            kwJ = static_cast< ArithT >( static_cast< GeoT >( k_eval ) * Kokkos::abs( J_det ) );
+
+            const GeoT inv_det = static_cast< GeoT >( 1.0 ) / J_det;
+
+            const GeoT i00 = inv_det * ( J_1_1 * J_2_2 - J_1_2 * J_2_1 );
+            const GeoT i01 = inv_det * ( -J_1_0 * J_2_2 + J_1_2 * J_2_0 );
+            const GeoT i02 = inv_det * ( J_1_0 * J_2_1 - J_1_1 * J_2_0 );
+            const GeoT i10 = inv_det * ( -J_0_1 * J_2_2 + J_0_2 * J_2_1 );
+            const GeoT i11 = inv_det * ( J_0_0 * J_2_2 - J_0_2 * J_2_0 );
+            const GeoT i12 = inv_det * ( -J_0_0 * J_2_1 + J_0_1 * J_2_0 );
+            const GeoT i20 = inv_det * ( J_0_1 * J_1_2 - J_0_2 * J_1_1 );
+            const GeoT i21 = inv_det * ( -J_0_0 * J_1_2 + J_0_2 * J_1_0 );
+            const GeoT i22 = inv_det * ( J_0_0 * J_1_1 - J_0_1 * J_1_0 );
+
+            if ( !Diagonal )
             {
-                const GeoT half_dr = static_cast< GeoT >( 0.5 ) * ( r_1 - r_0 );
-                const GeoT r_mid   = static_cast< GeoT >( 0.5 ) * ( r_0 + r_1 );
-
-                const GeoT J_0_0 = r_mid * ( -coords_sh( v0, 0 ) + coords_sh( v1, 0 ) );
-                const GeoT J_0_1 = r_mid * ( -coords_sh( v0, 0 ) + coords_sh( v2, 0 ) );
-                const GeoT J_0_2 =
-                    half_dr * ( ONE_THIRD * ( coords_sh( v0, 0 ) + coords_sh( v1, 0 ) + coords_sh( v2, 0 ) ) );
-
-                const GeoT J_1_0 = r_mid * ( -coords_sh( v0, 1 ) + coords_sh( v1, 1 ) );
-                const GeoT J_1_1 = r_mid * ( -coords_sh( v0, 1 ) + coords_sh( v2, 1 ) );
-                const GeoT J_1_2 =
-                    half_dr * ( ONE_THIRD * ( coords_sh( v0, 1 ) + coords_sh( v1, 1 ) + coords_sh( v2, 1 ) ) );
-
-                const GeoT J_2_0 = r_mid * ( -coords_sh( v0, 2 ) + coords_sh( v1, 2 ) );
-                const GeoT J_2_1 = r_mid * ( -coords_sh( v0, 2 ) + coords_sh( v2, 2 ) );
-                const GeoT J_2_2 =
-                    half_dr * ( ONE_THIRD * ( coords_sh( v0, 2 ) + coords_sh( v1, 2 ) + coords_sh( v2, 2 ) ) );
-
-                const GeoT J_det = J_0_0 * J_1_1 * J_2_2 - J_0_0 * J_1_2 * J_2_1 -
-                                     J_0_1 * J_1_0 * J_2_2 + J_0_1 * J_1_2 * J_2_0 +
-                                     J_0_2 * J_1_0 * J_2_1 - J_0_2 * J_1_1 * J_2_0;
-
-                // |J| is geometry, so form the weight in GeoT and narrow once.
-                kwJ = static_cast< ArithT >( static_cast< GeoT >( k_eval ) * Kokkos::abs( J_det ) );
-
-                const GeoT inv_det = static_cast< GeoT >( 1.0 ) / J_det;
-
-                const GeoT i00 = inv_det * ( J_1_1 * J_2_2 - J_1_2 * J_2_1 );
-                const GeoT i01 = inv_det * ( -J_1_0 * J_2_2 + J_1_2 * J_2_0 );
-                const GeoT i02 = inv_det * ( J_1_0 * J_2_1 - J_1_1 * J_2_0 );
-                const GeoT i10 = inv_det * ( -J_0_1 * J_2_2 + J_0_2 * J_2_1 );
-                const GeoT i11 = inv_det * ( J_0_0 * J_2_2 - J_0_2 * J_2_0 );
-                const GeoT i12 = inv_det * ( -J_0_0 * J_2_1 + J_0_1 * J_2_0 );
-                const GeoT i20 = inv_det * ( J_0_1 * J_1_2 - J_0_2 * J_1_1 );
-                const GeoT i21 = inv_det * ( -J_0_0 * J_1_2 + J_0_2 * J_1_0 );
-                const GeoT i22 = inv_det * ( J_0_0 * J_1_1 - J_0_1 * J_1_0 );
-
-                if ( !Diagonal )
-                {
 #pragma unroll
-                    for ( int n = cmb_shift; n < 6 - surface_shift; ++n )
-                    {
-                        const GeoT gx = dN_ref[n][0];
-                        const GeoT gy = dN_ref[n][1];
-                        const GeoT gz = dN_ref[n][2];
-                        // Shape-function gradients are geometry: formed in GeoT from
-                        // the inverse Jacobian, then narrowed once so the contraction
-                        // against the field values runs entirely in ArithT.
-                        const GeoT g0 = i00 * gx + i01 * gy + i02 * gz;
-                        const GeoT g1 = i10 * gx + i11 * gy + i12 * gz;
-                        const GeoT g2 = i20 * gx + i21 * gy + i22 * gz;
-                        const ArithT a0 = static_cast< ArithT >( g0 );
-                        const ArithT a1 = static_cast< ArithT >( g1 );
-                        const ArithT a2 = static_cast< ArithT >( g2 );
-                        const ArithT half = static_cast< ArithT >( 0.5 );
+                for ( int n = cmb_shift; n < 6 - surface_shift; ++n )
+                {
+                    const GeoT gx = dN_ref[n][0];
+                    const GeoT gy = dN_ref[n][1];
+                    const GeoT gz = dN_ref[n][2];
+                    // Shape-function gradients are geometry: formed in GeoT from
+                    // the inverse Jacobian, then narrowed once so the contraction
+                    // against the field values runs entirely in ArithT.
+                    const GeoT g0 = i00 * gx + i01 * gy + i02 * gz;
+                    const GeoT g1 = i10 * gx + i11 * gy + i12 * gz;
+                    const GeoT g2 = i20 * gx + i21 * gy + i22 * gz;
+                    const ArithT a0 = static_cast< ArithT >( g0 );
+                    const ArithT a1 = static_cast< ArithT >( g1 );
+                    const ArithT a2 = static_cast< ArithT >( g2 );
+                    const ArithT half = static_cast< ArithT >( 0.5 );
 
-                        const int ddx = WEDGE_NODE_OFF[w][n][0];
-                        const int ddy = WEDGE_NODE_OFF[w][n][1];
-                        const int ddr = WEDGE_NODE_OFF[w][n][2];
-                        const int nid = node_id( tx + ddx, ty + ddy );
-                        const int lvl = lvl0 + ddr;
+                    const int ddx = WEDGE_NODE_OFF[w][n][0];
+                    const int ddy = WEDGE_NODE_OFF[w][n][1];
+                    const int ddr = WEDGE_NODE_OFF[w][n][2];
+                    const int nid = node_id( tx + ddx, ty + ddy );
+                    const int lvl = lvl0 + ddr;
 
-                        const ArithT s0 = src_sh( nid, 0, lvl );
-                        const ArithT s1 = src_sh( nid, 1, lvl );
-                        const ArithT s2 = src_sh( nid, 2, lvl );
+                    const ArithT s0 = src_sh( nid, 0, lvl );
+                    const ArithT s1 = src_sh( nid, 1, lvl );
+                    const ArithT s2 = src_sh( nid, 2, lvl );
 
-                        gu00  += a0 * s0;
-                        gu11  += a1 * s1;
-                        gu22  += a2 * s2;
-                        gu10  += half * ( a1 * s0 + a0 * s1 );
-                        gu20  += half * ( a2 * s0 + a0 * s2 );
-                        gu21  += half * ( a2 * s1 + a1 * s2 );
-                        div_u += a0 * s0 + a1 * s1 + a2 * s2;
-                    }
+                    gu00  += a0 * s0;
+                    gu11  += a1 * s1;
+                    gu22  += a2 * s2;
+                    gu10  += half * ( a1 * s0 + a0 * s1 );
+                    gu20  += half * ( a2 * s0 + a0 * s2 );
+                    gu21  += half * ( a2 * s1 + a1 * s2 );
+                    div_u += a0 * s0 + a1 * s1 + a2 * s2;
                 }
             }
-            // invJ (i00..i22) is now out of scope — registers can be reclaimed.
 
-            // ==== Phase 2: Recompute Jacobian + Scatter ====
+            // ==== Phase 2: Scatter, with the same inverse Jacobian ====
             {
-                const GeoT half_dr = static_cast< GeoT >( 0.5 ) * ( r_1 - r_0 );
-                const GeoT r_mid   = static_cast< GeoT >( 0.5 ) * ( r_0 + r_1 );
-
-                const GeoT J_0_0 = r_mid * ( -coords_sh( v0, 0 ) + coords_sh( v1, 0 ) );
-                const GeoT J_0_1 = r_mid * ( -coords_sh( v0, 0 ) + coords_sh( v2, 0 ) );
-                const GeoT J_0_2 =
-                    half_dr * ( ONE_THIRD * ( coords_sh( v0, 0 ) + coords_sh( v1, 0 ) + coords_sh( v2, 0 ) ) );
-
-                const GeoT J_1_0 = r_mid * ( -coords_sh( v0, 1 ) + coords_sh( v1, 1 ) );
-                const GeoT J_1_1 = r_mid * ( -coords_sh( v0, 1 ) + coords_sh( v2, 1 ) );
-                const GeoT J_1_2 =
-                    half_dr * ( ONE_THIRD * ( coords_sh( v0, 1 ) + coords_sh( v1, 1 ) + coords_sh( v2, 1 ) ) );
-
-                const GeoT J_2_0 = r_mid * ( -coords_sh( v0, 2 ) + coords_sh( v1, 2 ) );
-                const GeoT J_2_1 = r_mid * ( -coords_sh( v0, 2 ) + coords_sh( v2, 2 ) );
-                const GeoT J_2_2 =
-                    half_dr * ( ONE_THIRD * ( coords_sh( v0, 2 ) + coords_sh( v1, 2 ) + coords_sh( v2, 2 ) ) );
-
-                const GeoT J_det = J_0_0 * J_1_1 * J_2_2 - J_0_0 * J_1_2 * J_2_1 -
-                                     J_0_1 * J_1_0 * J_2_2 + J_0_1 * J_1_2 * J_2_0 +
-                                     J_0_2 * J_1_0 * J_2_1 - J_0_2 * J_1_1 * J_2_0;
-
-                const GeoT inv_det = static_cast< GeoT >( 1.0 ) / J_det;
-
-                const GeoT i00 = inv_det * ( J_1_1 * J_2_2 - J_1_2 * J_2_1 );
-                const GeoT i01 = inv_det * ( -J_1_0 * J_2_2 + J_1_2 * J_2_0 );
-                const GeoT i02 = inv_det * ( J_1_0 * J_2_1 - J_1_1 * J_2_0 );
-                const GeoT i10 = inv_det * ( -J_0_1 * J_2_2 + J_0_2 * J_2_1 );
-                const GeoT i11 = inv_det * ( J_0_0 * J_2_2 - J_0_2 * J_2_0 );
-                const GeoT i12 = inv_det * ( -J_0_0 * J_2_1 + J_0_1 * J_2_0 );
-                const GeoT i20 = inv_det * ( J_0_1 * J_1_2 - J_0_2 * J_1_1 );
-                const GeoT i21 = inv_det * ( -J_0_0 * J_1_2 + J_0_2 * J_1_0 );
-                const GeoT i22 = inv_det * ( J_0_0 * J_1_1 - J_0_1 * J_1_0 );
-
                 if ( !Diagonal )
                 {
                     constexpr double NEG_TWO_THIRDS = -0.66666666666666663;
