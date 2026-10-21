@@ -115,13 +115,13 @@ class EpsilonDivDivKerngen
     /// occupancy -- which is the whole reason the buffer is off for wide storage.
     using AccT = std::conditional_t< ( sizeof( ArithT ) >= 4 ), ArithT, float >;
     /// Whether the scatter goes through the team's tile buffer instead of straight to
-    /// global memory. Only narrow storage wants it: a 2-byte atomic_add has no
-    /// lock-free form and falls back to a warp spin lock, so routing it through a
-    /// wider tile buffer is worth 1.9x (fp16) to 4.2x (bf16). For 4- and 8-byte
-    /// storage the global atomic is already native, and the buffer is then pure
-    /// overhead -- it costs shared memory, hence occupancy, plus a barrier and a
-    /// second pass, and measured 0.83x (double) and 0.81x (float) on H100.
-    static constexpr bool default_tile_scatter = ( sizeof( ScalarType ) < 4 );
+    /// global memory. With the buffer's accumulation a native shared-space reduction
+    /// (tile_accumulate), H100 level 8 at the swept tile measured, buffer off -> on:
+    /// double 10.16 -> 9.78, float 12.01 -> 12.17, bf16 2.49 -> 8.71, fp16 3.35 -> 8.36
+    /// GDoF/s. The 16-bit arms need it (a 2-byte global atomic has no lock-free form),
+    /// float gains a little, and double -- whose buffer costs twice the scratch, hence
+    /// occupancy -- loses, so the default is on for 4-byte and narrower storage.
+    static constexpr bool default_tile_scatter = ( sizeof( ScalarType ) <= 4 );
     static constexpr int LocalMatrixDim = 18;
     using Grid4DDataLocalMatrices = terra::grid::Grid4DDataMatrices< ScalarType, LocalMatrixDim, LocalMatrixDim, 2 >;
     using LocalMatrixStorage      = linalg::solvers::LocalMatrixStorage< ScalarType, LocalMatrixDim >;
