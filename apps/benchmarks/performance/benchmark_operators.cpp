@@ -1,4 +1,5 @@
 
+#include <stdexcept>
 #include <kernels/common/grid_operations.hpp>
 
 #include "fe/wedge/operators/shell/epsilon_divdiv.hpp"
@@ -552,7 +553,20 @@ BenchmarkData run_precision( const int level,
         }
     }
 
-    const double duration = measure_run_time( executions, op, src, dst );
+    // set_tiling() checks the team size against the launch bounds but not the
+    // scratch against the device: a wide-arithmetic arm on a tall tile can stage
+    // more than a block may hold, which Kokkos reports as a zero maximum team size
+    // at launch. That is "not launchable here" too, so it gets the same -1.
+    double duration = -1.0;
+    try
+    {
+        duration = measure_run_time( executions, op, src, dst );
+    }
+    catch ( const std::runtime_error& e )
+    {
+        logroot << "[run_precision] tile " << tile_lat << "/" << tile_r << "/" << tile_passes
+                << " not launchable for this arm: " << e.what() << std::endl;
+    }
 
     return BenchmarkData{ level, dofs_vec, duration };
 }
@@ -574,8 +588,9 @@ void sweep_one_precision( const std::string& name,
     {
         const auto data = run_precision< S, A, G >(
             level, executions, refinement_level_subdomains, tile_override.lat, tile_override.r, tile_override.passes );
-        const double gdofs = data.dofs / data.duration / 1e9;
-        const double gbs   = modelled_bytes< S >( data.dofs / 3 ) / data.duration / 1e9;
+        const bool   ok    = data.duration > 0.0;
+        const double gdofs = ok ? data.dofs / data.duration / 1e9 : -1.0;
+        const double gbs   = ok ? modelled_bytes< S >( data.dofs / 3 ) / data.duration / 1e9 : -1.0;
 
         table.add_row( { { "precision", name },
                          { "bytes", static_cast< long >( sizeof( S ) ) },
