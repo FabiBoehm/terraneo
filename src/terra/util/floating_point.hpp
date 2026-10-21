@@ -90,6 +90,32 @@ KOKKOS_INLINE_FUNCTION void atomic_add_lockfree( T* dest, U value )
     }
 }
 
+/// Adds two values to two adjacent 16-bit fields that together fill one aligned
+/// 32-bit word, `lower` being the word's first half. On CUDA this is one native
+/// packed reduction (f16x2 / bf16x2), the lock-free form the scalar 2-byte add does
+/// not have; elsewhere it is two CAS adds. Pass 0 for a half that must stay as it is.
+template < FloatingPoint T >
+KOKKOS_INLINE_FUNCTION void atomic_add_packed_pair( T* lower, const float v0, const float v1 )
+{
+    static_assert( sizeof( T ) == 2, "expected a 2-byte field precision" );
+#if defined( __CUDA_ARCH__ )
+    if constexpr ( std::is_same_v< T, Kokkos::Experimental::half_t > )
+    {
+        atomicAdd( reinterpret_cast< __half2* >( lower ), __floats2half2_rn( v0, v1 ) );
+        return;
+    }
+    else if constexpr ( std::is_same_v< T, Kokkos::Experimental::bhalf_t > )
+    {
+        atomicAdd( reinterpret_cast< __nv_bfloat162* >( lower ), __floats2bfloat162_rn( v0, v1 ) );
+        return;
+    }
+#endif
+    if ( v0 != 0.0f )
+        atomic_add_lockfree( lower, v0 );
+    if ( v1 != 0.0f )
+        atomic_add_lockfree( lower + 1, v1 );
+}
+
 /// @brief Unit roundoff of @p T, as a double.
 ///
 /// Kokkos reports the numeric traits of the 16-bit types as bit_comparison_type, and

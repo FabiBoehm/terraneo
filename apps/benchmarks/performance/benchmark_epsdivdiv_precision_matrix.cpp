@@ -32,10 +32,12 @@ void run_precision_matrix( const int min_level,
     sweep_one_precision< double, float >( "float_arith_only", mn, mx, ex, r, world_size );
 
     sweep_one_precision< bhalf, bhalf >( "bf16_matched", mn, mx, ex, r, world_size );
+    sweep_one_precision< bhalf, float >( "bf16_arith_flt", mn, mx, ex, r, world_size );
     sweep_one_precision< bhalf, double >( "bf16_store_only", mn, mx, ex, r, world_size );
     sweep_one_precision< double, bhalf >( "bf16_arith_only", mn, mx, ex, r, world_size );
 
     sweep_one_precision< half, half >( "fp16_matched", mn, mx, ex, r, world_size );
+    sweep_one_precision< half, float >( "fp16_arith_flt", mn, mx, ex, r, world_size );
     sweep_one_precision< half, double >( "fp16_store_only", mn, mx, ex, r, world_size );
     sweep_one_precision< double, half >( "fp16_arith_only", mn, mx, ex, r, world_size );
 }

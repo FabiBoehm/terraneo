@@ -495,31 +495,68 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
 
     // Flush the tile. One global atomic per node and component, against one per
     // wedge-node before: for a 4/8/1 tile that is 675 instead of ~4600. It is also
-    // the only place a 16-bit field precision is narrowed on the way out, so the
-    // 2-byte atomic -- which has no lock-free form and falls back to a warp spin
-    // lock -- is gone from the inner loops entirely.
+    // the only place a 16-bit field precision is narrowed on the way out.
     if constexpr ( TileScatter )
     {
         team.team_barrier();
 
-        Kokkos::parallel_for( Kokkos::TeamThreadRange( team, total_pairs ), [&]( int t ) {
-            const int node = t / nlev;
-            const int lvl  = t - node * nlev;
-            const int xi   = x0 + node % ( lat_tile_ + 1 );
-            const int yi   = y0 + node / ( lat_tile_ + 1 );
-            const int rr   = r0 + lvl;
+        if constexpr ( sizeof( ScalarType ) == 2 )
+        {
+            // A 2-byte field has no lock-free scalar atomic, and the level axis is the
+            // fastest index of each component view, so consecutive levels share one
+            // 32-bit word: a scalar CAS on one half fights the thread on the other
+            // half (measured 5x the requests of one per node, 70% branch efficiency).
+            // So the flush walks the words of each node's level run instead -- one
+            // native packed reduction per word, a zero for any half outside the tile
+            // (the one before the run at an odd start, the one after it at the end:
+            // both belong to a neighbour and adding zero leaves them as they are).
+            const int nwords = nlev / 2 + 1;
+            Kokkos::parallel_for( Kokkos::TeamThreadRange( team, nxy * 3 * nwords ), [&]( int t ) {
+                const int w    = t % nwords;
+                const int d    = ( t / nwords ) % 3;
+                const int node = t / ( 3 * nwords );
+                const int xi   = x0 + node % ( lat_tile_ + 1 );
+                const int yi   = y0 + node / ( lat_tile_ + 1 );
 
-            if ( xi > hex_lat_ || yi > hex_lat_ || rr > hex_rad_ )
-                return;
+                if ( xi > hex_lat_ || yi > hex_lat_ )
+                    return;
 
-            for ( int d = 0; d < 3; ++d )
-            {
-                const AccT v = dst_sh( node, d, lvl );
-                if ( v != AccT( 0 ) )
-                    util::atomic_add_lockfree( &dst_( local_subdomain_id, xi, yi, rr, d ),
-                                               static_cast< ScalarType >( v ) );
-            }
-        } );
+                const int   nlev_valid = Kokkos::min( nlev, hex_rad_ - r0 + 1 );
+                ScalarType* run        = &dst_( local_subdomain_id, xi, yi, r0, d );
+                const int   odd        = ( reinterpret_cast< std::uintptr_t >( run ) & 2u ) ? 1 : 0;
+                const int   l0         = 2 * w - odd;
+                if ( l0 >= nlev_valid )
+                    return;
+
+                const AccT v0 = ( l0 >= 0 ) ? dst_sh( node, d, l0 ) : AccT( 0 );
+                const AccT v1 = ( l0 + 1 < nlev_valid ) ? dst_sh( node, d, l0 + 1 ) : AccT( 0 );
+                if ( v0 == AccT( 0 ) && v1 == AccT( 0 ) )
+                    return;
+
+                util::atomic_add_packed_pair( run + l0, static_cast< float >( v0 ), static_cast< float >( v1 ) );
+            } );
+        }
+        else
+        {
+            Kokkos::parallel_for( Kokkos::TeamThreadRange( team, total_pairs ), [&]( int t ) {
+                const int node = t / nlev;
+                const int lvl  = t - node * nlev;
+                const int xi   = x0 + node % ( lat_tile_ + 1 );
+                const int yi   = y0 + node / ( lat_tile_ + 1 );
+                const int rr   = r0 + lvl;
+
+                if ( xi > hex_lat_ || yi > hex_lat_ || rr > hex_rad_ )
+                    return;
+
+                for ( int d = 0; d < 3; ++d )
+                {
+                    const AccT v = dst_sh( node, d, lvl );
+                    if ( v != AccT( 0 ) )
+                        util::atomic_add_lockfree( &dst_( local_subdomain_id, xi, yi, rr, d ),
+                                                   static_cast< ScalarType >( v ) );
+                }
+            } );
+        }
     }
 }
 
