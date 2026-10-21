@@ -19,5 +19,15 @@ add_terra_performance_benchmark(benchmark_epsdivdiv_precision_matrix)
 add_terra_performance_benchmark(benchmark_epsdivdiv_precision_ablation)
 add_terra_performance_benchmark(benchmark_epsdivdiv_tiles)
 add_terra_performance_benchmark(benchmark_epsdivdiv_stored)
+
+# Device line info on the precision sweep only, for ncu source-level profiling of the
+# EpsDivDiv kernels (ncu --section SourceCounters / --import-source). Off by default:
+# it is a profiling build, not a measurement build.
+option(TERRA_BENCHMARK_LINEINFO "Compile benchmark_epsdivdiv_precision_sweep with device line info" OFF)
+if (TERRA_BENCHMARK_LINEINFO)
+    target_compile_options(benchmark_epsdivdiv_precision_sweep PRIVATE
+        $<$<CXX_COMPILER_ID:NVHPC>:-gpu=lineinfo>
+        $<$<CXX_COMPILER_ID:NVIDIA>:-lineinfo>)
+endif ()
 add_terra_performance_benchmark(benchmark_communication)
 
