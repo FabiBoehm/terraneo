@@ -108,6 +108,33 @@ KOKKOS_INLINE_FUNCTION void cp_async( T* smem, const T* gmem )
 #endif
 }
 
+/// Reduction into global memory with the address space stated: `red.global.add`.
+/// Kokkos::atomic_add on a generic pointer makes nvcc emit a generic RED behind an
+/// address-space query and a branch (QSPC / BSSY / BSYNC around every atomic in the
+/// warp-owner scatter); naming the space removes all of that. Elsewhere the lock-free
+/// Kokkos add.
+template < typename T, typename U >
+KOKKOS_INLINE_FUNCTION void atomic_add_global( T* dest, const U value )
+{
+#if defined( __CUDA_ARCH__ ) && __CUDA_ARCH__ >= 600
+    if constexpr ( std::is_same_v< T, float > )
+    {
+        asm volatile( "red.global.add.f32 [%0], %1;" ::"l"( __cvta_generic_to_global( dest ) ),
+                      "f"( static_cast< float >( value ) )
+                      : "memory" );
+        return;
+    }
+    else if constexpr ( std::is_same_v< T, double > )
+    {
+        asm volatile( "red.global.add.f64 [%0], %1;" ::"l"( __cvta_generic_to_global( dest ) ),
+                      "d"( static_cast< double >( value ) )
+                      : "memory" );
+        return;
+    }
+#endif
+    atomic_add_lockfree( dest, value );
+}
+
 /// Value of @p v in the lane `delta` below the caller's, across the whole warp;
 /// lanes below `delta` get their own value back (the CUDA shfl_up convention). Only
 /// meaningful on a GPU backend, which is the only place the warp-owner scatter runs.
@@ -140,14 +167,26 @@ KOKKOS_INLINE_FUNCTION void atomic_add_packed_pair( T* lower, const float v0, co
 {
     static_assert( sizeof( T ) == 2, "expected a 2-byte field precision" );
 #if defined( __CUDA_ARCH__ )
+    // Address space stated, see atomic_add_global: the generic atomicAdd carries a
+    // space query and a branch per call.
     if constexpr ( std::is_same_v< T, Kokkos::Experimental::half_t > )
     {
-        atomicAdd( reinterpret_cast< __half2* >( lower ), __floats2half2_rn( v0, v1 ) );
+        const __half2   h = __floats2half2_rn( v0, v1 );
+        const unsigned  b = *reinterpret_cast< const unsigned* >( &h );
+        asm volatile( "red.global.add.noftz.f16x2 [%0], %1;" ::"l"( __cvta_generic_to_global( lower ) ), "r"( b )
+                      : "memory" );
         return;
     }
     else if constexpr ( std::is_same_v< T, Kokkos::Experimental::bhalf_t > )
     {
+#if __CUDA_ARCH__ >= 900
+        const __nv_bfloat162 h = __floats2bfloat162_rn( v0, v1 );
+        const unsigned       b = *reinterpret_cast< const unsigned* >( &h );
+        asm volatile( "red.global.add.noftz.bf16x2 [%0], %1;" ::"l"( __cvta_generic_to_global( lower ) ), "r"( b )
+                      : "memory" );
+#else
         atomicAdd( reinterpret_cast< __nv_bfloat162* >( lower ), __floats2bfloat162_rn( v0, v1 ) );
+#endif
         return;
     }
 #endif

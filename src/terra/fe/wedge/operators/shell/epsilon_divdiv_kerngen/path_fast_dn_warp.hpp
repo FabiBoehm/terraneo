@@ -17,11 +17,13 @@
 // corners are then reduced to their owner lane with warp shuffles -- a lane owns
 // column (tx, ty); the lanes tx-1, ty-1 and (tx-1, ty-1) hold the other three
 // corner contributions -- and the owner writes the node once: a plain store for a
-// node interior to the team's tile, a global reduction where another team or warp
-// also contributes (the tile's boundary and the first row of every warp patch,
-// whose lower neighbour is a different warp). The warp patch is PW x PH columns
-// with PW = lat and PH = 32 / lat; lanes on a patch's right or top edge send their
-// outward contributions with a global reduction instead of a shuffle.
+// node interior to the team's tile, a global reduction where another team also
+// contributes (the tile's boundary and both ends of the radial run). The warp patch
+// is PW x PH columns with PW = lat and PH = 32 / lat; lanes on a patch's right edge
+// send their outward contributions with a global reduction instead of a shuffle,
+// lanes on its top row hand them to the warp above through a small shared-memory
+// seam (double buffered over the level parity, one team barrier per level), and
+// only the tile's own top row sends them with a global reduction.
 //
 // The gather side profits as well: the 4 columns' field values at the upper level
 // are the lower level of the next cell, so each cell loads 4 x (3 + 1) values from
@@ -59,6 +61,16 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
         shmem_block_bytes( sizeof( GeomT ) * ( size_t( nxy ) * 3 + size_t( nlev ) ) ) ) );
     auto* field_mem = reinterpret_cast< ArithT* >( team.team_shmem().get_shmem( shmem_block_bytes(
         sizeof( ArithT ) * ( size_t( nxy ) * 3 * nlev + size_t( nxy ) * nlev ) ) ) );
+
+    constexpr int NW = ( lat_tile * lat_tile ) / 32; // warps per team
+    AccT*         seam_mem = nullptr;
+    if constexpr ( NW > 1 )
+        seam_mem = reinterpret_cast< AccT* >(
+            team.team_shmem().get_shmem( shmem_block_bytes( sizeof( AccT ) * size_t( 2 ) * ( NW - 1 ) * PW * 6 ) ) );
+    // seam( parity, warp, column, component, corner ): corner 0 = straight above, 1 = above-right
+    auto seam = [&]( int par, int w, int col, int d, int corner ) -> AccT& {
+        return seam_mem[( ( ( par * ( NW - 1 ) + w ) * PW + col ) * 3 + d ) * 2 + corner];
+    };
 
     using Scratch       = typename Team::scratch_memory_space;
     using ScratchCoords = Kokkos::View< GeomT[nxy][3], Kokkos::LayoutRight, Scratch, Kokkos::MemoryUnmanaged >;
@@ -136,10 +148,10 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
     // whose column lies outside the grid just contributes zeros.
     const bool cell_active = ( x_cell < hex_lat_ && y_cell < hex_lat_ );
     const int  lane        = team.team_rank() % 32;
-    const int  ltx         = lane % PW; // == tx for lat_tile == PW
-    const int  lty         = lane / PW; // row inside the warp patch
+    const int  wy          = team.team_rank() / 32; // warp index = row block of the tile
+    const int  ltx         = lane % PW;             // == tx for lat_tile == PW
+    const int  lty         = lane / PW;             // row inside the warp patch
     (void) tx;
-    (void) ty;
 
     constexpr GeoT ONE_THIRD = static_cast< GeoT >( 1.0 / 3.0 );
     constexpr GeoT ONE_SIXTH = static_cast< GeoT >( 1.0 / 6.0 );
@@ -194,32 +206,63 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
     // contributions to the owner lane, write once, send the outward edge
     // contributions of the patch with global reductions.
     auto flush_level = [&]( AccT ( &v )[4][3], const int lvl, const bool level_boundary ) {
-        const int rr = r0 + lvl;
+        const int rr  = r0 + lvl;
+        const int par = lvl & 1;
+
+        // Owner reduction. shfl_up leaves the first `delta` lanes with their own
+        // value, so those take 0 explicitly; the first row of a warp gets its
+        // from-below values through the seam instead.
+        AccT own[3];
 #pragma unroll
         for ( int d = 0; d < 3; ++d )
         {
-            // Owner reduction. shfl_up leaves the first `delta` lanes with their own
-            // value, so those take 0 explicitly.
             const AccT from_left  = util::warp_shfl_up( v[1][d], 1 );
             const AccT from_below = util::warp_shfl_up( v[2][d], PW );
             const AccT from_diag  = util::warp_shfl_up( v[3][d], PW + 1 );
-            AccT own = v[0][d];
-            own += ( ltx > 0 ) ? from_left : AccT( 0 );
-            own += ( lty > 0 ) ? from_below : AccT( 0 );
-            own += ( ltx > 0 && lty > 0 ) ? from_diag : AccT( 0 );
+            own[d]                = v[0][d];
+            own[d] += ( ltx > 0 ) ? from_left : AccT( 0 );
+            own[d] += ( lty > 0 ) ? from_below : AccT( 0 );
+            own[d] += ( ltx > 0 && lty > 0 ) ? from_diag : AccT( 0 );
+        }
 
-            if ( cell_active && rr <= hex_rad_ )
+        if constexpr ( NW > 1 )
+        {
+            if ( lty == PH - 1 && wy < NW - 1 )
             {
-                // Interior node of the tile: only this team touches it, and inside the
-                // team only this lane -- unless its lower row is another warp's.
-                const bool interior = ( tx > 0 ) && ( lty > 0 ) && !level_boundary && replace_mode;
-                if ( interior )
-                    dst_( local_subdomain_id, x_cell, y_cell, rr, d ) = static_cast< ScalarType >( own );
-                else if ( own != AccT( 0 ) )
-                    global_add( &dst_( local_subdomain_id, x_cell, y_cell, rr, d ), own );
+#pragma unroll
+                for ( int d = 0; d < 3; ++d )
+                {
+                    seam( par, wy, ltx, d, 0 ) = v[2][d];
+                    seam( par, wy, ltx, d, 1 ) = v[3][d];
+                }
+            }
+            team.team_barrier();
+            if ( lty == 0 && wy > 0 )
+            {
+#pragma unroll
+                for ( int d = 0; d < 3; ++d )
+                {
+                    own[d] += seam( par, wy - 1, ltx, d, 0 );
+                    own[d] += ( ltx > 0 ) ? seam( par, wy - 1, ltx - 1, d, 1 ) : AccT( 0 );
+                }
+            }
+        }
 
-                // Patch edges: right column goes to column tx+1 (another warp or the
-                // tile halo), top row to row ty+1.
+        if ( cell_active && rr <= hex_rad_ )
+        {
+            // Interior node of the tile: only this team touches it, and inside the
+            // team only this lane.
+            const bool interior = ( tx > 0 ) && ( ty > 0 ) && !level_boundary && replace_mode;
+#pragma unroll
+            for ( int d = 0; d < 3; ++d )
+            {
+                if ( interior )
+                    dst_( local_subdomain_id, x_cell, y_cell, rr, d ) = static_cast< ScalarType >( own[d] );
+                else if ( own[d] != AccT( 0 ) )
+                    global_add( &dst_( local_subdomain_id, x_cell, y_cell, rr, d ), own[d] );
+
+                // Tile edges: right column goes to column tx+1 of the next tile, the
+                // tile's top row to row ty+1.
                 if ( ltx == PW - 1 )
                 {
                     if ( v[1][d] != AccT( 0 ) )
@@ -227,7 +270,7 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                     if ( v[3][d] != AccT( 0 ) )
                         global_add( &dst_( local_subdomain_id, x_cell + 1, y_cell + 1, rr, d ), v[3][d] );
                 }
-                if ( lty == PH - 1 )
+                if ( lty == PH - 1 && wy == NW - 1 )
                 {
                     if ( v[2][d] != AccT( 0 ) )
                         global_add( &dst_( local_subdomain_id, x_cell, y_cell + 1, rr, d ), v[2][d] );

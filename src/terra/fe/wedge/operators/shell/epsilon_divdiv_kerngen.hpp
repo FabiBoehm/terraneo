@@ -989,7 +989,12 @@ class EpsilonDivDivKerngen
         // stops being double, and the apply then reads garbage and produces NaN.
         const size_t geom_scalars  = size_t( nxy ) * 3 + size_t( nlev );
         const size_t field_scalars = size_t( nxy ) * 3 * nlev + size_t( nxy ) * nlev;
-        const size_t acc_scalars   = ( tile_scatter_ == 1 ) ? size_t( nxy ) * 3 * nlev : 0;
+        // Mode 1: the accumulation buffer. Mode 2: the seam between the warps of a
+        // team (two parities x (warps - 1) rows x lat columns x 3 components x 2 corners).
+        const int    nwarps      = ( lat_tile_ * lat_tile_ ) / 32;
+        const size_t acc_scalars = ( tile_scatter_ == 1 ) ? size_t( nxy ) * 3 * nlev
+                                   : ( tile_scatter_ == 2 && nwarps > 1 ) ? size_t( 2 ) * ( nwarps - 1 ) * lat_tile_ * 6
+                                                                          : 0;
 
         return shmem_block_bytes( sizeof( GeomT ) * geom_scalars ) +
                shmem_block_bytes( sizeof( ArithT ) * field_scalars ) +
@@ -1164,7 +1169,7 @@ class EpsilonDivDivKerngen
         }
         else
         {
-            util::atomic_add_lockfree( p, v );
+            util::atomic_add_global( p, v );
         }
     }
 
