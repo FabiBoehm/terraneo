@@ -1,11 +1,12 @@
 // Mixed-precision study of the Stokes solver.
 //
-// Two precisions are selectable at runtime and both default to double:
+// Three precisions are selectable at runtime and all default to double:
 //   --ablock-prec double|float|bf16|fp16   the working precision of the whole
 //       velocity V-cycle -- level vectors, coarse operators, Chebyshev smoothers,
-//       transfers, inverse diagonals and the coarse FGMRES. Node coordinates stay
-//       double in every operator (CoordScalarT), since the Jacobian is formed by
-//       differencing them and that loses the geometry at 16 bits.
+//       transfers, inverse diagonals and the coarse FGMRES.
+//   --ablock-geom double|low   the node coordinates and the Jacobian formed from
+//       them (CoordScalarT). "low" is float, never 16 bits: the Jacobian is formed
+//       by differencing the coordinates and that loses the geometry at 16 bits.
 //   --krylov-precision double|single|bf16|fp16   the storage precision of the outer
 //       FGMRES Krylov basis (via FGMRESLowMem).
 // Everything else -- the outer FGMRES, the Stokes operator, the pressure mass matrix
@@ -298,6 +299,11 @@ enum class ABlockPrec { DOUBLE, FLOAT, FP16, BF16, NONE };
 /// both tells you whether a degradation came from the bus or from the contraction.
 enum class ABlockArith { DOUBLE, LOW };
 
+/// Geometry precision of the A-block V-cycle: the stored coordinates and radii and,
+/// through GeoT, the Jacobian arithmetic. LOW is float (16-bit geometry is never
+/// offered: the coordinate differencing would be left with three decimal digits).
+enum class ABlockGeom { DOUBLE, LOW };
+
 /// Outer iteration. FGMRES is the Krylov method; IR is pure iterative refinement,
 /// x <- x + M^-1 (b - A x), with the residual and the update in double and M^-1 one
 /// application of the block preconditioner.
@@ -313,6 +319,11 @@ inline const char* outer_solver_name( OuterSolver o ) { return o == OuterSolver:
 inline const char* ablock_arith_name( ABlockArith a )
 {
     return a == ABlockArith::LOW ? "low" : "double";
+}
+
+inline const char* ablock_geom_name( ABlockGeom g )
+{
+    return g == ABlockGeom::LOW ? "low" : "double";
 }
 
 inline const char* ablock_prec_name( ABlockPrec p )
@@ -343,12 +354,13 @@ inline const char* ablock_prec_note( ABlockPrec p )
 /// @brief The entire velocity-block V-cycle built in precision M, driven by the
 ///        double-precision outer solver through VelocityPrecHandle.
 ///
-/// Geometry stays double in every operator (CoordScalarT = double), so M governs only
+/// Geometry is GeomM (CoordScalarT): the coordinates and radii are regenerated per
+/// level in that precision, which is also what the Jacobian is formed in. M governs
 /// the stored fields: the level vectors, the viscosity coefficient, the inverse
 /// diagonals and the coarse solver's Krylov workspace. convert() runs at the
 /// double<->M boundary on entry and exit, which is two passes over one fine-level
 /// vector per application -- the V-cycle itself never leaves M.
-template < typename M, typename ArithM = double >
+template < typename M, typename ArithM = double, typename GeomM = double >
 class LowPrecABlock final
 : public linalg::solvers::VelocityPrecHandle<
       fe::wedge::operators::shell::EpsilonDivDivKerngen< double > >::Impl
@@ -358,7 +370,7 @@ class LowPrecABlock final
     using OuterVec = linalg::VectorQ1Vec< double, 3 >;
 
     // < field precision, VecDim, coordinate precision, fast-path arithmetic precision >
-    using ViscM  = fe::wedge::operators::shell::EpsilonDivDivKerngen< M, 3, double, ArithM >;
+    using ViscM  = fe::wedge::operators::shell::EpsilonDivDivKerngen< M, 3, GeomM, ArithM >;
     using ProlM  = fe::wedge::operators::shell::ProlongationVecConstant< M >;
     using RestM  = fe::wedge::operators::shell::RestrictionVecConstant< M >;
     using SmooM  = linalg::solvers::Chebyshev< ViscM >;
@@ -394,7 +406,15 @@ class LowPrecABlock final
             linalg::convert( inverse_diagonals[l], inv_diag_m_.back() );
         }
 
-        // Coarse operators and transfers in M; coordinates handed over as double.
+        // The coordinates are a function of the domain alone, so the GeomM copies are
+        // regenerated here rather than converted from the double ones handed in.
+        for ( size_t l = 0; l < num_levels; ++l )
+        {
+            coords_g_.push_back( grid::shell::subdomain_unit_sphere_single_shell_coords< GeomM >( domains[l] ) );
+            radii_g_.push_back( grid::shell::subdomain_shell_radii< GeomM >( domains[l] ) );
+        }
+
+        // Coarse operators and transfers in M, geometry in GeomM.
         for ( size_t l = 0; l < num_levels; ++l )
         {
             tmp_.emplace_back( "mp_tmp_" + std::to_string( l ), domains[l], mask_data[l] );
@@ -402,7 +422,7 @@ class LowPrecABlock final
             {
                 tmp_r_.emplace_back( "mp_tmp_r_" + std::to_string( l ), domains[l], mask_data[l] );
                 tmp_e_.emplace_back( "mp_tmp_e_" + std::to_string( l ), domains[l], mask_data[l] );
-                a_c_.emplace_back( domains[l], coords_shell[l], coords_radii[l],
+                a_c_.emplace_back( domains[l], coords_g_[l], radii_g_[l],
                                    boundary_mask_data[l], eta_m_[l].grid_data(), bcs, false );
                 a_c_.back().set_hourglass_coefficient( hourglass_c );
                 p_.emplace_back( linalg::OperatorApplyMode::Add );
@@ -412,7 +432,7 @@ class LowPrecABlock final
 
         // Finest-level operator in M: Multigrid takes the fine operator at solve time,
         // and the one the outer solver passes is double, so this hierarchy owns its own.
-        a_fine_ = std::make_unique< ViscM >( domains[fine], coords_shell[fine], coords_radii[fine],
+        a_fine_ = std::make_unique< ViscM >( domains[fine], coords_g_[fine], radii_g_[fine],
                                              boundary_mask_data[fine], eta_m_[fine].grid_data(), bcs, false );
         a_fine_->set_hourglass_coefficient( hourglass_c );
 
@@ -614,6 +634,8 @@ class LowPrecABlock final
     std::vector< ScalM > eta_m_;
     std::vector< VecM >  inv_diag_m_;
     std::vector< VecM >  tmp_, tmp_r_, tmp_e_;
+    std::vector< Grid3DDataVec< GeomM, 3 > > coords_g_;
+    std::vector< Grid2DDataScalar< GeomM > >  radii_g_;
     std::vector< ViscM > a_c_;
     std::vector< ProlM > p_;
     std::vector< RestM > r_;
@@ -660,6 +682,7 @@ RunResult run_ablock_mg( int    min_level,
                          KrylovPrec krylov_prec, // Krylov-basis precision for the full-Stokes outer FGMRES
                          ABlockPrec  ablock_prec, // working precision of the A-block V-cycle preconditioner
                          ABlockArith ablock_arith, // fast-path arithmetic precision in that V-cycle
+                         ABlockGeom  ablock_geom,  // geometry precision in that V-cycle
                          double      hourglass_c, // rank-6 hourglass stabilization coefficient (0 = off)
                          double      outer_tol,   // outer relative residual tolerance
                          OuterSolver outer_solver, // fgmres or pure iterative refinement
@@ -997,30 +1020,36 @@ RunResult run_ablock_mg( int    min_level,
     VectorQ1IsoQ2Q1< ScalarType > tri_tmp(
         "tri_tmp", domains[velocity_level], domains[pressure_level], mask_data[velocity_level], mask_data[pressure_level] );
     std::shared_ptr< typename VelPrecHandle::Impl > vel_impl;
-    // One instantiation per (storage, arithmetic) pair; the constructor arguments are
-    // identical, so the body lives in a templated lambda.
+    // One instantiation per (storage, arithmetic, geometry) triple; the constructor
+    // arguments are identical, so the body lives in a templated lambda. A reduced
+    // geometry is only offered alongside reduced arithmetic: it is the arm "everything
+    // the V-cycle can do in M", not a dimension to be crossed with the others.
     using ImplPtr  = std::shared_ptr< typename VelPrecHandle::Impl >;
-    auto make_impl = [&]< typename M, typename ArithM >() -> ImplPtr {
-        return std::make_shared< LowPrecABlock< M, ArithM > >(
+    auto make_impl = [&]< typename M, typename ArithM, typename GeomM >() -> ImplPtr {
+        return std::make_shared< LowPrecABlock< M, ArithM, GeomM > >(
             domains, coords_shell, coords_radii, mask_data, boundary_mask_data, eta,
             inverse_diagonals, bcs, cheby_order, 3, coarse_tol, hourglass_c );
     };
     using Half           = Kokkos::Experimental::half_t;
     using BHalf          = Kokkos::Experimental::bhalf_t;
     const bool low_arith = ( ablock_arith == ABlockArith::LOW );
+    const bool low_geom  = low_arith && ( ablock_geom == ABlockGeom::LOW );
     switch ( ablock_prec )
     {
     case ABlockPrec::FLOAT:
-        vel_impl = low_arith ? make_impl.template operator()< float, float >()
-                             : make_impl.template operator()< float, double >();
+        vel_impl = low_geom    ? make_impl.template operator()< float, float, float >()
+                   : low_arith ? make_impl.template operator()< float, float, double >()
+                               : make_impl.template operator()< float, double, double >();
         break;
     case ABlockPrec::FP16:
-        vel_impl = low_arith ? make_impl.template operator()< Half, Half >()
-                             : make_impl.template operator()< Half, double >();
+        vel_impl = low_geom    ? make_impl.template operator()< Half, Half, float >()
+                   : low_arith ? make_impl.template operator()< Half, Half, double >()
+                               : make_impl.template operator()< Half, double, double >();
         break;
     case ABlockPrec::BF16:
-        vel_impl = low_arith ? make_impl.template operator()< BHalf, BHalf >()
-                             : make_impl.template operator()< BHalf, double >();
+        vel_impl = low_geom    ? make_impl.template operator()< BHalf, BHalf, float >()
+                   : low_arith ? make_impl.template operator()< BHalf, BHalf, double >()
+                               : make_impl.template operator()< BHalf, double, double >();
         break;
     case ABlockPrec::NONE:
         // Control: no velocity preconditioner at all, so the outer FGMRES sees only
@@ -1429,6 +1458,7 @@ int main( int argc, char** argv )
     KrylovPrec krylov_prec = KrylovPrec::DOUBLE; // --krylov-precision double|single|bf16|fp16 (full-Stokes only)
     ABlockPrec  ablock_prec  = ABlockPrec::DOUBLE;  // --ablock-prec double|float|fp16|bf16 (full-Stokes only)
     ABlockArith ablock_arith = ABlockArith::LOW; // --ablock-arith low|double (low = follow --ablock-prec)
+    ABlockGeom  ablock_geom  = ABlockGeom::DOUBLE; // --ablock-geom double|low (low = float coordinates and Jacobian)
     double      hourglass_c  = 0.0;              // --hourglass C (0 = off, 0.3 as in EpsDivDivSimpleStab)
     bool        no_stokes_prec = false;         // --no-stokes-prec (unpreconditioned control)
     double      outer_tol    = 1e-6;             // --outer-tol T
@@ -1469,6 +1499,12 @@ int main( int argc, char** argv )
             const std::string q = argv[i + 1];
             ablock_arith        = ( q == "low" || q == "field" || q == "reduced" ) ? ABlockArith::LOW
                                                                                   : ABlockArith::DOUBLE;
+        }
+        else if ( a == "--ablock-geom" )
+        {
+            const std::string q = argv[i + 1];
+            ablock_geom         = ( q == "low" || q == "float" || q == "reduced" ) ? ABlockGeom::LOW
+                                                                                  : ABlockGeom::DOUBLE;
         }
         else if ( a == "--ablock-prec" )
         {
@@ -1541,6 +1577,7 @@ int main( int argc, char** argv )
                                            + ", A-block prec = " + ablock_prec_name( ablock_prec )
                                            + ablock_prec_note( ablock_prec )
                                            + ", A-block arith = " + ablock_arith_name( ablock_arith )
+                                           + ", A-block geom = " + ablock_geom_name( ablock_geom )
                                            + ", hourglass = " + std::to_string( hourglass_c )
                                            + ", outer tol = " + std::to_string( outer_tol )
                                            + ", outer restart = "
@@ -1569,7 +1606,7 @@ int main( int argc, char** argv )
             const auto res =
                 run_ablock_mg( min_level, max_level, cheby_order, perturb_amp, rmu, s.gca, no_stokes_prec,
                                max_cycles, bc, s.interp,
-                               visc_profile, coarse_tol, full_stokes, krylov_prec, ablock_prec, ablock_arith,
+                               visc_profile, coarse_tol, full_stokes, krylov_prec, ablock_prec, ablock_arith, ablock_geom,
                                hourglass_c, outer_tol, outer_solver, outer_restart_in );
 
             summary->add_row(
@@ -1580,6 +1617,7 @@ int main( int argc, char** argv )
                     no_stokes_prec ? std::string( "unpreconditioned" )
                                    : std::string( ablock_prec_name( ablock_prec ) ) },
                   { "ablock_arith", std::string( ablock_arith_name( ablock_arith ) ) },
+                  { "ablock_geom", std::string( ablock_geom_name( ablock_geom ) ) },
                   { "hourglass", hourglass_c },
                   { "outer_solver", std::string( outer_solver_name( outer_solver ) ) },
                   { "scheme", std::string( s.name ) },
