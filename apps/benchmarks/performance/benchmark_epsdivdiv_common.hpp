@@ -177,9 +177,13 @@ BenchmarkData run_precision( const int level,
     }
     if ( tile_scatter_override >= 0 )
     {
-        op.set_tile_scatter( tile_scatter_override == 1 );
+        // The warp-owner scatter only has lat-8, r-1 shapes; any other tile in a
+        // mode-2 sweep is "not launchable" rather than silently retiled.
+        if ( tile_scatter_override == 2 && !( tile_lat == 8 && tile_r == 1 ) )
+            return BenchmarkData{ level, dofs_vec, -1.0 };
+        op.set_tile_scatter( tile_scatter_override );
     }
-    logroot << "[run_precision] tile scatter " << ( op.tile_scatter() ? "on" : "off" ) << std::endl;
+    logroot << "[run_precision] tile scatter mode " << op.tile_scatter() << std::endl;
 
     // set_tiling() checks the team size against the launch bounds but not the
     // scratch against the device: a wide-arithmetic arm on a tall tile can stage
@@ -279,7 +283,7 @@ int sweep_main( int argc, char** argv, const char* description, Run&& run )
     util::add_option_with_default( app, "--tile-r", p.tile_r, "Radial tile size (0: operator default)." );
     util::add_option_with_default( app, "--tile-passes", p.tile_passes, "Radial passes per team (0: operator default)." );
     util::add_option_with_default(
-        app, "--tile-scatter", p.tile_scatter, "DN scatter through the tile buffer: -1 per-precision default, 0 off, 1 on." );
+        app, "--tile-scatter", p.tile_scatter, "DN scatter: -1 per-precision default, 0 straight to global, 1 tile buffer, 2 warp-owner (lat 8, r 1)." );
 
     CLI11_PARSE( app, argc, argv );
 

@@ -18,6 +18,8 @@
 #include "util/floating_point.hpp"
 #include "util/timer.hpp"
 
+#include <cstdlib>
+
 namespace terra::fe::wedge::operators::shell {
 
 using grid::shell::get_boundary_condition_flag;
@@ -121,7 +123,11 @@ class EpsilonDivDivKerngen
     /// GDoF/s. The 16-bit arms need it (a 2-byte global atomic has no lock-free form),
     /// float gains a little, and double -- whose buffer costs twice the scratch, hence
     /// occupancy -- loses, so the default is on for 4-byte and narrower storage.
-    static constexpr bool default_tile_scatter = ( sizeof( ScalarType ) <= 4 );
+    /// Scatter modes of the fast Dirichlet/Neumann path: 0 straight to global memory,
+    /// 1 through the team's tile buffer, 2 the warp-owner reduction (no shared-memory
+    /// atomics at all; see path_fast_dn_warp.hpp). Mode 2 needs an 8-wide lateral
+    /// tile with r_tile = 1 and a compiled level count; set_tile_scatter() retiles.
+    static constexpr int default_tile_scatter = ( sizeof( ScalarType ) <= 4 ) ? 1 : 0;
     static constexpr int LocalMatrixDim = 18;
     using Grid4DDataLocalMatrices = terra::grid::Grid4DDataMatrices< ScalarType, LocalMatrixDim, LocalMatrixDim, 2 >;
     using LocalMatrixStorage      = linalg::solvers::LocalMatrixStorage< ScalarType, LocalMatrixDim >;
@@ -140,7 +146,7 @@ class EpsilonDivDivKerngen
     BoundaryConditions                                       bcs_;    ///< CMB and SURFACE boundary conditions
 
     bool diagonal_; ///< If true, apply diagonal-only action
-    bool tile_scatter_ = default_tile_scatter; ///< Fast DN path: accumulate in the tile buffer first
+    int tile_scatter_ = default_tile_scatter; ///< Fast DN path scatter mode (see default_tile_scatter)
 
     /// Hourglass (rank-6 gamma) stabilization coefficient; 0 disables it entirely.
     /// One-point quadrature on the wedge leaves two zero-energy modes per element,
@@ -338,6 +344,12 @@ class EpsilonDivDivKerngen
 
         // Host-side path selection (no in-kernel path branching)
         update_kernel_path_flag_host_only();
+
+        // Measurement switch without a code change: TERRA_EPSDIVDIV_TILE_SCATTER=0|1|2.
+        if ( const char* env = std::getenv( "TERRA_EPSDIVDIV_TILE_SCATTER" ) )
+        {
+            set_tile_scatter( std::atoi( env ) );
+        }
 
         util::logroot << "[EpsilonDivDiv] tile size (x,y,r)=(" << lat_tile_ << "," << lat_tile_ << "," << r_tile_
                       << "), r_passes=" << r_passes_ << std::endl;
@@ -564,8 +576,45 @@ class EpsilonDivDivKerngen
     /// atomic per node) instead of straight to global memory (one per wedge-node).
     /// Defaults to on for 16-bit storage only; both variants are compiled, so this is
     /// a measurement switch as much as a setting. Call before the first apply().
-    void set_tile_scatter( bool on ) { tile_scatter_ = on; }
-    bool tile_scatter() const { return tile_scatter_; }
+    void set_tile_scatter( int mode )
+    {
+        tile_scatter_ = mode;
+        if ( mode == 2 && !warp_scatter_available() )
+        {
+            util::logroot << "[EpsilonDivDiv] warp-owner scatter needs a CUDA or HIP backend; using the tile buffer"
+                          << std::endl;
+            tile_scatter_ = 1;
+            return;
+        }
+        if ( mode == 2 && !warp_shape_ok() )
+        {
+            // The warp path has compile-time shapes only: lat 8, r_tile 1, 8/16/32/64 cells.
+            if ( hex_lat_ < 8 || !set_tiling( 8, 1, 8, false ) )
+            {
+                util::logroot << "[EpsilonDivDiv] warp-owner scatter: no usable tile at this size; using the tile buffer"
+                              << std::endl;
+                tile_scatter_ = 1;
+            }
+        }
+    }
+    int tile_scatter() const { return tile_scatter_; }
+
+    static constexpr bool warp_scatter_available()
+    {
+#if defined( KOKKOS_ENABLE_CUDA ) || defined( KOKKOS_ENABLE_HIP )
+        return true;
+#else
+        return false;
+#endif
+    }
+
+    /// The warp-owner path is compiled for (lat, levels per team) = (8, 9), (8, 17),
+    /// (8, 33) and (8, 65), i.e. tiles 8/1/8, 8/1/16, 8/1/32, 8/1/64.
+    bool warp_shape_ok() const
+    {
+        const int nlev = r_tile_block_ + 1;
+        return lat_tile_ == 8 && r_tile_ == 1 && ( nlev == 9 || nlev == 17 || nlev == 33 || nlev == 65 );
+    }
     double hourglass_coefficient() const { return stab_c_; }
 
     void set_boundary_conditions( BoundaryConditions bcs )
@@ -793,13 +842,22 @@ class EpsilonDivDivKerngen
         {
             Kokkos::TeamPolicy< Kokkos::LaunchBounds< TERRA_EPSDIVDIV_MAX_TEAM, TERRA_EPSDIVDIV_MIN_WAVES > > dn_policy( blocks_, team_size_ );
             dn_policy.set_scratch_size( 0, Kokkos::PerTeam( team_shmem_size_dn( team_size_ ) ) );
-            // Four variants: matvec or diagonal, scatter through the tile buffer or not.
+            // Scatter variants: matvec or diagonal, through the tile buffer or not, or
+            // the warp-owner reduction (matvec only; the diagonal is computed once).
+            const bool tile_buffer = ( tile_scatter_ == 1 );
             if ( diagonal_ )
-                tile_scatter_ ? launch_fast_dirichlet_neumann< true, true >( dn_policy )
-                              : launch_fast_dirichlet_neumann< true, false >( dn_policy );
+                tile_buffer ? launch_fast_dirichlet_neumann< true, true >( dn_policy )
+                            : launch_fast_dirichlet_neumann< true, false >( dn_policy );
+            else if ( tile_scatter_ == 2 && warp_shape_ok() )
+            {
+                // 64-thread teams: eight of them per SM still leave 128 registers each.
+                Kokkos::TeamPolicy< Kokkos::LaunchBounds< 64, 8 > > warp_policy( blocks_, team_size_ );
+                warp_policy.set_scratch_size( 0, Kokkos::PerTeam( team_shmem_size_dn( team_size_ ) ) );
+                launch_fast_dn_warp( warp_policy );
+            }
             else
-                tile_scatter_ ? launch_fast_dirichlet_neumann< false, true >( dn_policy )
-                              : launch_fast_dirichlet_neumann< false, false >( dn_policy );
+                tile_buffer ? launch_fast_dirichlet_neumann< false, true >( dn_policy )
+                            : launch_fast_dirichlet_neumann< false, false >( dn_policy );
         }
 
         Kokkos::fence();
@@ -931,7 +989,7 @@ class EpsilonDivDivKerngen
         // stops being double, and the apply then reads garbage and produces NaN.
         const size_t geom_scalars  = size_t( nxy ) * 3 + size_t( nlev );
         const size_t field_scalars = size_t( nxy ) * 3 * nlev + size_t( nxy ) * nlev;
-        const size_t acc_scalars   = tile_scatter_ ? size_t( nxy ) * 3 * nlev : 0;
+        const size_t acc_scalars   = ( tile_scatter_ == 1 ) ? size_t( nxy ) * 3 * nlev : 0;
 
         return shmem_block_bytes( sizeof( GeomT ) * geom_scalars ) +
                shmem_block_bytes( sizeof( ArithT ) * field_scalars ) +
@@ -1058,7 +1116,58 @@ class EpsilonDivDivKerngen
         launch_fast_dirichlet_neumann_shape< Diagonal, TileScatter, 0, 0 >( dn_policy );
     }
 
+    /// Public for the same nvcc reason as launch_fast_dirichlet_neumann_shape.
+    template < int LatTileC, int NlevC, typename Policy >
+    void launch_fast_dn_warp_shape( const Policy& policy )
+    {
+        Kokkos::parallel_for(
+            "epsilon_divdiv_apply_kernel_fast_dn_warp", policy, KOKKOS_CLASS_LAMBDA( const Team& team ) {
+                this->template run_team_fast_dn_warp< LatTileC, NlevC >( team );
+            } );
+    }
+
+    template < typename Policy >
+    void launch_fast_dn_warp( const Policy& policy )
+    {
+        const int nlev = r_tile_block_ + 1;
+        if ( nlev == 9 )
+            return launch_fast_dn_warp_shape< 8, 9 >( policy );
+        if ( nlev == 17 )
+            return launch_fast_dn_warp_shape< 8, 17 >( policy );
+        if ( nlev == 33 )
+            return launch_fast_dn_warp_shape< 8, 33 >( policy );
+        launch_fast_dn_warp_shape< 8, 65 >( policy );
+    }
+
   private:
+    template < int LatTileC, int NlevC >
+    KOKKOS_INLINE_FUNCTION void run_team_fast_dn_warp( const Team& team ) const
+    {
+        int local_subdomain_id, x0, y0, r0, tx, ty, tr, x_cell, y_cell, r_cell;
+        decode_team_indices( team, local_subdomain_id, x0, y0, r0, tx, ty, tr, x_cell, y_cell, r_cell );
+        operator_fast_dn_warp_path< LatTileC, NlevC >( team, local_subdomain_id, x0, y0, r0, tx, ty, x_cell, y_cell );
+    }
+
+    /// One contribution straight into the global field, in the accumulation type.
+    /// A 2-byte field has no lock-free scalar atomic: the add goes through the
+    /// packed pair of the 32-bit word the entry lives in, with 0 for the neighbour.
+    template < typename V >
+    KOKKOS_INLINE_FUNCTION void global_add( ScalarType* p, const V v ) const
+    {
+        if constexpr ( sizeof( ScalarType ) == 2 )
+        {
+            const bool odd = ( reinterpret_cast< std::uintptr_t >( p ) & 2u ) != 0;
+            if ( odd )
+                util::atomic_add_packed_pair( p - 1, 0.0f, static_cast< float >( v ) );
+            else
+                util::atomic_add_packed_pair( p, static_cast< float >( v ), 0.0f );
+        }
+        else
+        {
+            util::atomic_add_lockfree( p, v );
+        }
+    }
+
     /**
      * @brief Team entry for fast Dirichlet/Neumann matrix-free path.
      *
@@ -1192,6 +1301,18 @@ class EpsilonDivDivKerngen
         const int   x_cell,
         const int   y_cell ) const;
 
+    template < int LatTileC, int NlevC >
+    KOKKOS_INLINE_FUNCTION void operator_fast_dn_warp_path(
+        const Team& team,
+        const int   local_subdomain_id,
+        const int   x0,
+        const int   y0,
+        const int   r0,
+        const int   tx,
+        const int   ty,
+        const int   x_cell,
+        const int   y_cell ) const;
+
     // ===================== FAST FREESLIP PATH =====================
     KOKKOS_INLINE_FUNCTION
     void normalize3( double& x, double& y, double& z ) const
@@ -1279,10 +1400,10 @@ class EpsilonDivDivKerngen
         else
         {
             if ( diagonal_ )
-                operator_fast_dirichlet_neumann_path< true, default_tile_scatter, 0, 0 >(
+                operator_fast_dirichlet_neumann_path< true, ( default_tile_scatter == 1 ), 0, 0 >(
                     team, local_subdomain_id, x0, y0, r0, tx, ty, tr, x_cell, y_cell );
             else
-                operator_fast_dirichlet_neumann_path< false, default_tile_scatter, 0, 0 >(
+                operator_fast_dirichlet_neumann_path< false, ( default_tile_scatter == 1 ), 0, 0 >(
                     team, local_subdomain_id, x0, y0, r0, tx, ty, tr, x_cell, y_cell );
         }
     }
@@ -1330,5 +1451,6 @@ static_assert( linalg::OperatorLike< EpsilonDivDivKerngen< float, 3, double > > 
 // follow the class and sit outside its namespace block.
 #include "epsilon_divdiv_kerngen/path_slow.hpp"
 #include "epsilon_divdiv_kerngen/path_fast_dirichlet_neumann.hpp"
+#include "epsilon_divdiv_kerngen/path_fast_dn_warp.hpp"
 #include "epsilon_divdiv_kerngen/path_fast_freeslip.hpp"
 #include "epsilon_divdiv_kerngen/path_stored_local_matrices.hpp"

@@ -108,6 +108,22 @@ KOKKOS_INLINE_FUNCTION void cp_async( T* smem, const T* gmem )
 #endif
 }
 
+/// Value of @p v in the lane `delta` below the caller's, across the whole warp;
+/// lanes below `delta` get their own value back (the CUDA shfl_up convention). Only
+/// meaningful on a GPU backend, which is the only place the warp-owner scatter runs.
+template < typename T >
+KOKKOS_INLINE_FUNCTION T warp_shfl_up( const T v, const int delta )
+{
+#if defined( __CUDA_ARCH__ )
+    return __shfl_up_sync( 0xffffffffu, v, delta );
+#elif defined( __HIP_DEVICE_COMPILE__ )
+    return __shfl_up( v, delta, 32 );
+#else
+    (void) delta;
+    return v;
+#endif
+}
+
 KOKKOS_INLINE_FUNCTION void cp_async_wait_all()
 {
 #if defined( __CUDA_ARCH__ ) && __CUDA_ARCH__ >= 800
