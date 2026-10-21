@@ -142,6 +142,9 @@ struct Parameters
     bool precision_matrix            = false;
     bool precision_ablation          = false;
     bool tile_sweep                  = false;
+    int  tile_lat                    = 0;
+    int  tile_r                      = 0;
+    int  tile_passes                 = 0;
 };
 
 template < OperatorLike OperatorT >
@@ -485,7 +488,22 @@ double modelled_bytes( long dofs_scalar )
 /// moved and the load/store path, A alone changes the arithmetic. Kokkos' 16-bit
 /// scalar operators convert to float per operation, so an A = half arm pays a
 /// conversion on every multiply-add whether or not the storage is narrow.
-template < typename S, typename A = S, typename G = double >
+/// Default geometry precision: the storage precision, widened to float. A 16-bit
+/// geometry would put the coordinate differencing at three decimal digits.
+template < typename S >
+using DefaultGeom = std::conditional_t< ( sizeof( S ) >= 4 ), S, float >;
+
+/// Tile override for the sweeps that do not sweep tiles themselves; zero keeps the
+/// operator's own default. Set once from the command line.
+struct TileOverride
+{
+    int lat    = 0;
+    int r      = 0;
+    int passes = 0;
+};
+static TileOverride tile_override{};
+
+template < typename S, typename A = S, typename G = DefaultGeom< S > >
 BenchmarkData run_precision( const int level,
                              const int executions,
                              const int refinement_level_subdomains,
@@ -539,7 +557,7 @@ BenchmarkData run_precision( const int level,
     return BenchmarkData{ level, dofs_vec, duration };
 }
 
-template < typename S, typename A = S, typename G = double >
+template < typename S, typename A = S, typename G = DefaultGeom< S > >
 void sweep_one_precision( const std::string& name,
                           const int   min_level,
                           const int   max_level,
@@ -554,7 +572,8 @@ void sweep_one_precision( const std::string& name,
 
     for ( int level = min_level; level <= max_level; ++level )
     {
-        const auto data = run_precision< S, A, G >( level, executions, refinement_level_subdomains );
+        const auto data = run_precision< S, A, G >(
+            level, executions, refinement_level_subdomains, tile_override.lat, tile_override.r, tile_override.passes );
         const double gdofs = data.dofs / data.duration / 1e9;
         const double gbs   = modelled_bytes< S >( data.dofs / 3 ) / data.duration / 1e9;
 
@@ -727,6 +746,7 @@ void run_ablation_for( const char* tag,
     sweep_one_precision< double, H, H >( nm( "_store_dbl" ), mn, mx, ex, r, world_size );
     sweep_one_precision< H, double, H >( nm( "_arith_dbl" ), mn, mx, ex, r, world_size );
     sweep_one_precision< H, H, double >( nm( "_geom_dbl" ), mn, mx, ex, r, world_size );
+    sweep_one_precision< H, H, float >( nm( "_geom_flt" ), mn, mx, ex, r, world_size );
     sweep_one_precision< H, double, double >( nm( "_only_store_low" ), mn, mx, ex, r, world_size );
     sweep_one_precision< double, H, double >( nm( "_only_arith_low" ), mn, mx, ex, r, world_size );
     sweep_one_precision< double, double, H >( nm( "_only_geom_low" ), mn, mx, ex, r, world_size );
@@ -753,6 +773,7 @@ void run_precision_ablation( const int min_level,
 
     sweep_one_precision< double, double, double >( "all_double", mn, mx, ex, r, world_size );
     sweep_one_precision< float, float, float >( "float_all_low", mn, mx, ex, r, world_size );
+    sweep_one_precision< float, float, double >( "float_geom_dbl", mn, mx, ex, r, world_size );
     run_ablation_for< half >( "fp16", mn, mx, ex, r, world_size );
     run_ablation_for< bhalf >( "bf16", mn, mx, ex, r, world_size );
 }
@@ -866,6 +887,12 @@ int main( int argc, char** argv )
         "Refinement level applied to form the subdomains." );
     util::add_option_with_default(
         app, "--executions", parameters.executions, "Number of matrix-vector multiplications to be executed." );
+    util::add_option_with_default(
+        app, "--tile-lat", parameters.tile_lat, "Lateral tile size for the precision sweeps (0: operator default)." );
+    util::add_option_with_default(
+        app, "--tile-r", parameters.tile_r, "Radial tile size for the precision sweeps (0: operator default)." );
+    util::add_option_with_default(
+        app, "--tile-passes", parameters.tile_passes, "Radial passes per team for the precision sweeps (0: operator default)." );
     app.add_flag( "--tile-sweep",
                   parameters.tile_sweep,
                   "Sweep team-tile shapes for the production kernel at every precision." );
@@ -881,6 +908,8 @@ int main( int argc, char** argv )
                   "Instead of the operator list, sweep EpsDivDivKerngen over double/float/bf16/fp16 per level." );
 
     CLI11_PARSE( app, argc, argv );
+
+    tile_override = { parameters.tile_lat, parameters.tile_r, parameters.tile_passes };
 
     if ( parameters.min_level < 1 )
     {

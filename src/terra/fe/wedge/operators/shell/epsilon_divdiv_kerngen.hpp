@@ -94,6 +94,10 @@ class EpsilonDivDivKerngen
     /// Precision of the fast-path scratch field tiles and the local contraction.
     /// Independent of GeomT so bandwidth and arithmetic can be varied separately.
     using ArithT                        = ArithScalarT;
+    /// Precision of the Jacobian arithmetic: assembly, determinant, inverse and the
+    /// reference-to-physical gradient transform. GeomT, widened to at least float:
+    /// a 16-bit Jacobian would put the coordinate differencing at three decimal digits.
+    using GeoT = std::conditional_t< ( sizeof( GeomT ) >= 4 ), GeomT, float >;
     /// Precision the tile-local scatter accumulates in. Never 16-bit: a 2-byte
     /// atomic_add has no lock-free implementation and falls back to a warp spin lock,
     /// which measured as the single largest cost of a reduced field precision.
@@ -1346,10 +1350,10 @@ class EpsilonDivDivKerngen
         // buffer is flushed, so an out-of-range cell skips the work instead of leaving.
         const bool cell_active = ( x_cell < hex_lat_ && y_cell < hex_lat_ );
 
-        constexpr double ONE_THIRD = 1.0 / 3.0;
-        constexpr double ONE_SIXTH = 1.0 / 6.0;
+        constexpr GeoT ONE_THIRD = static_cast< GeoT >( 1.0 / 3.0 );
+        constexpr GeoT ONE_SIXTH = static_cast< GeoT >( 1.0 / 6.0 );
 
-        static constexpr double dN_ref[6][3] = {
+        static constexpr GeoT dN_ref[6][3] = {
             { -0.5, -0.5, -ONE_SIXTH },
             { 0.5, 0.0, -ONE_SIXTH },
             { 0.0, 0.5, -ONE_SIXTH },
@@ -1374,8 +1378,8 @@ class EpsilonDivDivKerngen
             if ( r_cell >= hex_rad_ )
                 break;
 
-            const double r_0 = static_cast< double >( r_sh( lvl0 ) );
-            const double r_1 = static_cast< double >( r_sh( lvl0 + 1 ) );
+            const GeoT r_0 = static_cast< GeoT >( r_sh( lvl0 ) );
+            const GeoT r_1 = static_cast< GeoT >( r_sh( lvl0 + 1 ) );
 
             const bool at_cmb     = has_flag( local_subdomain_id, x_cell, y_cell, r_cell, CMB );
             const bool at_surface = has_flag( local_subdomain_id, x_cell, y_cell, r_cell + 1, SURFACE );
@@ -1405,7 +1409,7 @@ class EpsilonDivDivKerngen
                     const int nid = node_id( tx + WEDGE_NODE_OFF[w][node][0], ty + WEDGE_NODE_OFF[w][node][1] );
                     k_sum += k_sh( nid, lvl0 + WEDGE_NODE_OFF[w][node][2] );
                 }
-                const ArithT k_eval = static_cast< ArithT >( ONE_SIXTH * static_cast< double >( k_sum ) );
+                const ArithT k_eval = static_cast< ArithT >( static_cast< double >( k_sum ) * ( 1.0 / 6.0 ) );
 
                 ArithT kwJ;
 
@@ -1416,57 +1420,57 @@ class EpsilonDivDivKerngen
                 ArithT gu20 = 0.0, gu21 = 0.0, gu22 = 0.0;
                 ArithT div_u = 0.0;
                 {
-                    const double half_dr = 0.5 * ( r_1 - r_0 );
-                    const double r_mid   = 0.5 * ( r_0 + r_1 );
+                    const GeoT half_dr = static_cast< GeoT >( 0.5 ) * ( r_1 - r_0 );
+                    const GeoT r_mid   = static_cast< GeoT >( 0.5 ) * ( r_0 + r_1 );
 
-                    const double J_0_0 = r_mid * ( -coords_sh( v0, 0 ) + coords_sh( v1, 0 ) );
-                    const double J_0_1 = r_mid * ( -coords_sh( v0, 0 ) + coords_sh( v2, 0 ) );
-                    const double J_0_2 =
+                    const GeoT J_0_0 = r_mid * ( -coords_sh( v0, 0 ) + coords_sh( v1, 0 ) );
+                    const GeoT J_0_1 = r_mid * ( -coords_sh( v0, 0 ) + coords_sh( v2, 0 ) );
+                    const GeoT J_0_2 =
                         half_dr * ( ONE_THIRD * ( coords_sh( v0, 0 ) + coords_sh( v1, 0 ) + coords_sh( v2, 0 ) ) );
 
-                    const double J_1_0 = r_mid * ( -coords_sh( v0, 1 ) + coords_sh( v1, 1 ) );
-                    const double J_1_1 = r_mid * ( -coords_sh( v0, 1 ) + coords_sh( v2, 1 ) );
-                    const double J_1_2 =
+                    const GeoT J_1_0 = r_mid * ( -coords_sh( v0, 1 ) + coords_sh( v1, 1 ) );
+                    const GeoT J_1_1 = r_mid * ( -coords_sh( v0, 1 ) + coords_sh( v2, 1 ) );
+                    const GeoT J_1_2 =
                         half_dr * ( ONE_THIRD * ( coords_sh( v0, 1 ) + coords_sh( v1, 1 ) + coords_sh( v2, 1 ) ) );
 
-                    const double J_2_0 = r_mid * ( -coords_sh( v0, 2 ) + coords_sh( v1, 2 ) );
-                    const double J_2_1 = r_mid * ( -coords_sh( v0, 2 ) + coords_sh( v2, 2 ) );
-                    const double J_2_2 =
+                    const GeoT J_2_0 = r_mid * ( -coords_sh( v0, 2 ) + coords_sh( v1, 2 ) );
+                    const GeoT J_2_1 = r_mid * ( -coords_sh( v0, 2 ) + coords_sh( v2, 2 ) );
+                    const GeoT J_2_2 =
                         half_dr * ( ONE_THIRD * ( coords_sh( v0, 2 ) + coords_sh( v1, 2 ) + coords_sh( v2, 2 ) ) );
 
-                    const double J_det = J_0_0 * J_1_1 * J_2_2 - J_0_0 * J_1_2 * J_2_1 -
+                    const GeoT J_det = J_0_0 * J_1_1 * J_2_2 - J_0_0 * J_1_2 * J_2_1 -
                                          J_0_1 * J_1_0 * J_2_2 + J_0_1 * J_1_2 * J_2_0 +
                                          J_0_2 * J_1_0 * J_2_1 - J_0_2 * J_1_1 * J_2_0;
 
-                    // |J| is geometry, so form the weight in GeomT and narrow once.
-                    kwJ = static_cast< ArithT >( static_cast< double >( k_eval ) * Kokkos::abs( J_det ) );
+                    // |J| is geometry, so form the weight in GeoT and narrow once.
+                    kwJ = static_cast< ArithT >( static_cast< GeoT >( k_eval ) * Kokkos::abs( J_det ) );
 
-                    const double inv_det = 1.0 / J_det;
+                    const GeoT inv_det = static_cast< GeoT >( 1.0 ) / J_det;
 
-                    const double i00 = inv_det * ( J_1_1 * J_2_2 - J_1_2 * J_2_1 );
-                    const double i01 = inv_det * ( -J_1_0 * J_2_2 + J_1_2 * J_2_0 );
-                    const double i02 = inv_det * ( J_1_0 * J_2_1 - J_1_1 * J_2_0 );
-                    const double i10 = inv_det * ( -J_0_1 * J_2_2 + J_0_2 * J_2_1 );
-                    const double i11 = inv_det * ( J_0_0 * J_2_2 - J_0_2 * J_2_0 );
-                    const double i12 = inv_det * ( -J_0_0 * J_2_1 + J_0_1 * J_2_0 );
-                    const double i20 = inv_det * ( J_0_1 * J_1_2 - J_0_2 * J_1_1 );
-                    const double i21 = inv_det * ( -J_0_0 * J_1_2 + J_0_2 * J_1_0 );
-                    const double i22 = inv_det * ( J_0_0 * J_1_1 - J_0_1 * J_1_0 );
+                    const GeoT i00 = inv_det * ( J_1_1 * J_2_2 - J_1_2 * J_2_1 );
+                    const GeoT i01 = inv_det * ( -J_1_0 * J_2_2 + J_1_2 * J_2_0 );
+                    const GeoT i02 = inv_det * ( J_1_0 * J_2_1 - J_1_1 * J_2_0 );
+                    const GeoT i10 = inv_det * ( -J_0_1 * J_2_2 + J_0_2 * J_2_1 );
+                    const GeoT i11 = inv_det * ( J_0_0 * J_2_2 - J_0_2 * J_2_0 );
+                    const GeoT i12 = inv_det * ( -J_0_0 * J_2_1 + J_0_1 * J_2_0 );
+                    const GeoT i20 = inv_det * ( J_0_1 * J_1_2 - J_0_2 * J_1_1 );
+                    const GeoT i21 = inv_det * ( -J_0_0 * J_1_2 + J_0_2 * J_1_0 );
+                    const GeoT i22 = inv_det * ( J_0_0 * J_1_1 - J_0_1 * J_1_0 );
 
                     if ( !Diagonal )
                     {
 #pragma unroll
                         for ( int n = cmb_shift; n < 6 - surface_shift; ++n )
                         {
-                            const double gx = dN_ref[n][0];
-                            const double gy = dN_ref[n][1];
-                            const double gz = dN_ref[n][2];
-                            // Shape-function gradients are geometry: formed in GeomT from
+                            const GeoT gx = dN_ref[n][0];
+                            const GeoT gy = dN_ref[n][1];
+                            const GeoT gz = dN_ref[n][2];
+                            // Shape-function gradients are geometry: formed in GeoT from
                             // the inverse Jacobian, then narrowed once so the contraction
                             // against the field values runs entirely in ArithT.
-                            const double g0 = i00 * gx + i01 * gy + i02 * gz;
-                            const double g1 = i10 * gx + i11 * gy + i12 * gz;
-                            const double g2 = i20 * gx + i21 * gy + i22 * gz;
+                            const GeoT g0 = i00 * gx + i01 * gy + i02 * gz;
+                            const GeoT g1 = i10 * gx + i11 * gy + i12 * gz;
+                            const GeoT g2 = i20 * gx + i21 * gy + i22 * gz;
                             const ArithT a0 = static_cast< ArithT >( g0 );
                             const ArithT a1 = static_cast< ArithT >( g1 );
                             const ArithT a2 = static_cast< ArithT >( g2 );
@@ -1496,39 +1500,39 @@ class EpsilonDivDivKerngen
 
                 // ==== Phase 2: Recompute Jacobian + Scatter ====
                 {
-                    const double half_dr = 0.5 * ( r_1 - r_0 );
-                    const double r_mid   = 0.5 * ( r_0 + r_1 );
+                    const GeoT half_dr = static_cast< GeoT >( 0.5 ) * ( r_1 - r_0 );
+                    const GeoT r_mid   = static_cast< GeoT >( 0.5 ) * ( r_0 + r_1 );
 
-                    const double J_0_0 = r_mid * ( -coords_sh( v0, 0 ) + coords_sh( v1, 0 ) );
-                    const double J_0_1 = r_mid * ( -coords_sh( v0, 0 ) + coords_sh( v2, 0 ) );
-                    const double J_0_2 =
+                    const GeoT J_0_0 = r_mid * ( -coords_sh( v0, 0 ) + coords_sh( v1, 0 ) );
+                    const GeoT J_0_1 = r_mid * ( -coords_sh( v0, 0 ) + coords_sh( v2, 0 ) );
+                    const GeoT J_0_2 =
                         half_dr * ( ONE_THIRD * ( coords_sh( v0, 0 ) + coords_sh( v1, 0 ) + coords_sh( v2, 0 ) ) );
 
-                    const double J_1_0 = r_mid * ( -coords_sh( v0, 1 ) + coords_sh( v1, 1 ) );
-                    const double J_1_1 = r_mid * ( -coords_sh( v0, 1 ) + coords_sh( v2, 1 ) );
-                    const double J_1_2 =
+                    const GeoT J_1_0 = r_mid * ( -coords_sh( v0, 1 ) + coords_sh( v1, 1 ) );
+                    const GeoT J_1_1 = r_mid * ( -coords_sh( v0, 1 ) + coords_sh( v2, 1 ) );
+                    const GeoT J_1_2 =
                         half_dr * ( ONE_THIRD * ( coords_sh( v0, 1 ) + coords_sh( v1, 1 ) + coords_sh( v2, 1 ) ) );
 
-                    const double J_2_0 = r_mid * ( -coords_sh( v0, 2 ) + coords_sh( v1, 2 ) );
-                    const double J_2_1 = r_mid * ( -coords_sh( v0, 2 ) + coords_sh( v2, 2 ) );
-                    const double J_2_2 =
+                    const GeoT J_2_0 = r_mid * ( -coords_sh( v0, 2 ) + coords_sh( v1, 2 ) );
+                    const GeoT J_2_1 = r_mid * ( -coords_sh( v0, 2 ) + coords_sh( v2, 2 ) );
+                    const GeoT J_2_2 =
                         half_dr * ( ONE_THIRD * ( coords_sh( v0, 2 ) + coords_sh( v1, 2 ) + coords_sh( v2, 2 ) ) );
 
-                    const double J_det = J_0_0 * J_1_1 * J_2_2 - J_0_0 * J_1_2 * J_2_1 -
+                    const GeoT J_det = J_0_0 * J_1_1 * J_2_2 - J_0_0 * J_1_2 * J_2_1 -
                                          J_0_1 * J_1_0 * J_2_2 + J_0_1 * J_1_2 * J_2_0 +
                                          J_0_2 * J_1_0 * J_2_1 - J_0_2 * J_1_1 * J_2_0;
 
-                    const double inv_det = 1.0 / J_det;
+                    const GeoT inv_det = static_cast< GeoT >( 1.0 ) / J_det;
 
-                    const double i00 = inv_det * ( J_1_1 * J_2_2 - J_1_2 * J_2_1 );
-                    const double i01 = inv_det * ( -J_1_0 * J_2_2 + J_1_2 * J_2_0 );
-                    const double i02 = inv_det * ( J_1_0 * J_2_1 - J_1_1 * J_2_0 );
-                    const double i10 = inv_det * ( -J_0_1 * J_2_2 + J_0_2 * J_2_1 );
-                    const double i11 = inv_det * ( J_0_0 * J_2_2 - J_0_2 * J_2_0 );
-                    const double i12 = inv_det * ( -J_0_0 * J_2_1 + J_0_1 * J_2_0 );
-                    const double i20 = inv_det * ( J_0_1 * J_1_2 - J_0_2 * J_1_1 );
-                    const double i21 = inv_det * ( -J_0_0 * J_1_2 + J_0_2 * J_1_0 );
-                    const double i22 = inv_det * ( J_0_0 * J_1_1 - J_0_1 * J_1_0 );
+                    const GeoT i00 = inv_det * ( J_1_1 * J_2_2 - J_1_2 * J_2_1 );
+                    const GeoT i01 = inv_det * ( -J_1_0 * J_2_2 + J_1_2 * J_2_0 );
+                    const GeoT i02 = inv_det * ( J_1_0 * J_2_1 - J_1_1 * J_2_0 );
+                    const GeoT i10 = inv_det * ( -J_0_1 * J_2_2 + J_0_2 * J_2_1 );
+                    const GeoT i11 = inv_det * ( J_0_0 * J_2_2 - J_0_2 * J_2_0 );
+                    const GeoT i12 = inv_det * ( -J_0_0 * J_2_1 + J_0_1 * J_2_0 );
+                    const GeoT i20 = inv_det * ( J_0_1 * J_1_2 - J_0_2 * J_1_1 );
+                    const GeoT i21 = inv_det * ( -J_0_0 * J_1_2 + J_0_2 * J_1_0 );
+                    const GeoT i22 = inv_det * ( J_0_0 * J_1_1 - J_0_1 * J_1_0 );
 
                     if ( !Diagonal )
                     {
@@ -1536,12 +1540,12 @@ class EpsilonDivDivKerngen
 #pragma unroll
                         for ( int n = cmb_shift; n < 6 - surface_shift; ++n )
                         {
-                            const double gx = dN_ref[n][0];
-                            const double gy = dN_ref[n][1];
-                            const double gz = dN_ref[n][2];
-                            const double g0 = i00 * gx + i01 * gy + i02 * gz;
-                            const double g1 = i10 * gx + i11 * gy + i12 * gz;
-                            const double g2 = i20 * gx + i21 * gy + i22 * gz;
+                            const GeoT gx = dN_ref[n][0];
+                            const GeoT gy = dN_ref[n][1];
+                            const GeoT gz = dN_ref[n][2];
+                            const GeoT g0 = i00 * gx + i01 * gy + i02 * gz;
+                            const GeoT g1 = i10 * gx + i11 * gy + i12 * gz;
+                            const GeoT g2 = i20 * gx + i21 * gy + i22 * gz;
                             const ArithT a0  = static_cast< ArithT >( g0 );
                             const ArithT a1  = static_cast< ArithT >( g1 );
                             const ArithT a2  = static_cast< ArithT >( g2 );
@@ -1588,23 +1592,23 @@ class EpsilonDivDivKerngen
                                                      -ONE_THIRD, -ONE_THIRD, 2.0 * ONE_THIRD };
                         constexpr double NORM2_G = 4.0 / 3.0;
 
-                        double sum_gg = 0.0;
+                        GeoT sum_gg = 0;
 #pragma unroll
                         for ( int n = 0; n < 6; ++n )
                         {
-                            const double gx = dN_ref[n][0];
-                            const double gy = dN_ref[n][1];
-                            const double gz = dN_ref[n][2];
-                            const double b0 = i00 * gx + i01 * gy + i02 * gz;
-                            const double b1 = i10 * gx + i11 * gy + i12 * gz;
-                            const double b2 = i20 * gx + i21 * gy + i22 * gz;
+                            const GeoT gx = dN_ref[n][0];
+                            const GeoT gy = dN_ref[n][1];
+                            const GeoT gz = dN_ref[n][2];
+                            const GeoT b0 = i00 * gx + i01 * gy + i02 * gz;
+                            const GeoT b1 = i10 * gx + i11 * gy + i12 * gz;
+                            const GeoT b2 = i20 * gx + i21 * gy + i22 * gz;
                             sum_gg += b0 * b0 + b1 * b1 + b2 * b2;
                         }
-                        // The scaling is geometry, so it is formed in double and
+                        // The scaling is geometry, so it is formed in GeoT and
                         // narrowed once; everything that touches the field values then
                         // runs in ArithT like the rest of this kernel.
-                        const double diag_mean = static_cast< double >( kwJ ) * ( 10.0 / 54.0 ) * sum_gg;
-                        const ArithT eps       = static_cast< ArithT >( stab_c_ * diag_mean / NORM2_G );
+                        const GeoT diag_mean = static_cast< GeoT >( kwJ ) * static_cast< GeoT >( 10.0 / 54.0 ) * sum_gg;
+                        const ArithT eps       = static_cast< ArithT >( static_cast< GeoT >( stab_c_ ) * diag_mean / static_cast< GeoT >( NORM2_G ) );
 
                         for ( int d = 0; d < 3; ++d )
                         {
@@ -1639,13 +1643,13 @@ class EpsilonDivDivKerngen
 #pragma unroll
                         for ( int n = surface_shift; n < 6 - cmb_shift; ++n )
                         {
-                            const double gx = dN_ref[n][0];
-                            const double gy = dN_ref[n][1];
-                            const double gz = dN_ref[n][2];
-                            const double g0 = i00 * gx + i01 * gy + i02 * gz;
-                            const double g1 = i10 * gx + i11 * gy + i12 * gz;
-                            const double g2 = i20 * gx + i21 * gy + i22 * gz;
-                            const double gg = g0 * g0 + g1 * g1 + g2 * g2;
+                            const GeoT gx = dN_ref[n][0];
+                            const GeoT gy = dN_ref[n][1];
+                            const GeoT gz = dN_ref[n][2];
+                            const GeoT g0 = i00 * gx + i01 * gy + i02 * gz;
+                            const GeoT g1 = i10 * gx + i11 * gy + i12 * gz;
+                            const GeoT g2 = i20 * gx + i21 * gy + i22 * gz;
+                            const GeoT gg = g0 * g0 + g1 * g1 + g2 * g2;
                             // Purely geometric row factors, narrowed once each.
                             const ArithT d0 = static_cast< ArithT >( gg + ONE_THIRD * g0 * g0 );
                             const ArithT d1 = static_cast< ArithT >( gg + ONE_THIRD * g1 * g1 );
@@ -1682,20 +1686,20 @@ class EpsilonDivDivKerngen
                                                          -ONE_THIRD, -ONE_THIRD, 2.0 * ONE_THIRD };
                             constexpr double NORM2_G = 4.0 / 3.0;
 
-                            double sum_gg = 0.0;
+                            GeoT sum_gg = 0;
 #pragma unroll
                             for ( int n = 0; n < 6; ++n )
                             {
-                                const double gx = dN_ref[n][0];
-                                const double gy = dN_ref[n][1];
-                                const double gz = dN_ref[n][2];
-                                const double b0 = i00 * gx + i01 * gy + i02 * gz;
-                                const double b1 = i10 * gx + i11 * gy + i12 * gz;
-                                const double b2 = i20 * gx + i21 * gy + i22 * gz;
+                                const GeoT gx = dN_ref[n][0];
+                                const GeoT gy = dN_ref[n][1];
+                                const GeoT gz = dN_ref[n][2];
+                                const GeoT b0 = i00 * gx + i01 * gy + i02 * gz;
+                                const GeoT b1 = i10 * gx + i11 * gy + i12 * gz;
+                                const GeoT b2 = i20 * gx + i21 * gy + i22 * gz;
                                 sum_gg += b0 * b0 + b1 * b1 + b2 * b2;
                             }
-                            const double diag_mean = static_cast< double >( kwJ ) * ( 10.0 / 54.0 ) * sum_gg;
-                            const ArithT eps       = static_cast< ArithT >( stab_c_ * diag_mean / NORM2_G );
+                            const GeoT diag_mean = static_cast< GeoT >( kwJ ) * static_cast< GeoT >( 10.0 / 54.0 ) * sum_gg;
+                            const ArithT eps       = static_cast< ArithT >( static_cast< GeoT >( stab_c_ ) * diag_mean / static_cast< GeoT >( NORM2_G ) );
 #pragma unroll
                             for ( int n = surface_shift; n < 6 - cmb_shift; ++n )
                             {
