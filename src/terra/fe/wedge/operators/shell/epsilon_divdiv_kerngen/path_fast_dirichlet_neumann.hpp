@@ -84,6 +84,65 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
     } );
 
     const int total_pairs = nxy * nlev;
+    if constexpr ( sizeof( ScalarType ) == 2 )
+    {
+        // Two levels per thread from one 32-bit load per field: the level axis is the
+        // fastest index of every field view, so consecutive levels share a word (the
+        // same walk the flush uses). A half outside the tile's level run is read and
+        // dropped; a level beyond the grid is staged as zero, as in the scalar loop.
+        const int nwords = nlev / 2 + 1;
+        Kokkos::parallel_for( Kokkos::TeamThreadRange( team, nxy * nwords ), [&]( int t ) {
+            const int node = t / nwords;
+            const int w    = t - node * nwords;
+
+            const int xi = x0 + node % ( lat_tile_ + 1 );
+            const int yi = y0 + node / ( lat_tile_ + 1 );
+
+            const bool lateral_ok = ( xi <= hex_lat_ && yi <= hex_lat_ );
+
+            // All four fields have the same extents, so one parity serves them all.
+            const ScalarType* run_k = lateral_ok ? &k_( local_subdomain_id, xi, yi, r0 ) : nullptr;
+            const int odd = ( lateral_ok && ( reinterpret_cast< std::uintptr_t >( run_k ) & 2u ) ) ? 1 : 0;
+            const int l0  = 2 * w - odd;
+            if ( l0 >= nlev )
+                return;
+
+            std::uint32_t word[4] = { 0u, 0u, 0u, 0u };
+            if ( lateral_ok )
+            {
+                auto word_at = [&]( const ScalarType* run ) -> std::uint32_t {
+                    const auto base = reinterpret_cast< std::uintptr_t >( run ) & ~std::uintptr_t( 3 );
+                    return reinterpret_cast< const std::uint32_t* >( base )[w];
+                };
+                word[0] = word_at( run_k );
+                word[1] = word_at( &src_( local_subdomain_id, xi, yi, r0, 0 ) );
+                word[2] = word_at( &src_( local_subdomain_id, xi, yi, r0, 1 ) );
+                word[3] = word_at( &src_( local_subdomain_id, xi, yi, r0, 2 ) );
+            }
+
+            for ( int j = 0; j < 2; ++j )
+            {
+                const int lvl = l0 + j;
+                if ( lvl < 0 || lvl >= nlev )
+                    continue;
+                const bool valid = lateral_ok && ( r0 + lvl <= hex_rad_ );
+                auto half = [&]( const std::uint32_t wrd ) -> ArithT {
+                    if ( !valid )
+                        return ArithT( 0 );
+                    const auto bits = static_cast< std::uint16_t >( j == 0 ? ( wrd & 0xffffu ) : ( wrd >> 16 ) );
+                    return static_cast< ArithT >( Kokkos::bit_cast< ScalarType >( bits ) );
+                };
+                k_sh( node, lvl )      = half( word[0] );
+                src_sh( node, 0, lvl ) = half( word[1] );
+                src_sh( node, 1, lvl ) = half( word[2] );
+                src_sh( node, 2, lvl ) = half( word[3] );
+
+                if constexpr ( TileScatter )
+                    dst_sh( node, 0, lvl ) = dst_sh( node, 1, lvl ) = dst_sh( node, 2, lvl ) = AccT( 0 );
+            }
+        } );
+    }
+    else
     Kokkos::parallel_for( Kokkos::TeamThreadRange( team, total_pairs ), [&]( int t ) {
         const int node = t / nlev;
         const int lvl  = t - node * nlev;
