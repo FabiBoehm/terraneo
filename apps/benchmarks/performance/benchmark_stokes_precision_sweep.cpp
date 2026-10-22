@@ -6,6 +6,7 @@
 #include "benchmark_epsdivdiv_common.hpp"
 
 #include "fe/wedge/operators/shell/epsilon_divdiv_stokes.hpp"
+#include "fe/wedge/operators/shell/unsteady_advection_diffusion_supg.hpp"
 #include "linalg/vector_q1isoq2_q1.hpp"
 
 using fe::wedge::operators::shell::EpsDivDivStokes;
@@ -70,6 +71,18 @@ void sweep_stokes_precision( const std::string& name, const int min_level, const
         row( "gradient", measure_run_time( executions, K.block_12(), x.block_2(), y.block_1() ) );
         row( "divergence", measure_run_time( executions, K.block_21(), x.block_1(), y.block_2() ) );
         row( "stokes", measure_run_time( executions, K, x, y ) );
+
+        // The energy operator (mass + advection + diffusion + SUPG) on the same fine
+        // grid: a scalar field advected by the velocity block of x. Its DoF rate is
+        // reported per velocity DoF like the others; divide by 3 for scalar DoFs.
+        using Energy = fe::wedge::operators::shell::UnsteadyAdvectionDiffusionSUPG< S, 3, G, S >;
+        Energy energy( dom_f, coords_f, radii_f, bmask_f, x.block_1(), util::narrow< S >( 1e-2 ),
+                       util::narrow< S >( 1e-3 ), true, false, util::narrow< S >( 1.0 ), false );
+        VectorQ1Scalar< S > T( "T", dom_f, mask_f ), yT( "yT", dom_f, mask_f );
+        linalg::randomize( T );
+        apply( energy, T, yT );
+        Kokkos::fence();
+        row( "energy_supg", measure_run_time( executions, energy, T, yT ) );
     }
 
     table.print_pretty();

@@ -45,10 +45,23 @@ constexpr int nxy       = ( lat + 1 ) * ( lat + 1 ); ///< node columns of a tile
 
 using Team = Kokkos::TeamPolicy<>::member_type;
 
-/// Corner c = ddx + 2 ddy of the hex cell; the wedge tables give (ddx, ddy, ddr) of
-/// node n of wedge w (the convention of kernel_helpers.hpp).
-constexpr int WEDGE_NODE_OFF[2][6][3] = { { { 0, 0, 0 }, { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 }, { 1, 0, 1 }, { 0, 1, 1 } },
-                                          { { 1, 1, 0 }, { 0, 1, 0 }, { 1, 0, 0 }, { 1, 1, 1 }, { 0, 1, 1 }, { 1, 0, 1 } } };
+/// Corner c = ddx + 2 ddy of the hex cell; (ddx, ddy, ddr) of node n of wedge w (the
+/// convention of kernel_helpers.hpp). A function with a local table rather than a
+/// namespace-scope array: nvcc does not let device code read the latter.
+KOKKOS_INLINE_FUNCTION constexpr int wedge_node_off( const int w, const int n, const int k )
+{
+    constexpr int off[2][6][3] = { { { 0, 0, 0 }, { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 }, { 1, 0, 1 }, { 0, 1, 1 } },
+                                   { { 1, 1, 0 }, { 0, 1, 0 }, { 1, 0, 0 }, { 1, 1, 1 }, { 0, 1, 1 }, { 1, 0, 1 } } };
+    return off[w][n][k];
+}
+
+/// Corner index (ddx + 2 ddy) of lateral vertex v in {0, 1, 2} of wedge w:
+/// w = 0 -> (0,0),(1,0),(0,1); w = 1 -> (1,1),(0,1),(1,0).
+KOKKOS_INLINE_FUNCTION constexpr int wedge_vertex( const int w, const int v )
+{
+    constexpr int vert[2][3] = { { 0, 1, 2 }, { 3, 2, 1 } };
+    return vert[w][v];
+}
 
 /// get_shmem hands out aligned chunks; round each block up so two requests in one
 /// team allocation cannot overlap whatever the element sizes are.
@@ -385,8 +398,6 @@ struct WedgeGeometry
     }
 };
 
-/// Wedge vertices as hex corners: w = 0 -> (0,0),(1,0),(0,1); w = 1 -> (1,1),(0,1),(1,0).
-constexpr int WEDGE_V0[2] = { 0, 3 }, WEDGE_V1[2] = { 1, 2 }, WEDGE_V2[2] = { 2, 1 };
 
 // ---- the P1-isoP2 / P1 coupling: a fine wedge inside its coarse wedge ----
 

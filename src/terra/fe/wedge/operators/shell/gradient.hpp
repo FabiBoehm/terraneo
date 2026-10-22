@@ -298,7 +298,7 @@ class Gradient
             for ( int c = 0; c < 3; ++c )
             {
                 lw[w][c]    = wt::coarse_lateral_weight< GeoT >( idx, c );
-                cnode[w][c] = ( CX + wt::WEDGE_NODE_OFF[cw][c][0] ) + 5 * ( CY + wt::WEDGE_NODE_OFF[cw][c][1] );
+                cnode[w][c] = ( CX + wt::wedge_node_off( cw, c, 0 ) ) + 5 * ( CY + wt::wedge_node_off( cw, c, 1 ) );
             }
         }
 
@@ -354,7 +354,7 @@ class Gradient
 #pragma unroll
             for ( int w = 0; w < 2; ++w )
             {
-                const wt::WedgeGeometry< GeoT > g( cx, cy, cz, wt::WEDGE_V0[w], wt::WEDGE_V1[w], wt::WEDGE_V2[w], r_0, r_1 );
+                const wt::WedgeGeometry< GeoT > g( cx, cy, cz, wt::wedge_vertex( w, 0 ), wt::wedge_vertex( w, 1 ), wt::wedge_vertex( w, 2 ), r_0, r_1 );
 
                 // Coarse pressure at the wedge centroid.
                 GeoT pq = 0;
@@ -373,7 +373,7 @@ class Gradient
                     ConT v0 = f * static_cast< ConT >( g.a0[n] );
                     ConT v1 = f * static_cast< ConT >( g.a1[n] );
                     ConT v2 = f * static_cast< ConT >( g.a2[n] );
-                    const int cc = wt::WEDGE_NODE_OFF[w][n][0] + 2 * wt::WEDGE_NODE_OFF[w][n][1];
+                    const int cc = wt::wedge_node_off( w, n, 0 ) + 2 * wt::wedge_node_off( w, n, 1 );
                     if ( mode == 2 )
                     {
                         // Free-slip: only the tangential part of the row survives.
@@ -383,7 +383,7 @@ class Gradient
                         v1 -= dp * static_cast< ConT >( cy[cc] );
                         v2 -= dp * static_cast< ConT >( cz[cc] );
                     }
-                    if ( wt::WEDGE_NODE_OFF[w][n][2] )
+                    if ( wt::wedge_node_off( w, n, 2 ) )
                     {
                         up[cc][0] += static_cast< AccT >( v0 );
                         up[cc][1] += static_cast< AccT >( v1 );
@@ -428,18 +428,19 @@ class Gradient
         operator()( const int local_subdomain_id, const int x_cell, const int y_cell, const int r_cell ) const
     {
         // Gather surface points for each wedge.
-        dense::Vec< ScalarT, 3 > wedge_phy_surf[num_wedges_per_hex_cell][num_nodes_per_wedge_surface] = {};
+        // Geometry and quadrature in GeomT (the stored coordinate precision).
+        dense::Vec< GeomT, 3 > wedge_phy_surf[num_wedges_per_hex_cell][num_nodes_per_wedge_surface] = {};
         wedge_surface_physical_coords( wedge_phy_surf, grid_fine_, local_subdomain_id, x_cell, y_cell );
 
         // Gather wedge radii.
-        const ScalarT r_1 = radii_( local_subdomain_id, r_cell );
-        const ScalarT r_2 = radii_( local_subdomain_id, r_cell + 1 );
+        const GeomT r_1 = radii_( local_subdomain_id, r_cell );
+        const GeomT r_2 = radii_( local_subdomain_id, r_cell + 1 );
 
         // Quadrature points.
         constexpr auto num_quad_points = quadrature::quad_felippa_1x1_num_quad_points;
 
-        dense::Vec< ScalarT, 3 > quad_points[num_quad_points];
-        ScalarT                  quad_weights[num_quad_points];
+        dense::Vec< GeomT, 3 > quad_points[num_quad_points];
+        GeomT                  quad_weights[num_quad_points];
 
         quadrature::quad_felippa_1x1_quad_points( quad_points );
         quadrature::quad_felippa_1x1_quad_weights( quad_weights );
