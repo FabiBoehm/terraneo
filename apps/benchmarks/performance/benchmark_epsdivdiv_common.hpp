@@ -166,6 +166,17 @@ BenchmarkData run_precision( const int level,
     EpsilonDivDivKerngen< S, 3, G, A > op(
         domain, coords_shell, coords_radii, boundary_mask_data, coeff.grid_data(), bcs, false );
 
+    // The scatter mode first: set_tiling() checks the tile against the limits of the
+    // path that will run it (the warp path streams its levels, so its scratch does
+    // not grow with the run), and the mode decides which path that is.
+    if ( tile_scatter_override >= 0 )
+    {
+        // The warp-owner scatter only has lat-8/16, r-1 shapes; any other tile in a
+        // mode-2 sweep is "not launchable" rather than silently retiled.
+        if ( tile_scatter_override == 2 && !( ( tile_lat == 8 || tile_lat == 16 ) && tile_r == 1 ) )
+            return BenchmarkData{ level, dofs_vec, -1.0 };
+        op.set_tile_scatter( tile_scatter_override );
+    }
     if ( tile_lat > 0 )
     {
         // A rejected tiling leaves the operator at its default and reports -1, so the
@@ -174,14 +185,6 @@ BenchmarkData run_precision( const int level,
         {
             return BenchmarkData{ level, dofs_vec, -1.0 };
         }
-    }
-    if ( tile_scatter_override >= 0 )
-    {
-        // The warp-owner scatter only has lat-8, r-1 shapes; any other tile in a
-        // mode-2 sweep is "not launchable" rather than silently retiled.
-        if ( tile_scatter_override == 2 && !( ( tile_lat == 8 || tile_lat == 16 ) && tile_r == 1 ) )
-            return BenchmarkData{ level, dofs_vec, -1.0 };
-        op.set_tile_scatter( tile_scatter_override );
     }
     logroot << "[run_precision] tile scatter mode " << op.tile_scatter() << std::endl;
 

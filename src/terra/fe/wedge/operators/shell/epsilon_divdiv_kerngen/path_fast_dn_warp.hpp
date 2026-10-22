@@ -30,10 +30,11 @@
 // the staged tile instead of 2 x 6 x (3 + 1).
 //
 // Staging is streamed: the fields of the (lat+1)^2 columns are staged in windows of
-// WinC levels into a ring of three windows (cp.async for 4/8-byte fields), two
-// windows ahead of the walk, so the radial run of a team is a runtime length and
+// WinC levels into a ring of two windows (cp.async for 4/8-byte fields), one
+// window ahead of the walk, so the radial run of a team is a runtime length and
 // a long run has no level-boundary atomics inside it. One team barrier per level
-// (the seam's) also orders the ring reuse.
+// (the seam's) also orders the ring reuse. Two windows, not three: Kokkos launches
+// a LaunchBounds< 64, 8 > team only if eight of them fit an SM's shared memory.
 
 #include "../epsilon_divdiv_kerngen.hpp"
 
@@ -53,12 +54,12 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
     const int   x_cell,
     const int   y_cell ) const
 {
-    static_assert( LatTileC > 0 && WinC >= 4, "the warp-owner path has compile-time lateral shapes and windows" );
+    static_assert( LatTileC > 0 && WinC >= 2, "the warp-owner path has compile-time lateral shapes and windows" );
     static_assert( 32 % LatTileC == 0 && LatTileC * LatTileC >= 32, "a warp must tile the lateral patch" );
 
     constexpr int lat_tile = LatTileC;
     constexpr int W        = WinC;  // levels per staged window
-    constexpr int RING     = 3 * W; // resident levels: the two windows in use and the one in flight
+    constexpr int RING     = 2 * W; // resident levels: the window in use and the one in flight
     constexpr int nxy      = ( lat_tile + 1 ) * ( lat_tile + 1 );
     constexpr int PW       = LatTileC;      // warp patch width (columns in x)
     constexpr int PH       = 32 / LatTileC; // warp patch height (columns in y)
@@ -153,10 +154,9 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
             util::cp_async_commit();
     };
 
-    // Prologue: windows 0 and 1 landed, window 2 in flight.
+    // Prologue: window 0 landed, window 1 in flight.
     stage_window( 0 );
     stage_window( 1 );
-    stage_window( 2 );
     if constexpr ( AsyncStaging )
         util::cp_async_wait_pending< 1 >();
     team.team_barrier();
@@ -500,12 +500,13 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
             } // wedge loop
         }
 
-        // The window after next must have landed before the next cell of the next
-        // window reads it: wait before the barrier inside the flush, two cells
-        // ahead of the first read (cell (w+1)W - 1 reads level (w+1)W).
+        // The next window must have landed before the last cell of this window
+        // reads its first level (cell (w+1)W - 1 reads level (w+1)W): wait before
+        // the barrier inside the flush of the cell before. It is the only group in
+        // flight (window w + 2 is issued after that last cell).
         if constexpr ( AsyncStaging )
             if ( c % W == W - 2 )
-                util::cp_async_wait_pending< 1 >();
+                util::cp_async_wait_pending< 0 >();
 
         // Node level c is complete for this team: it got the previous cell's upper
         // and this cell's lower contributions. Level 0 of the run also belongs to
@@ -513,10 +514,10 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
         flush_level( acc, c, c == 0 && r0 > 0 );
 
         // Past the barrier of the last cell of window w every thread is done with
-        // window w's slots: refill them with window w + 3... i.e. issue window w + 2
-        // + 1 = the window two ahead of the one the walk enters now.
+        // window w's slots: refill them with window w + 2, the one after the window
+        // the walk enters now.
         if ( ( c + 1 ) % W == 0 )
-            stage_window( ( c + 1 ) / W + 2 );
+            stage_window( ( c + 1 ) / W + 1 );
 
 #pragma unroll
         for ( int cc = 0; cc < 4; ++cc )
