@@ -731,9 +731,10 @@ class EpsilonDivDivKerngen
         const size_t cap       = per_sm / size_t( min_blocks ) < per_block ? per_sm / size_t( min_blocks ) : per_block;
         return cap - size_t( team + 2 ) * sizeof( double ) - 256u;
     }
-    /// Warp teams launch with LaunchBounds< 64, warp_min_blocks >: 8 for 4/8-byte
-    /// storage (128 registers), 10 for 16-bit (its tile is half the size, 102 registers).
-    static constexpr int    warp_min_blocks = ( sizeof( ScalarType ) <= 2 ) ? 10 : 8;
+    /// Warp teams launch with LaunchBounds< 64, warp_min_blocks >. Measured for 16-bit
+    /// storage: 10 blocks (102 registers) ran 5 % slower than 8 (128), the cap costs
+    /// more than the two extra teams per SM buy.
+    static constexpr int    warp_min_blocks = 8;
     static constexpr size_t warp_shmem_limit() { return kokkos_shmem_limit( 64, warp_min_blocks ); }
     double hourglass_coefficient() const { return stab_c_; }
 
