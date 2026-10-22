@@ -65,8 +65,8 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
     // ---------------- staging (same tile as the tile-buffer path, no dst buffer) ----------------
     auto* geom_mem = reinterpret_cast< GeomT* >( team.team_shmem().get_shmem(
         shmem_block_bytes( sizeof( GeomT ) * ( size_t( nxy ) * 3 + size_t( nslot ) ) ) ) );
-    auto* field_mem = reinterpret_cast< ArithT* >( team.team_shmem().get_shmem( shmem_block_bytes(
-        sizeof( ArithT ) * ( size_t( nxy ) * 3 * nslot + size_t( nxy ) * nslot ) ) ) );
+    auto* field_mem = reinterpret_cast< StageT* >( team.team_shmem().get_shmem( shmem_block_bytes(
+        sizeof( StageT ) * ( size_t( nxy ) * 3 * nslot + size_t( nxy ) * nslot ) ) ) );
 
     constexpr int NW = ( lat_tile * lat_tile ) / 32; // warps per team
     AccT*         seam_mem = nullptr;
@@ -81,8 +81,8 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
     using Scratch       = typename Team::scratch_memory_space;
     using ScratchCoords = Kokkos::View< GeomT[nxy][3], Kokkos::LayoutRight, Scratch, Kokkos::MemoryUnmanaged >;
     using ScratchR      = Kokkos::View< GeomT[nslot], Kokkos::LayoutRight, Scratch, Kokkos::MemoryUnmanaged >;
-    using ScratchSrc = Kokkos::View< ArithT[nxy][3][nslot], Kokkos::LayoutRight, Scratch, Kokkos::MemoryUnmanaged >;
-    using ScratchK   = Kokkos::View< ArithT[nxy][nslot], Kokkos::LayoutRight, Scratch, Kokkos::MemoryUnmanaged >;
+    using ScratchSrc = Kokkos::View< StageT[nxy][3][nslot], Kokkos::LayoutRight, Scratch, Kokkos::MemoryUnmanaged >;
+    using ScratchK   = Kokkos::View< StageT[nxy][nslot], Kokkos::LayoutRight, Scratch, Kokkos::MemoryUnmanaged >;
 
     ScratchCoords coords_sh( geom_mem );
     ScratchR      r_sh( geom_mem + size_t( nxy ) * 3 );
@@ -134,10 +134,10 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
             }
             else
             {
-                k_sh( node, lvl )      = static_cast< ArithT >( k_( local_subdomain_id, xi, yi, rr ) );
-                src_sh( node, 0, lvl ) = static_cast< ArithT >( src_( local_subdomain_id, xi, yi, rr, 0 ) );
-                src_sh( node, 1, lvl ) = static_cast< ArithT >( src_( local_subdomain_id, xi, yi, rr, 1 ) );
-                src_sh( node, 2, lvl ) = static_cast< ArithT >( src_( local_subdomain_id, xi, yi, rr, 2 ) );
+                k_sh( node, lvl )      = static_cast< StageT >( k_( local_subdomain_id, xi, yi, rr ) );
+                src_sh( node, 0, lvl ) = static_cast< StageT >( src_( local_subdomain_id, xi, yi, rr, 0 ) );
+                src_sh( node, 1, lvl ) = static_cast< StageT >( src_( local_subdomain_id, xi, yi, rr, 1 ) );
+                src_sh( node, 2, lvl ) = static_cast< StageT >( src_( local_subdomain_id, xi, yi, rr, 2 ) );
             }
         }
         else
@@ -194,7 +194,7 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
     const int s_begin = ( r0 > 0 ) ? 0 : 1;
 
     // Field values of the 4 columns at the cell's lower (sl, kl) and upper (su, ku) level.
-    ArithT sl[4][3], su[4][3], kl[4], ku[4];
+    StageT sl[4][3], su[4][3], kl[4], ku[4];
 #pragma unroll
     for ( int c = 0; c < 4; ++c )
     {
@@ -343,11 +343,11 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                 const int v0 = V0[w], v1 = V1[w], v2 = V2[w];
 
                 // Register-resident node access: corner and level of wedge node n.
-                auto S = [&]( const int n, const int d ) -> ArithT {
+                auto S = [&]( const int n, const int d ) -> StageT {
                     const int cc = WEDGE_NODE_OFF[w][n][0] + 2 * WEDGE_NODE_OFF[w][n][1];
                     return WEDGE_NODE_OFF[w][n][2] ? su[cc][d] : sl[cc][d];
                 };
-                auto K = [&]( const int n ) -> ArithT {
+                auto K = [&]( const int n ) -> StageT {
                     const int cc = WEDGE_NODE_OFF[w][n][0] + 2 * WEDGE_NODE_OFF[w][n][1];
                     return WEDGE_NODE_OFF[w][n][2] ? ku[cc] : kl[cc];
                 };
@@ -359,11 +359,11 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                         acc[cc][d] += static_cast< AccT >( val );
                 };
 
-                ArithT k_sum = 0.0;
+                StageT k_sum = 0.0;
 #pragma unroll
                 for ( int n = 0; n < 6; ++n )
                     k_sum += K( n );
-                const ArithT k_eval = static_cast< ArithT >( static_cast< double >( k_sum ) * ( 1.0 / 6.0 ) );
+                const StageT k_eval = static_cast< StageT >( static_cast< double >( k_sum ) * ( 1.0 / 6.0 ) );
 
                 const GeoT J_0_0 = r_mid * ( -cx[v0] + cx[v1] );
                 const GeoT J_0_1 = r_mid * ( -cx[v0] + cx[v2] );
@@ -485,9 +485,9 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                         const GeoT g0 = static_cast< GeoT >( a0n[n] ), g1 = static_cast< GeoT >( a1n[n] ),
                                    g2 = static_cast< GeoT >( a2n[n] );
                         const GeoT   gg = g0 * g0 + g1 * g1 + g2 * g2;
-                        const ArithT d0 = static_cast< ArithT >( gg + ONE_THIRD * g0 * g0 );
-                        const ArithT d1 = static_cast< ArithT >( gg + ONE_THIRD * g1 * g1 );
-                        const ArithT d2 = static_cast< ArithT >( gg + ONE_THIRD * g2 * g2 );
+                        const ConT d0 = static_cast< ConT >( gg + ONE_THIRD * g0 * g0 );
+                        const ConT d1 = static_cast< ConT >( gg + ONE_THIRD * g1 * g1 );
+                        const ConT d2 = static_cast< ConT >( gg + ONE_THIRD * g2 * g2 );
                         add( n, 0, kwJ * S( n, 0 ) * d0 );
                         add( n, 1, kwJ * S( n, 1 ) * d1 );
                         add( n, 2, kwJ * S( n, 2 ) * d2 );

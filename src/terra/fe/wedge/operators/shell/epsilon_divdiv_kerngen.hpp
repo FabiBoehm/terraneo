@@ -129,6 +129,12 @@ class EpsilonDivDivKerngen
     /// level 6 on -- the fp16 V-cycle returned Inf/NaN there. Staging and the
     /// coefficient average stay in ArithT.
     using ConT = std::conditional_t< ( sizeof( ArithT ) >= 4 ), ArithT, GeoT >;
+    /// Element type of the warp path's staged field tiles. 16-bit fields are widened
+    /// once, at staging, instead of at every one of the ~3x more reads the cell loop
+    /// makes (ncu: the 16-bit kernels ran the ALU pipe at 43 % vs 26 % for float, the
+    /// half->float conversions and 16-bit extractions). The tile then has the float
+    /// kernel's footprint, which the warp launch allows.
+    using StageT = std::conditional_t< ( sizeof( ArithT ) >= 4 ), ArithT, float >;
     /// Whether the scatter goes through the team's tile buffer instead of straight to
     /// global memory. With the buffer's accumulation a native shared-space reduction
     /// (tile_accumulate), H100 level 8 at the swept tile measured, buffer off -> on:
@@ -1133,7 +1139,7 @@ class EpsilonDivDivKerngen
                                                             : 0;
 
         return shmem_block_bytes( sizeof( GeomT ) * geom_scalars ) +
-               shmem_block_bytes( sizeof( ArithT ) * field_scalars ) +
+               shmem_block_bytes( ( warp ? sizeof( StageT ) : sizeof( ArithT ) ) * field_scalars ) +
                shmem_block_bytes( sizeof( AccT ) * acc_scalars );
     }
 
