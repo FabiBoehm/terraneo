@@ -133,7 +133,17 @@ class EpsilonDivDivKerngen
     /// 1 through the team's tile buffer, 2 the warp-owner reduction (no shared-memory
     /// atomics at all; see path_fast_dn_warp.hpp). Mode 2 needs an 8-wide lateral
     /// tile with r_tile = 1 and a compiled level count; set_tile_scatter() retiles.
-    static constexpr int default_tile_scatter = ( sizeof( ScalarType ) <= 4 ) ? 1 : 0;
+    /// The warp-owner scatter needs warp shuffles and native global reductions.
+    static constexpr bool warp_scatter_backend =
+#if defined( KOKKOS_ENABLE_CUDA ) || defined( KOKKOS_ENABLE_HIP )
+        true;
+#else
+        false;
+#endif
+    /// Fast DN scatter: 2 = warp-owner (4-byte and 16-bit storage on a GPU backend),
+    /// 1 = red.shared tile buffer, 0 = direct atomics (double: its atomics are cheap
+    /// relative to its bandwidth and the buffer would halve the occupancy).
+    static constexpr int default_tile_scatter = ( sizeof( ScalarType ) <= 4 ) ? ( warp_scatter_backend ? 2 : 1 ) : 0;
     static constexpr int LocalMatrixDim = 18;
     using Grid4DDataLocalMatrices = terra::grid::Grid4DDataMatrices< ScalarType, LocalMatrixDim, LocalMatrixDim, 2 >;
     using LocalMatrixStorage      = linalg::solvers::LocalMatrixStorage< ScalarType, LocalMatrixDim >;
@@ -351,6 +361,10 @@ class EpsilonDivDivKerngen
         // Host-side path selection (no in-kernel path branching)
         update_kernel_path_flag_host_only();
 
+        // The default scatter mode decides the default tile (the warp-owner path has
+        // its own shapes); applied here, once the kernel path is known.
+        set_tile_scatter( tile_scatter_ );
+
         // Measurement switch without a code change: TERRA_EPSDIVDIV_TILE_SCATTER=0|1|2.
         if ( const char* env = std::getenv( "TERRA_EPSDIVDIV_TILE_SCATTER" ) )
         {
@@ -384,12 +398,7 @@ class EpsilonDivDivKerngen
             util::logroot << "[EpsilonDivDiv] set_tiling rejected: tiles must be >= 1" << std::endl;
             return false;
         }
-        // The warp-owner path has its own launch bounds (teams of 64 or 256) and
-        // streams its levels, so its scratch does not grow with the radial run; when
-        // it is the path that will run, its limits are the ones that count.
-        const bool warp_only =
-            ( tile_scatter_ == 2 ) && ( matrix_free_kernel_path() == KernelPath::FastDirichletNeumann );
-        const int max_team = warp_only ? warp_max_team : TERRA_EPSDIVDIV_MAX_TEAM;
+        const int max_team = TERRA_EPSDIVDIV_MAX_TEAM;
         if ( lat_tile * lat_tile * r_tile > max_team )
         {
             util::logroot << "[EpsilonDivDiv] set_tiling rejected (" << lat_tile << "," << lat_tile << ","
@@ -403,6 +412,12 @@ class EpsilonDivDivKerngen
         r_tile_   = r_tile;
         r_passes_ = r_passes;
         recompute_tiling();
+
+        // The warp-owner path has its own launch bounds (teams of 64, eight per SM);
+        // when it is the path that will run this tile, its limits are the ones that
+        // count. In mode 2 a tile that is not a warp shape runs through the tile buffer.
+        const bool warp_only = ( tile_scatter_ == 2 ) && warp_shape_ok() &&
+                               ( matrix_free_kernel_path() == KernelPath::FastDirichletNeumann );
 
         size_t shmem     = 0;
         size_t max_shmem = 0;
@@ -607,6 +622,15 @@ class EpsilonDivDivKerngen
             tile_scatter_ = 1;
             return;
         }
+        if ( mode == 2 && matrix_free_kernel_path() != KernelPath::FastDirichletNeumann )
+        {
+            // The warp-owner path exists for the fast DN kernel only; the other paths
+            // keep the tile buffer and their default tile.
+            tile_scatter_ = 1;
+            if ( warp_shape_ok() )
+                set_tiling( 4, 4, 8, false );
+            return;
+        }
         if ( mode == 2 )
         {
             // Re-validate the current tile under the warp path's limits (shape, scratch);
@@ -622,14 +646,7 @@ class EpsilonDivDivKerngen
     }
     int tile_scatter() const { return tile_scatter_; }
 
-    static constexpr bool warp_scatter_available()
-    {
-#if defined( KOKKOS_ENABLE_CUDA ) || defined( KOKKOS_ENABLE_HIP )
-        return true;
-#else
-        return false;
-#endif
-    }
+    static constexpr bool warp_scatter_available() { return warp_scatter_backend; }
 
     /// True when the next apply runs the warp-owner kernel. Its owner lanes store every
     /// node only their team touches, so in Replace mode only the tile perimeters (the
@@ -685,7 +702,6 @@ class EpsilonDivDivKerngen
     {
         return lat_tile_ == 8 && r_tile_ == 1 && ( r_tile_block_ == 8 || r_tile_block_ == 16 );
     }
-    static constexpr int warp_max_team = 64;
 
     /// Kokkos (5.1, CUDA) launches a team kernel only if its scratch fits one block
     /// (48 KiB, no opt-in) and LaunchBounds' minimum blocks per SM fit the SM's shared
@@ -710,8 +726,10 @@ class EpsilonDivDivKerngen
         bcs_[1] = bcs[1];
         stored_matrices_valid_ = false;
 
-        // Recompute host-side dispatch mode whenever BCs change
+        // Recompute host-side dispatch mode whenever BCs change, and with it the
+        // scatter mode and tile (the warp-owner path exists for the fast DN kernel only).
         update_kernel_path_flag_host_only();
+        set_tile_scatter( tile_scatter_ == 1 && default_tile_scatter == 2 ? 2 : tile_scatter_ );
     }
 
     // ---- Stored-local-matrix path --------------------------------------------------
@@ -934,7 +952,7 @@ class EpsilonDivDivKerngen
             dn_policy.set_scratch_size( 0, Kokkos::PerTeam( team_shmem_size_dn( team_size_ ) ) );
             // Scatter variants: matvec or diagonal, through the tile buffer or not, or
             // the warp-owner reduction (matvec only; the diagonal is computed once).
-            const bool tile_buffer = ( tile_scatter_ == 1 );
+            const bool tile_buffer = ( tile_scatter_ == 1 ) || ( tile_scatter_ == 2 && !warp_shape_ok() );
             if ( diagonal_ && tile_scatter_ == 2 )
             {
                 // The diagonal is computed once and has no warp-owner variant: run it
@@ -1097,12 +1115,13 @@ class EpsilonDivDivKerngen
         // Mode 2 (warp-owner): the run's levels plus the one below (halo cell) in both
         // blocks, and the seam between the warps of a team (two parities x (warps - 1)
         // rows x lat columns x 3 components x 2 corners).
-        const bool   warp          = ( tile_scatter_ == 2 );
+        const bool   warp          = ( tile_scatter_ == 2 ) && warp_shape_ok();
         const int    nstaged       = warp ? nlev + 1 : nlev;
         const size_t geom_scalars  = size_t( nxy ) * 3 + size_t( nstaged );
         const size_t field_scalars = size_t( nxy ) * 3 * nstaged + size_t( nxy ) * nstaged;
         const int    nwarps      = ( lat_tile_ * lat_tile_ ) / 32;
-        const size_t acc_scalars = ( tile_scatter_ == 1 ) ? size_t( nxy ) * 3 * nlev
+        const bool   buffer      = ( tile_scatter_ == 1 ) || ( tile_scatter_ == 2 && !warp );
+        const size_t acc_scalars = buffer                 ? size_t( nxy ) * 3 * nlev
                                    : ( warp && nwarps > 1 ) ? size_t( 2 ) * ( nwarps - 1 ) * lat_tile_ * 6
                                                             : 0;
 
