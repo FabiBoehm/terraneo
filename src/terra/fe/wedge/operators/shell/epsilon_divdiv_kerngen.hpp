@@ -122,6 +122,13 @@ class EpsilonDivDivKerngen
     /// double would only double the scratch these arms carry, and with it cost
     /// occupancy -- which is the whole reason the buffer is off for wide storage.
     using AccT = std::conditional_t< ( sizeof( ArithT ) >= 4 ), ArithT, float >;
+    /// Precision of the per-cell contraction (shape-function gradients times field
+    /// values, the quadrature weight, the hourglass correction). For 16-bit ArithT it
+    /// is GeoT: the gradient of the smoothed iterate scales like 1/h^2 and passes
+    /// 65504 at level 7, and the weight k*|det J| ~ h^3 is an fp16 subnormal from
+    /// level 6 on -- the fp16 V-cycle returned Inf/NaN there. Staging and the
+    /// coefficient average stay in ArithT.
+    using ConT = std::conditional_t< ( sizeof( ArithT ) >= 4 ), ArithT, GeoT >;
     /// Whether the scatter goes through the team's tile buffer instead of straight to
     /// global memory. With the buffer's accumulation a native shared-space reduction
     /// (tile_accumulate), H100 level 8 at the swept tile measured, buffer off -> on:

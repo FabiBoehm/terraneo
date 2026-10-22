@@ -351,7 +351,7 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                     const int cc = WEDGE_NODE_OFF[w][n][0] + 2 * WEDGE_NODE_OFF[w][n][1];
                     return WEDGE_NODE_OFF[w][n][2] ? ku[cc] : kl[cc];
                 };
-                auto add = [&]( const int n, const int d, const ArithT val ) {
+                auto add = [&]( const int n, const int d, const ConT val ) {
                     const int cc = WEDGE_NODE_OFF[w][n][0] + 2 * WEDGE_NODE_OFF[w][n][1];
                     if ( WEDGE_NODE_OFF[w][n][2] )
                         up[cc][d] += static_cast< AccT >( val );
@@ -378,7 +378,7 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                 const GeoT J_det = J_0_0 * J_1_1 * J_2_2 - J_0_0 * J_1_2 * J_2_1 - J_0_1 * J_1_0 * J_2_2 +
                                    J_0_1 * J_1_2 * J_2_0 + J_0_2 * J_1_0 * J_2_1 - J_0_2 * J_1_1 * J_2_0;
 
-                const ArithT kwJ     = static_cast< ArithT >( static_cast< GeoT >( k_eval ) * Kokkos::abs( J_det ) );
+                const ConT kwJ       = static_cast< ConT >( static_cast< GeoT >( k_eval ) * Kokkos::abs( J_det ) );
                 const GeoT   inv_det = static_cast< GeoT >( 1.0 ) / J_det;
 
                 const GeoT i00 = inv_det * ( J_1_1 * J_2_2 - J_1_2 * J_2_1 );
@@ -392,19 +392,20 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                 const GeoT i22 = inv_det * ( J_0_0 * J_1_1 - J_0_1 * J_1_0 );
 
                 // ---- phase 1: gradient of the field at the one quadrature point ----
-                ArithT gu00 = 0.0, gu10 = 0.0, gu11 = 0.0, gu20 = 0.0, gu21 = 0.0, gu22 = 0.0, div_u = 0.0;
-                ArithT a0n[6], a1n[6], a2n[6];
+                ConT gu00 = 0.0, gu10 = 0.0, gu11 = 0.0, gu20 = 0.0, gu21 = 0.0, gu22 = 0.0, div_u = 0.0;
+                ConT a0n[6], a1n[6], a2n[6];
 #pragma unroll
                 for ( int n = 0; n < 6; ++n )
                 {
                     const GeoT gx = dN_ref[n][0], gy = dN_ref[n][1], gz = dN_ref[n][2];
-                    a0n[n]        = static_cast< ArithT >( i00 * gx + i01 * gy + i02 * gz );
-                    a1n[n]        = static_cast< ArithT >( i10 * gx + i11 * gy + i12 * gz );
-                    a2n[n]        = static_cast< ArithT >( i20 * gx + i21 * gy + i22 * gz );
+                    a0n[n]        = static_cast< ConT >( i00 * gx + i01 * gy + i02 * gz );
+                    a1n[n]        = static_cast< ConT >( i10 * gx + i11 * gy + i12 * gz );
+                    a2n[n]        = static_cast< ConT >( i20 * gx + i21 * gy + i22 * gz );
                     if ( n < cmb_shift || n >= 6 - surface_shift )
                         continue;
-                    const ArithT half = static_cast< ArithT >( 0.5 );
-                    const ArithT s0 = S( n, 0 ), s1 = S( n, 1 ), s2 = S( n, 2 );
+                    const ConT half = static_cast< ConT >( 0.5 );
+                    const ConT s0 = static_cast< ConT >( S( n, 0 ) ), s1 = static_cast< ConT >( S( n, 1 ) ),
+                               s2 = static_cast< ConT >( S( n, 2 ) );
                     gu00 += a0n[n] * s0;
                     gu11 += a1n[n] * s1;
                     gu22 += a2n[n] * s2;
@@ -417,14 +418,14 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                 // ---- phase 2: scatter into the corner registers ----
                 {
                     constexpr double NEG_TWO_THIRDS = -0.66666666666666663;
-                    const ArithT     two            = static_cast< ArithT >( 2.0 );
-                    const ArithT     ntt            = static_cast< ArithT >( NEG_TWO_THIRDS );
+                    const ConT       two            = static_cast< ConT >( 2.0 );
+                    const ConT       ntt            = static_cast< ConT >( NEG_TWO_THIRDS );
 #pragma unroll
                     for ( int n = 0; n < 6; ++n )
                     {
                         if ( n < cmb_shift || n >= 6 - surface_shift )
                             continue;
-                        const ArithT a0 = a0n[n], a1 = a1n[n], a2 = a2n[n];
+                        const ConT a0 = a0n[n], a1 = a1n[n], a2 = a2n[n];
                         add( n, 0, kwJ * ( two * ( a0 * gu00 + a1 * gu10 + a2 * gu20 ) + ntt * a0 * div_u ) );
                         add( n, 1, kwJ * ( two * ( a0 * gu10 + a1 * gu11 + a2 * gu21 ) + ntt * a1 * div_u ) );
                         add( n, 2, kwJ * ( two * ( a0 * gu20 + a1 * gu21 + a2 * gu22 ) + ntt * a2 * div_u ) );
@@ -447,28 +448,28 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                         sum_gg += b0 * b0 + b1 * b1 + b2 * b2;
                     }
                     const GeoT   diag_mean = static_cast< GeoT >( kwJ ) * static_cast< GeoT >( 10.0 / 54.0 ) * sum_gg;
-                    const ArithT eps =
-                        static_cast< ArithT >( static_cast< GeoT >( stab_c_ ) * diag_mean / static_cast< GeoT >( NORM2_G ) );
+                    const ConT eps =
+                        static_cast< ConT >( static_cast< GeoT >( stab_c_ ) * diag_mean / static_cast< GeoT >( NORM2_G ) );
 
 #pragma unroll
                     for ( int d = 0; d < 3; ++d )
                     {
-                        ArithT c1 = 0.0, c2 = 0.0;
+                        ConT c1 = 0.0, c2 = 0.0;
 #pragma unroll
                         for ( int n = 0; n < 6; ++n )
                         {
                             if ( n < cmb_shift || n >= 6 - surface_shift )
                                 continue;
-                            const ArithT u = S( n, d );
-                            c1 += static_cast< ArithT >( G1[n] ) * u;
-                            c2 += static_cast< ArithT >( G2[n] ) * u;
+                            const ConT u = static_cast< ConT >( S( n, d ) );
+                            c1 += static_cast< ConT >( G1[n] ) * u;
+                            c2 += static_cast< ConT >( G2[n] ) * u;
                         }
 #pragma unroll
                         for ( int n = 0; n < 6; ++n )
                         {
                             if ( n < cmb_shift || n >= 6 - surface_shift )
                                 continue;
-                            add( n, d, eps * ( static_cast< ArithT >( G1[n] ) * c1 + static_cast< ArithT >( G2[n] ) * c2 ) );
+                            add( n, d, eps * ( static_cast< ConT >( G1[n] ) * c1 + static_cast< ConT >( G2[n] ) * c2 ) );
                         }
                     }
                 }

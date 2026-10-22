@@ -2,7 +2,7 @@
 
 // Fast Dirichlet/Neumann path of EpsilonDivDivKerngen: matrix-free, team-tiled, one
 //
-// Jacobian per wedge in GeoT, contraction in ArithT, tile-local scatter for narrow storage.
+// Jacobian per wedge in GeoT, contraction in ConT, tile-local scatter for narrow storage.
 
 #include "../epsilon_divdiv_kerngen.hpp"
 
@@ -246,15 +246,15 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
             }
             const ArithT k_eval = static_cast< ArithT >( static_cast< double >( k_sum ) * ( 1.0 / 6.0 ) );
 
-            ArithT kwJ;
+            ConT kwJ;
 
             // ==== Phase 1: Jacobian + Gather (gu tensor) ====
             // The inverse Jacobian stays live into the scatter: recomputing it there saved
             // registers, but the kernel is issue-bound and the ~100 instructions cost more.
-            ArithT gu00 = 0.0;
-            ArithT gu10 = 0.0, gu11 = 0.0;
-            ArithT gu20 = 0.0, gu21 = 0.0, gu22 = 0.0;
-            ArithT div_u = 0.0;
+            ConT gu00 = 0.0;
+            ConT gu10 = 0.0, gu11 = 0.0;
+            ConT gu20 = 0.0, gu21 = 0.0, gu22 = 0.0;
+            ConT div_u = 0.0;
             const GeoT half_dr = static_cast< GeoT >( 0.5 ) * ( r_1 - r_0 );
             const GeoT r_mid   = static_cast< GeoT >( 0.5 ) * ( r_0 + r_1 );
 
@@ -278,7 +278,7 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                                  J_0_2 * J_1_0 * J_2_1 - J_0_2 * J_1_1 * J_2_0;
 
             // |J| is geometry, so form the weight in GeoT and narrow once.
-            kwJ = static_cast< ArithT >( static_cast< GeoT >( k_eval ) * Kokkos::abs( J_det ) );
+            kwJ = static_cast< ConT >( static_cast< GeoT >( k_eval ) * Kokkos::abs( J_det ) );
 
             const GeoT inv_det = static_cast< GeoT >( 1.0 ) / J_det;
 
@@ -306,14 +306,14 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                     const GeoT gz = dN_ref[n][2];
                     // Shape-function gradients are geometry: formed in GeoT from
                     // the inverse Jacobian, then narrowed once so the contraction
-                    // against the field values runs entirely in ArithT.
+                    // against the field values runs entirely in ConT.
                     const GeoT g0 = i00 * gx + i01 * gy + i02 * gz;
                     const GeoT g1 = i10 * gx + i11 * gy + i12 * gz;
                     const GeoT g2 = i20 * gx + i21 * gy + i22 * gz;
-                    const ArithT a0 = static_cast< ArithT >( g0 );
-                    const ArithT a1 = static_cast< ArithT >( g1 );
-                    const ArithT a2 = static_cast< ArithT >( g2 );
-                    const ArithT half = static_cast< ArithT >( 0.5 );
+                    const ConT a0 = static_cast< ConT >( g0 );
+                    const ConT a1 = static_cast< ConT >( g1 );
+                    const ConT a2 = static_cast< ConT >( g2 );
+                    const ConT half = static_cast< ConT >( 0.5 );
 
                     const int ddx = wedge_off( w, n, 0 );
                     const int ddy = wedge_off( w, n, 1 );
@@ -321,9 +321,9 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                     const int nid = node_id( tx + ddx, ty + ddy );
                     const int lvl = lvl0 + ddr;
 
-                    const ArithT s0 = src_sh( nid, 0, lvl );
-                    const ArithT s1 = src_sh( nid, 1, lvl );
-                    const ArithT s2 = src_sh( nid, 2, lvl );
+                    const ConT s0 = static_cast< ConT >( src_sh( nid, 0, lvl ) );
+                    const ConT s1 = static_cast< ConT >( src_sh( nid, 1, lvl ) );
+                    const ConT s2 = static_cast< ConT >( src_sh( nid, 2, lvl ) );
 
                     gu00  += a0 * s0;
                     gu11  += a1 * s1;
@@ -353,11 +353,11 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                         const GeoT g0 = i00 * gx + i01 * gy + i02 * gz;
                         const GeoT g1 = i10 * gx + i11 * gy + i12 * gz;
                         const GeoT g2 = i20 * gx + i21 * gy + i22 * gz;
-                        const ArithT a0  = static_cast< ArithT >( g0 );
-                        const ArithT a1  = static_cast< ArithT >( g1 );
-                        const ArithT a2  = static_cast< ArithT >( g2 );
-                        const ArithT two = static_cast< ArithT >( 2.0 );
-                        const ArithT ntt = static_cast< ArithT >( NEG_TWO_THIRDS );
+                        const ConT a0  = static_cast< ConT >( g0 );
+                        const ConT a1  = static_cast< ConT >( g1 );
+                        const ConT a2  = static_cast< ConT >( g2 );
+                        const ConT two = static_cast< ConT >( 2.0 );
+                        const ConT ntt = static_cast< ConT >( NEG_TWO_THIRDS );
 
                         const int ddx = wedge_off( w, n, 0 );
                         const int ddy = wedge_off( w, n, 1 );
@@ -413,13 +413,13 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                     }
                     // The scaling is geometry, so it is formed in GeoT and
                     // narrowed once; everything that touches the field values then
-                    // runs in ArithT like the rest of this kernel.
+                    // runs in ConT like the rest of this kernel.
                     const GeoT diag_mean = static_cast< GeoT >( kwJ ) * static_cast< GeoT >( 10.0 / 54.0 ) * sum_gg;
-                    const ArithT eps       = static_cast< ArithT >( static_cast< GeoT >( stab_c_ ) * diag_mean / static_cast< GeoT >( NORM2_G ) );
+                    const ConT eps       = static_cast< ConT >( static_cast< GeoT >( stab_c_ ) * diag_mean / static_cast< GeoT >( NORM2_G ) );
 
                     for ( int d = 0; d < 3; ++d )
                     {
-                        ArithT c1 = 0.0, c2 = 0.0;
+                        ConT c1 = 0.0, c2 = 0.0;
 #pragma unroll
                         for ( int n = 0; n < 6; ++n )
                         {
@@ -430,9 +430,9 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                             const int nid =
                                 node_id( tx + wedge_off( w, n, 0 ), ty + wedge_off( w, n, 1 ) );
                             const int    lvl = lvl0 + wedge_off( w, n, 2 );
-                            const ArithT u   = src_sh( nid, d, lvl );
-                            c1 += static_cast< ArithT >( G1[n] ) * u;
-                            c2 += static_cast< ArithT >( G2[n] ) * u;
+                            const ConT u   = static_cast< ConT >( src_sh( nid, d, lvl ) );
+                            c1 += static_cast< ConT >( G1[n] ) * u;
+                            c2 += static_cast< ConT >( G2[n] ) * u;
                         }
 #pragma unroll
                         for ( int n = 0; n < 6; ++n )
@@ -446,8 +446,8 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                             const int ddr = wedge_off( w, n, 2 );
                             tile_accumulate< TileScatter >(
                                 scatter_target< TileScatter >( dst_sh, node_id( tx + ddx, ty + ddy ), d, lvl0 + ddr, local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr ),
-                                static_cast< ScalarType >( eps * ( static_cast< ArithT >( G1[n] ) * c1 +
-                                                                   static_cast< ArithT >( G2[n] ) * c2 ) ) );
+                                static_cast< ScalarType >( eps * ( static_cast< ConT >( G1[n] ) * c1 +
+                                                                   static_cast< ConT >( G2[n] ) * c2 ) ) );
                         }
                     }
                 }
@@ -468,16 +468,16 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                         const GeoT g2 = i20 * gx + i21 * gy + i22 * gz;
                         const GeoT gg = g0 * g0 + g1 * g1 + g2 * g2;
                         // Purely geometric row factors, narrowed once each.
-                        const ArithT d0 = static_cast< ArithT >( gg + ONE_THIRD * g0 * g0 );
-                        const ArithT d1 = static_cast< ArithT >( gg + ONE_THIRD * g1 * g1 );
-                        const ArithT d2 = static_cast< ArithT >( gg + ONE_THIRD * g2 * g2 );
+                        const ConT d0 = static_cast< ConT >( gg + ONE_THIRD * g0 * g0 );
+                        const ConT d1 = static_cast< ConT >( gg + ONE_THIRD * g1 * g1 );
+                        const ConT d2 = static_cast< ConT >( gg + ONE_THIRD * g2 * g2 );
 
                         const int nid = node_id( tx + wedge_off( w, n, 0 ), ty + wedge_off( w, n, 1 ) );
                         const int lvl = lvl0 + wedge_off( w, n, 2 );
 
-                        const ArithT sv0 = src_sh( nid, 0, lvl );
-                        const ArithT sv1 = src_sh( nid, 1, lvl );
-                        const ArithT sv2 = src_sh( nid, 2, lvl );
+                        const ConT sv0 = static_cast< ConT >( src_sh( nid, 0, lvl ) );
+                        const ConT sv1 = static_cast< ConT >( src_sh( nid, 1, lvl ) );
+                        const ConT sv2 = static_cast< ConT >( src_sh( nid, 2, lvl ) );
 
                         const int ddx = wedge_off( w, n, 0 );
                         const int ddy = wedge_off( w, n, 1 );
@@ -516,14 +516,14 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                             sum_gg += b0 * b0 + b1 * b1 + b2 * b2;
                         }
                         const GeoT diag_mean = static_cast< GeoT >( kwJ ) * static_cast< GeoT >( 10.0 / 54.0 ) * sum_gg;
-                        const ArithT eps       = static_cast< ArithT >( static_cast< GeoT >( stab_c_ ) * diag_mean / static_cast< GeoT >( NORM2_G ) );
+                        const ConT eps       = static_cast< ConT >( static_cast< GeoT >( stab_c_ ) * diag_mean / static_cast< GeoT >( NORM2_G ) );
 #pragma unroll
                         for ( int n = 0; n < 6; ++n )
                         {
                             if ( n < surface_shift || n >= 6 - cmb_shift )
                                 continue;
-                            const ArithT gdiag =
-                                static_cast< ArithT >( G1[n] * G1[n] + G2[n] * G2[n] );
+                            const ConT gdiag =
+                                static_cast< ConT >( G1[n] * G1[n] + G2[n] * G2[n] );
                             const int ddx = wedge_off( w, n, 0 );
                             const int ddy = wedge_off( w, n, 1 );
                             const int ddr = wedge_off( w, n, 2 );
