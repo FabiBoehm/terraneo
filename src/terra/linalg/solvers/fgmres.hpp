@@ -9,6 +9,8 @@
 #include "terra/linalg/vector.hpp"
 #include "util/table.hpp"
 
+#include <chrono>
+
 namespace terra::linalg::solvers {
 
 template < typename ScalarType >
@@ -122,6 +124,13 @@ class FGMRES
     /// @param b Right-hand side vector (input).
     void solve_impl( OperatorType& A, SolutionVectorType& x, const RHSVectorType& b )
     {
+        // Wall-clock time since entry, recorded with every history row (time to
+        // solution per tolerance). Every row follows a host-side reduction, so the
+        // device is in sync at that point.
+        const auto t_solve0 = std::chrono::steady_clock::now();
+        auto       elapsed_s = [&]() {
+            return std::chrono::duration< double >( std::chrono::steady_clock::now() - t_solve0 ).count();
+        };
         // Compute initial residual r = b - A*x
         auto& r = tmp_[0];
         apply( A, x, r );
@@ -135,6 +144,7 @@ class FGMRES
             statistics_->add_row(
                 { { "tag", tag_ },
                   { "iteration", 0 },
+                  { "elapsed_s", elapsed_s() },
                   { "relative_residual", 1.0 },
                   { "absolute_residual", static_cast< double >( beta0 ) } } );
         }
@@ -317,6 +327,7 @@ class FGMRES
                     statistics_->add_row(
                         { { "tag", tag_ },
                           { "iteration", total_iters + 1 },
+                          { "elapsed_s", elapsed_s() },
                           { "relative_residual", static_cast< double >( rel_res ) },
                           { "absolute_residual", static_cast< double >( abs_res ) } } );
                 }

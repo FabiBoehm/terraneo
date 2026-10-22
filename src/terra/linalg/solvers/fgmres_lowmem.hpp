@@ -8,6 +8,8 @@
 #include "terra/linalg/solvers/solver.hpp"
 #include "terra/linalg/vector.hpp"
 #include "util/table.hpp"
+
+#include <chrono>
 #include "util/timer.hpp"
 
 namespace terra::linalg::solvers {
@@ -65,6 +67,13 @@ class FGMRESLowMem
 
     void solve_impl( OperatorType& A, SolutionVectorType& x, const RHSVectorType& b )
     {
+        // Wall-clock time since entry, recorded with every history row (time to
+        // solution per tolerance). Every row follows a host-side reduction, so the
+        // device is in sync at that point.
+        const auto t_solve0 = std::chrono::steady_clock::now();
+        auto       elapsed_s = [&]() {
+            return std::chrono::duration< double >( std::chrono::steady_clock::now() - t_solve0 ).count();
+        };
         util::Timer timer_fgmres_solve( "fgmres_solve" );
 
         // r (residual) and w (= A*z_j) are never live simultaneously: r is only used
@@ -89,6 +98,7 @@ class FGMRESLowMem
             statistics_->add_row(
                 { { "tag", tag_ },
                   { "iteration", 0 },
+                  { "elapsed_s", elapsed_s() },
                   { "relative_residual", 1.0 },
                   { "absolute_residual", static_cast< double >( beta0 ) } } );
         }
@@ -249,6 +259,7 @@ class FGMRESLowMem
                     statistics_->add_row(
                         { { "tag", tag_ },
                           { "iteration", total_iters + 1 },
+                          { "elapsed_s", elapsed_s() },
                           { "relative_residual", static_cast< double >( rel_res ) },
                           { "absolute_residual", static_cast< double >( abs_res ) } } );
                 }

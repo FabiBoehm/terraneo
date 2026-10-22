@@ -83,6 +83,7 @@
 #include "util/table.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <string>
 #include <vector>
@@ -1100,12 +1101,17 @@ RunResult run_ablock_mg( int    min_level,
         VectorQ1IsoQ2Q1< ScalarType > d_ir( "d_ir", domains[velocity_level], domains[pressure_level],
                                             mask_data[velocity_level], mask_data[pressure_level] );
 
+        const auto t_ir0      = std::chrono::steady_clock::now();
+        auto       elapsed_ir = [&]() {
+            return std::chrono::duration< double >( std::chrono::steady_clock::now() - t_ir0 ).count();
+        };
         linalg::apply( K_op, u_stokes, r_ir );
         linalg::lincomb( r_ir, { 1.0, -1.0 }, { f_full, r_ir } );
         const double r0 = static_cast< double >( linalg::norm_2( r_ir ) );
 
         outer_table->add_row( { { "tag", std::string( "stokes_fgmres" ) },
                                 { "iteration", 0 },
+                                { "elapsed_s", elapsed_ir() },
                                 { "relative_residual", 1.0 },
                                 { "absolute_residual", r0 } } );
 
@@ -1129,6 +1135,7 @@ RunResult run_ablock_mg( int    min_level,
             const double rel = ( r0 > 0.0 ) ? rk / r0 : 0.0;
             outer_table->add_row( { { "tag", std::string( "stokes_fgmres" ) },
                                     { "iteration", k },
+                                    { "elapsed_s", elapsed_ir() },
                                     { "relative_residual", rel },
                                     { "absolute_residual", rk } } );
             if ( rel <= outer_tol )
@@ -1191,7 +1198,7 @@ RunResult run_ablock_mg( int    min_level,
     }
 
     outer_table->query_rows_equals( "tag", "stokes_fgmres" )
-        .select_columns( { "absolute_residual", "relative_residual", "iteration" } )
+        .select_columns( { "absolute_residual", "relative_residual", "iteration", "elapsed_s" } )
         .print_pretty();
 
     const auto rows    = outer_table->query_rows_equals( "tag", "stokes_fgmres" ).rows();
