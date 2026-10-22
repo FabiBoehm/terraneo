@@ -88,6 +88,7 @@ class Divergence
     // Warp path.
     warp_tile::Tiling tiling_;
     bool              fast_enabled_ = true;
+    int               min_blocks_   = warp_min_blocks;
     int               cmb_mode_     = 0; ///< 0 none/Neumann, 1 Dirichlet, 2 free-slip
     int               surf_mode_    = 0;
 
@@ -125,8 +126,12 @@ class Divergence
         cmb_mode_  = bc_mode( get_boundary_condition_flag( bcs_, CMB ) );
         surf_mode_ = bc_mode( get_boundary_condition_flag( bcs_, SURFACE ) );
 
+        // Occupancy target: 8 or 16 resident teams per SM (128 or 64 registers), a
+        // measurement switch via the environment.
+        if ( const char* env = std::getenv( "TERRA_GRADDIV_MIN_BLOCKS" ) )
+            min_blocks_ = ( std::atoi( env ) >= 16 ) ? 16 : 8;
         int r_block = warp_tile::default_r_block( domain_fine );
-        if ( r_block == 16 && shmem_bytes< 17 >() > warp_tile::kokkos_shmem_limit( 64, warp_min_blocks ) )
+        if ( r_block == 16 && shmem_bytes< 17 >() > warp_tile::kokkos_shmem_limit( 64, min_blocks_ ) )
             r_block = 8;
         tiling_ = warp_tile::Tiling( domain_fine, r_block );
         if ( const char* env = std::getenv( "TERRA_GRADDIV_FAST" ) )
@@ -173,10 +178,10 @@ class Divergence
         util::Timer timer_kernel( "divergence_kernel" );
         if ( fast )
         {
-            if ( tiling_.r_block == 16 )
-                launch_warp< 17 >();
+            if ( min_blocks_ >= 16 )
+                tiling_.r_block == 16 ? launch_warp< 17, 16 >() : launch_warp< 9, 16 >();
             else
-                launch_warp< 9 >();
+                tiling_.r_block == 16 ? launch_warp< 17, 8 >() : launch_warp< 9, 8 >();
         }
         else
         {
@@ -204,10 +209,10 @@ class Divergence
                warp_tile::shmem_block_bytes( sizeof( AccT ) * warp_tile::seam_scalars< 1 >() );
     }
 
-    template < int NlevC >
+    template < int NlevC, int MinBlocks >
     void launch_warp()
     {
-        Kokkos::TeamPolicy< Kokkos::LaunchBounds< 64, warp_min_blocks > > policy( tiling_.blocks, warp_tile::team_size );
+        Kokkos::TeamPolicy< Kokkos::LaunchBounds< 64, MinBlocks > > policy( tiling_.blocks, warp_tile::team_size );
         policy.set_scratch_size( 0, Kokkos::PerTeam( shmem_bytes< NlevC >() ) );
         Kokkos::parallel_for(
             "divergence_warp", policy, KOKKOS_CLASS_LAMBDA( const Team& team ) {
