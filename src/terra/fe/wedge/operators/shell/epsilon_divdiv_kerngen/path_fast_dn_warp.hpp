@@ -215,15 +215,6 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
 
     const bool replace_mode = ( operator_apply_mode_ == linalg::OperatorApplyMode::Replace );
 
-    // 16-bit results: two consecutive levels of a column share one aligned 32-bit
-    // word (the level axis is the fastest). The owner lane keeps a lower half until
-    // the upper one is complete and writes the word once; a half whose partner
-    // belongs to another team (the run ends) is written as a 2-byte store. The three
-    // component views are separate allocations, so the parity is tracked per d.
-    constexpr bool PackedStore = ( sizeof( ScalarType ) == 2 );
-    AccT        pend[3]   = { AccT( 0 ), AccT( 0 ), AccT( 0 ) };
-    ScalarType* pend_p[3] = { nullptr, nullptr, nullptr };
-
     // One node level, complete in registers across the warp: reduce the 4 corner
     // contributions to the owner lane, write once, send the outward edge
     // contributions of the patch with global reductions.
@@ -279,27 +270,7 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
             for ( int d = 0; d < 3; ++d )
             {
                 if ( interior )
-                {
-                    if constexpr ( PackedStore )
-                    {
-                        ScalarType* p = &dst_( local_subdomain_id, x_cell, y_cell, rr, d );
-                        if ( ( reinterpret_cast< std::uintptr_t >( p ) & 2u ) == 0 )
-                        {
-                            pend[d]   = own[d];
-                            pend_p[d] = p;
-                        }
-                        else if ( pend_p[d] == p - 1 )
-                        {
-                            util::store_packed_pair( pend_p[d], static_cast< float >( pend[d] ),
-                                                     static_cast< float >( own[d] ) );
-                            pend_p[d] = nullptr;
-                        }
-                        else
-                            *p = static_cast< ScalarType >( own[d] );
-                    }
-                    else
-                        dst_( local_subdomain_id, x_cell, y_cell, rr, d ) = static_cast< ScalarType >( own[d] );
-                }
+                    dst_( local_subdomain_id, x_cell, y_cell, rr, d ) = static_cast< ScalarType >( own[d] );
                 else if ( own[d] != AccT( 0 ) )
                     global_add( &dst_( local_subdomain_id, x_cell, y_cell, rr, d ), own[d] );
 
@@ -548,15 +519,6 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
     // it) -- unless it is the surface, which no team is above.
     if ( r0 - 1 + s_top == hex_rad_ )
         flush_level( acc, s_top );
-
-    // A lower half left without its partner (the run's top level): its own store.
-    if constexpr ( PackedStore )
-    {
-#pragma unroll
-        for ( int d = 0; d < 3; ++d )
-            if ( pend_p[d] != nullptr )
-                *pend_p[d] = static_cast< ScalarType >( pend[d] );
-    }
 }
 
 } // namespace terra::fe::wedge::operators::shell

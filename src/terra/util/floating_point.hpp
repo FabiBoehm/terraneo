@@ -177,31 +177,6 @@ KOKKOS_INLINE_FUNCTION void cp_async_wait_pending()
 #endif
 }
 
-/// Stores two values into two adjacent 16-bit fields that together fill one aligned
-/// 32-bit word, `lower` being the word's first half: one packed conversion and one
-/// 32-bit store on CUDA, two scalar stores elsewhere.
-template < FloatingPoint T >
-KOKKOS_INLINE_FUNCTION void store_packed_pair( T* lower, const float v0, const float v1 )
-{
-    static_assert( sizeof( T ) == 2, "expected a 2-byte field precision" );
-#if defined( __CUDA_ARCH__ )
-    if constexpr ( std::is_same_v< T, Kokkos::Experimental::half_t > )
-    {
-        const __half2 h                          = __floats2half2_rn( v0, v1 );
-        *reinterpret_cast< unsigned* >( lower ) = *reinterpret_cast< const unsigned* >( &h );
-        return;
-    }
-    else if constexpr ( std::is_same_v< T, Kokkos::Experimental::bhalf_t > )
-    {
-        const __nv_bfloat162 h                   = __floats2bfloat162_rn( v0, v1 );
-        *reinterpret_cast< unsigned* >( lower ) = *reinterpret_cast< const unsigned* >( &h );
-        return;
-    }
-#endif
-    lower[0] = static_cast< T >( v0 );
-    lower[1] = static_cast< T >( v1 );
-}
-
 /// Adds two values to two adjacent 16-bit fields that together fill one aligned
 /// 32-bit word, `lower` being the word's first half. On CUDA this is one native
 /// packed reduction (f16x2 / bf16x2), the lock-free form the scalar 2-byte add does
