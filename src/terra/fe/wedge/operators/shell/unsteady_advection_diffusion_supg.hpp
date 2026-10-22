@@ -642,33 +642,41 @@ class UnsteadyAdvectionDiffusionSUPG
     KOKKOS_INLINE_FUNCTION void
         operator()( const int local_subdomain_id, const int x_cell, const int y_cell, const int r_cell ) const
     {
-        // Gather surface points for each wedge.
-        dense::Vec< ScalarT, 3 > wedge_phy_surf[num_wedges_per_hex_cell][num_nodes_per_wedge_surface] = {};
+        // Geometry, quadrature and the local matrices in GeomT (the stored coordinate
+        // precision); the fields are read in ScalarT and widened, the result narrowed.
+        using T = GeomT;
+        dense::Vec< T, 3 > wedge_phy_surf[num_wedges_per_hex_cell][num_nodes_per_wedge_surface] = {};
         wedge_surface_physical_coords( wedge_phy_surf, grid_, local_subdomain_id, x_cell, y_cell );
 
         // Gather wedge radii.
-        const ScalarT r_1 = radii_( local_subdomain_id, r_cell );
-        const ScalarT r_2 = radii_( local_subdomain_id, r_cell + 1 );
+        const T r_1 = radii_( local_subdomain_id, r_cell );
+        const T r_2 = radii_( local_subdomain_id, r_cell + 1 );
 
         // Quadrature points.
         constexpr auto num_quad_points = quadrature::quad_felippa_3x2_num_quad_points;
 
-        dense::Vec< ScalarT, 3 > quad_points[num_quad_points];
-        ScalarT                  quad_weights[num_quad_points];
+        dense::Vec< T, 3 > quad_points[num_quad_points];
+        T                  quad_weights[num_quad_points];
 
         quadrature::quad_felippa_3x2_quad_points( quad_points );
         quadrature::quad_felippa_3x2_quad_weights( quad_weights );
 
         // Interpolating velocity into quad points.
 
-        dense::Vec< ScalarT, VelocityVecDim > vel_interp[num_wedges_per_hex_cell][num_quad_points];
-        dense::Vec< ScalarT, 6 >              vel_coeffs[VelocityVecDim][num_wedges_per_hex_cell];
+        dense::Vec< T, VelocityVecDim > vel_interp[num_wedges_per_hex_cell][num_quad_points];
+        dense::Vec< T, 6 >              vel_coeffs[VelocityVecDim][num_wedges_per_hex_cell];
 
         for ( int d = 0; d < VelocityVecDim; d++ )
         {
-            extract_local_wedge_vector_coefficients(
-                vel_coeffs[d], local_subdomain_id, x_cell, y_cell, r_cell, d, vel_grid_ );
+            dense::Vec< ScalarT, 6 > vc[num_wedges_per_hex_cell];
+            extract_local_wedge_vector_coefficients( vc, local_subdomain_id, x_cell, y_cell, r_cell, d, vel_grid_ );
+            for ( int wedge = 0; wedge < num_wedges_per_hex_cell; wedge++ )
+                for ( int i = 0; i < num_nodes_per_wedge; i++ )
+                    vel_coeffs[d][wedge]( i ) = static_cast< T >( vc[wedge]( i ) );
         }
+        const T diffusivity  = static_cast< T >( diffusivity_ );
+        const T dt           = static_cast< T >( dt_ );
+        const T mass_scaling = static_cast< T >( mass_scaling_ );
 
         for ( int wedge = 0; wedge < num_wedges_per_hex_cell; wedge++ )
         {
@@ -687,38 +695,38 @@ class UnsteadyAdvectionDiffusionSUPG
 
         // Let's compute the streamline diffusivity.
 
-        ScalarT streamline_diffusivity[num_wedges_per_hex_cell];
+        T streamline_diffusivity[num_wedges_per_hex_cell];
 
         // Far from accurate but for now assume h = r.
         const auto h = r_2 - r_1;
 
         for ( int wedge = 0; wedge < num_wedges_per_hex_cell; wedge++ )
         {
-            ScalarT tau_accum = 0.0;
-            ScalarT waccum    = 0.0;
+            T tau_accum = 0.0;
+            T waccum    = 0.0;
 
             for ( int q = 0; q < num_quad_points; ++q )
             {
                 // get velocity at this quad point
                 const auto&   uq         = vel_interp[wedge][q];
-                const ScalarT vel_norm_q = uq.norm();
+                const T vel_norm_q = uq.norm();
 
-                const ScalarT tau_q = supg_tau< ScalarT >( vel_norm_q, diffusivity_, h, 1e-08 );
+                const T tau_q = supg_tau< T >( vel_norm_q, diffusivity, h, 1e-08 );
 
                 // quadrature weight for this point (if you have weights)
-                const ScalarT wq = quad_weights[q]; // if not available, use 1.0
+                const T wq = quad_weights[q]; // if not available, use 1.0
                 tau_accum += tau_q * wq;
                 waccum += wq;
             }
 
             // final cell/wedge tau: volume-weighted average
-            ScalarT tau_cell              = ( waccum > 0.0 ) ? ( tau_accum / waccum ) : 0.0;
+            T tau_cell                    = ( waccum > 0.0 ) ? ( tau_accum / waccum ) : 0.0;
             streamline_diffusivity[wedge] = tau_cell;
         }
 
         // Compute the local element matrix.
-        dense::Mat< ScalarT, 6, 6 > A[num_wedges_per_hex_cell] = {};
-        dense::Mat< ScalarT, 6, 6 > M[num_wedges_per_hex_cell] = {};
+        dense::Mat< T, 6, 6 > A[num_wedges_per_hex_cell] = {};
+        dense::Mat< T, 6, 6 > M[num_wedges_per_hex_cell] = {};
 
         for ( int q = 0; q < num_quad_points; q++ )
         {
@@ -743,13 +751,13 @@ class UnsteadyAdvectionDiffusionSUPG
                         const auto grad_j  = J_inv_transposed * grad_shape( j, quad_points[q] );
 
                         const auto mass      = shape_i * shape_j;
-                        const auto diffusion = diffusivity_ * ( grad_i ).dot( grad_j );
+                        const auto diffusion = diffusivity * ( grad_i ).dot( grad_j );
                         const auto advection = ( vel.dot( grad_j ) ) * shape_i;
                         const auto streamline_diffusion =
                             streamline_diffusivity[wedge] * ( vel.dot( grad_j ) ) * ( vel.dot( grad_i ) );
 
-                        M[wedge]( i, j ) += w * mass_scaling_ * mass * det;
-                        A[wedge]( i, j ) += w * dt_ * ( diffusion + advection + streamline_diffusion ) * det;
+                        M[wedge]( i, j ) += w * mass_scaling * mass * det;
+                        A[wedge]( i, j ) += w * dt * ( diffusion + advection + streamline_diffusion ) * det;
                     }
                 }
             }
@@ -757,10 +765,10 @@ class UnsteadyAdvectionDiffusionSUPG
 
         if ( lumped_mass_ )
         {
-            dense::Vec< ScalarT, 6 > ones;
+            dense::Vec< T, 6 > ones;
             ones.fill( 1.0 );
-            M[0] = dense::Mat< ScalarT, 6, 6 >::diagonal_from_vec( M[0] * ones );
-            M[1] = dense::Mat< ScalarT, 6, 6 >::diagonal_from_vec( M[1] * ones );
+            M[0] = dense::Mat< T, 6, 6 >::diagonal_from_vec( M[0] * ones );
+            M[1] = dense::Mat< T, 6, 6 >::diagonal_from_vec( M[1] * ones );
         }
 
         if ( treat_boundary_ )
@@ -773,7 +781,7 @@ class UnsteadyAdvectionDiffusionSUPG
 
             for ( int wedge = 0; wedge < num_wedges_per_hex_cell; wedge++ )
             {
-                dense::Mat< ScalarT, 6, 6 > boundary_mask;
+                dense::Mat< T, 6, 6 > boundary_mask;
                 boundary_mask.fill( 1.0 );
                 if ( at_cmb_boundary )
                 {
@@ -818,15 +826,24 @@ class UnsteadyAdvectionDiffusionSUPG
             A[1] = A[1].diagonal();
         }
 
-        dense::Vec< ScalarT, 6 > src[num_wedges_per_hex_cell];
-        extract_local_wedge_scalar_coefficients( src, local_subdomain_id, x_cell, y_cell, r_cell, src_ );
+        dense::Vec< ScalarT, 6 > src_s[num_wedges_per_hex_cell];
+        extract_local_wedge_scalar_coefficients( src_s, local_subdomain_id, x_cell, y_cell, r_cell, src_ );
+        dense::Vec< T, 6 > src[num_wedges_per_hex_cell];
+        for ( int wedge = 0; wedge < num_wedges_per_hex_cell; wedge++ )
+            for ( int i = 0; i < num_nodes_per_wedge; i++ )
+                src[wedge]( i ) = static_cast< T >( src_s[wedge]( i ) );
 
-        dense::Vec< ScalarT, 6 > dst[num_wedges_per_hex_cell];
+        dense::Vec< T, 6 > dst[num_wedges_per_hex_cell];
 
         dst[0] = ( M[0] + A[0] ) * src[0];
         dst[1] = ( M[1] + A[1] ) * src[1];
 
-        atomically_add_local_wedge_scalar_coefficients( dst_, local_subdomain_id, x_cell, y_cell, r_cell, dst );
+        dense::Vec< ScalarT, 6 > dst_s[num_wedges_per_hex_cell];
+        for ( int wedge = 0; wedge < num_wedges_per_hex_cell; wedge++ )
+            for ( int i = 0; i < num_nodes_per_wedge; i++ )
+                dst_s[wedge]( i ) = static_cast< ScalarT >( dst[wedge]( i ) );
+
+        atomically_add_local_wedge_scalar_coefficients( dst_, local_subdomain_id, x_cell, y_cell, r_cell, dst_s );
     }
 };
 
