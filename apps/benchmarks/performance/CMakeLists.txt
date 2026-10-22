@@ -19,6 +19,7 @@ add_terra_performance_benchmark(benchmark_epsdivdiv_precision_matrix)
 add_terra_performance_benchmark(benchmark_epsdivdiv_precision_ablation)
 add_terra_performance_benchmark(benchmark_epsdivdiv_tiles)
 add_terra_performance_benchmark(benchmark_epsdivdiv_stored)
+add_terra_performance_benchmark(benchmark_stokes_precision_sweep)
 
 # Device line info on the precision sweep only, for ncu source-level profiling of the
 # EpsDivDiv kernels (ncu --section SourceCounters / --import-source). Off by default:

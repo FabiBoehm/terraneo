@@ -19,7 +19,9 @@ namespace terra::fe::wedge::operators::shell {
 // to every block. It defaults to ScalarT, so existing instantiations are unchanged.
 // Pass double to decouple it: the Jacobian is formed by differencing coordinates,
 // which loses the geometry entirely in 16-bit. ScalarT governs the stored fields.
-template < typename ScalarT, int VecDim = 3, typename CoordScalarT = ScalarT >
+// ArithScalarT is the fast paths' staging and contraction precision of all three
+// blocks; it defaults to ScalarT (so a float Stokes operator runs float kernels).
+template < typename ScalarT, int VecDim = 3, typename CoordScalarT = ScalarT, typename ArithScalarT = ScalarT >
 class EpsDivDivStokes
 {
   public:
@@ -27,9 +29,9 @@ class EpsDivDivStokes
     using DstVectorType = linalg::VectorQ1IsoQ2Q1< ScalarT, VecDim >;
     using ScalarType    = ScalarT;
 
-    using Block11Type = EpsilonDivDivKerngen< ScalarType, VecDim, CoordScalarT >;
-    using Block12Type = Gradient< ScalarType, CoordScalarT >;
-    using Block21Type = Divergence< ScalarType, CoordScalarT >;
+    using Block11Type = EpsilonDivDivKerngen< ScalarType, VecDim, CoordScalarT, ArithScalarT >;
+    using Block12Type = Gradient< ScalarType, CoordScalarT, ArithScalarT >;
+    using Block21Type = Divergence< ScalarType, CoordScalarT, ArithScalarT >;
     using Block22Type = Zero< ScalarType >;
 
   private:
