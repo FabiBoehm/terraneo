@@ -133,6 +133,14 @@ class Divergence
         int r_block = warp_tile::default_r_block( domain_fine );
         if ( r_block == 16 && shmem_bytes< 17 >() > warp_tile::kokkos_shmem_limit( 64, min_blocks_ ) )
             r_block = 8;
+        // A tile whose scratch does not fit the higher occupancy target runs at the default one.
+        if ( min_blocks_ > warp_min_blocks && shmem_bytes< 9 >() > warp_tile::kokkos_shmem_limit( 64, min_blocks_ ) )
+        {
+            min_blocks_ = warp_min_blocks;
+            r_block     = warp_tile::default_r_block( domain_fine );
+            if ( r_block == 16 && shmem_bytes< 17 >() > warp_tile::kokkos_shmem_limit( 64, min_blocks_ ) )
+                r_block = 8;
+        }
         tiling_ = warp_tile::Tiling( domain_fine, r_block );
         if ( const char* env = std::getenv( "TERRA_GRADDIV_FAST" ) )
             fast_enabled_ = ( std::atoi( env ) != 0 );
