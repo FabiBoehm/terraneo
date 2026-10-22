@@ -134,32 +134,45 @@ void zero_perimeter( GridData dst, const Tiling& t )
     const int ncols_x    = nmult * nx;           // x % lat == 0, any y
     const int nx_rest    = nx - nmult;           // x % lat != 0
     const int ncols      = ncols_x + nmult * nx_rest; // + y % lat == 0, x % lat != 0
-    Kokkos::parallel_for(
-        "warp_tile_zero_perimeter",
-        Kokkos::RangePolicy<>( 0, size_t( t.nsub ) * size_t( ncols ) * size_t( nr ) ),
-        KOKKOS_LAMBDA( const size_t i ) {
-            const int r   = int( i % size_t( nr ) );
-            const int col = int( ( i / size_t( nr ) ) % size_t( ncols ) );
-            const int s   = int( i / size_t( nr ) / size_t( ncols ) );
-            int       xi, yi;
-            if ( col < ncols_x )
-            {
-                xi = ( col / nx ) * lat;
-                yi = col % nx;
-            }
-            else
-            {
-                const int c  = col - ncols_x;
-                const int xr = c % nx_rest;
-                yi           = ( c / nx_rest ) * lat;
-                xi           = xr + 1 + xr / ( lat - 1 ); // skips the multiples of lat
-            }
-            if constexpr ( VecDim == 1 )
+    // The index decode, shared by the scalar and the vector kernel (nvcc does not
+    // allow an extended lambda's first capture inside an if constexpr).
+    auto decode = KOKKOS_LAMBDA( const size_t i, int& s, int& xi, int& yi, int& r ) {
+        r             = int( i % size_t( nr ) );
+        const int col = int( ( i / size_t( nr ) ) % size_t( ncols ) );
+        s             = int( i / size_t( nr ) / size_t( ncols ) );
+        if ( col < ncols_x )
+        {
+            xi = ( col / nx ) * lat;
+            yi = col % nx;
+        }
+        else
+        {
+            const int c  = col - ncols_x;
+            const int xr = c % nx_rest;
+            yi           = ( c / nx_rest ) * lat;
+            xi           = xr + 1 + xr / ( lat - 1 ); // skips the multiples of lat
+        }
+    };
+    const Kokkos::RangePolicy<> policy( 0, size_t( t.nsub ) * size_t( ncols ) * size_t( nr ) );
+    if constexpr ( VecDim == 1 )
+    {
+        Kokkos::parallel_for(
+            "warp_tile_zero_perimeter", policy, KOKKOS_LAMBDA( const size_t i ) {
+                int s, xi, yi, r;
+                decode( i, s, xi, yi, r );
                 dst( s, xi, yi, r ) = S( 0 );
-            else
+            } );
+    }
+    else
+    {
+        Kokkos::parallel_for(
+            "warp_tile_zero_perimeter", policy, KOKKOS_LAMBDA( const size_t i ) {
+                int s, xi, yi, r;
+                decode( i, s, xi, yi, r );
                 for ( int d = 0; d < VecDim; ++d )
                     dst( s, xi, yi, r, d ) = S( 0 );
-        } );
+            } );
+    }
 }
 
 /// Shared-memory seam between the warps of a team: the top row of warp w hands its

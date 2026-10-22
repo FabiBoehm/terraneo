@@ -634,6 +634,11 @@ class LowPrecABlock final
         }
     }
 
+    /// The hierarchy's own objects, for a solve that runs entirely in M (the
+    /// full-Stokes-in-M arm): the V-cycle and the finest-level operator it solves.
+    MGM&   mg() { return *mg_; }
+    ViscM& a_fine() { return *a_fine_; }
+
   private:
 
     std::vector< ScalM > eta_m_;
@@ -1272,6 +1277,287 @@ RunResult run_ablock_mg( int    min_level,
     return { iters, rel_residual_final, std::numeric_limits< double >::quiet_NaN(), rel_residual_final <= 1e-6 };
 }
 
+// =============================================================================
+// Full Stokes solve in a reduced precision M.
+// =============================================================================
+//
+// --stokes-prec float|fp16|bf16: everything the solve touches is in M -- the Stokes
+// operator (EpsDivDiv, gradient, divergence; geometry in GeomM), the outer FGMRES
+// and its Krylov basis, the block-triangular preconditioner, the lumped pressure
+// mass and the whole A-block V-cycle hierarchy (LowPrecABlock< M, M, GeomM >). The
+// viscosity, the right-hand side and the inverse diagonals are generated in double
+// and narrowed once. The outer residual history is M's own; after the solve the
+// solution is widened and the true residual is formed with the double operator, so
+// the arm is judged against the same norm as the double run.
+
+/// Velocity preconditioner in M: one V-cycle of the LowPrecABlock hierarchy. For a
+/// 16-bit M the input is normalised to unit max-norm first (fp16 saturates at 65504),
+/// as the double-interface LowPrecABlock::solve_impl does.
+template < typename ViscM, typename MGM, typename VecM >
+class VCyclePrecImpl : public linalg::solvers::VelocityPrecHandle< ViscM >::Impl
+{
+  public:
+    using M = typename ViscM::ScalarType;
+    VCyclePrecImpl( MGM& mg, VecM& b_scaled )
+    : mg_( mg )
+    , b_scaled_( b_scaled )
+    {}
+    void solve_impl( ViscM& A, VecM& x, const VecM& b ) override
+    {
+        if constexpr ( sizeof( M ) == 2 )
+        {
+            const double scale = static_cast< double >( linalg::norm_inf( b ) );
+            if ( !( scale > 0.0 ) )
+            {
+                linalg::assign( x, util::narrow< M >( 0.0 ) );
+                return;
+            }
+            linalg::lincomb( b_scaled_, { util::narrow< M >( 1.0 / scale ) }, { b } );
+            linalg::assign( x, util::narrow< M >( 0.0 ) );
+            linalg::solvers::solve( mg_, A, x, b_scaled_ );
+            linalg::lincomb( x, { util::narrow< M >( scale ) }, { x } );
+        }
+        else
+        {
+            linalg::assign( x, util::narrow< M >( 0.0 ) );
+            linalg::solvers::solve( mg_, A, x, b );
+        }
+    }
+
+  private:
+    MGM&  mg_;
+    VecM& b_scaled_;
+};
+
+template < typename M, typename GeomM >
+RunResult run_stokes_in_precision( int    min_level,
+                                   int    max_level,
+                                   int    cheby_order,
+                                   double perturb_amp,
+                                   double rmu,
+                                   int    max_cycles,
+                                   BCKind bc,
+                                   int    visc_profile,
+                                   double coarse_tol,
+                                   double hourglass_c,
+                                   double outer_tol,
+                                   OuterSolver outer_solver,
+                                   int    outer_restart_in )
+{
+    std::vector< DistributedDomain >                                  domains;
+    std::vector< Grid3DDataVec< double, 3 > >                         coords_shell;
+    std::vector< Grid2DDataScalar< double > >                         coords_radii;
+    std::vector< Grid4DDataScalar< grid::NodeOwnershipFlag > >        mask_data;
+    std::vector< Grid4DDataScalar< grid::shell::ShellBoundaryFlag > > boundary_mask_data;
+
+    for ( int level = min_level; level <= max_level; ++level )
+    {
+        const int idx = level - min_level;
+        domains.push_back( DistributedDomain::create_uniform( level, level, kRm, kRp, 0, 0 ) );
+        coords_shell.push_back( grid::shell::subdomain_unit_sphere_single_shell_coords< double >( domains[idx] ) );
+        coords_radii.push_back( grid::shell::subdomain_shell_radii< double >( domains[idx] ) );
+        mask_data.push_back( grid::setup_node_ownership_mask_data( domains[idx] ) );
+        boundary_mask_data.push_back( grid::shell::setup_boundary_mask_data( domains[idx] ) );
+    }
+    const size_t num_levels     = domains.size();
+    const size_t velocity_level = num_levels - 1;
+    const size_t pressure_level = num_levels - 2;
+
+    const auto         bc_flag = ( bc == BCKind::DIRICHLET ) ? DIRICHLET : FREESLIP;
+    BoundaryConditions bcs     = { { CMB, bc_flag }, { SURFACE, bc_flag } };
+
+    using StokesD      = fe::wedge::operators::shell::EpsDivDivStokes< double >;
+    using ViscousD     = StokesD::Block11Type;
+    using ViscousMassD = fe::wedge::operators::shell::VectorMass< double >;
+    using StokesM      = fe::wedge::operators::shell::EpsDivDivStokes< M, 3, GeomM, M >;
+    using ViscousM     = typename StokesM::Block11Type;
+    using GradientM    = typename StokesM::Block12Type;
+    using PressureMassM = fe::wedge::operators::shell::KMass< M, GeomM >;
+    using VecM         = VectorQ1Vec< M, 3 >;
+    using ScalM        = VectorQ1Scalar< M >;
+    using IsoM         = VectorQ1IsoQ2Q1< M >;
+
+    // ---- double setup: viscosity, inverse diagonals, right-hand side ----
+    const double r_center = 2.0, half_width = 0.05, eta_band = 1.0 / rmu;
+    std::vector< VectorQ1Scalar< double > > eta;
+    for ( size_t level = 0; level < num_levels; ++level )
+    {
+        eta.emplace_back( "eta_" + std::to_string( level ), domains[level], mask_data[level] );
+        if ( visc_profile == 1 )
+            Kokkos::parallel_for( "layer_viscosity", local_domain_md_range_policy_nodes( domains[level] ),
+                                  RadialBandViscosityInterpolator{ coords_shell[level], coords_radii[level],
+                                                                   eta[level].grid_data(), eta_band, r_center, half_width } );
+        else
+            Kokkos::parallel_for( "fk_viscosity", local_domain_md_range_policy_nodes( domains[level] ),
+                                  FrankKamenetskiiViscosityInterpolator{ coords_shell[level], coords_radii[level],
+                                                                         eta[level].grid_data(), rmu, perturb_amp } );
+        Kokkos::fence();
+    }
+
+    std::vector< VectorQ1Vec< double > > inverse_diagonals;
+    for ( size_t level = 0; level < num_levels; ++level )
+    {
+        ViscousD a_d( domains[level], coords_shell[level], coords_radii[level], boundary_mask_data[level],
+                      eta[level].grid_data(), bcs, true );
+        a_d.set_hourglass_coefficient( hourglass_c );
+        inverse_diagonals.emplace_back( "inv_diag_" + std::to_string( level ), domains[level], mask_data[level] );
+        VectorQ1Vec< double > ones( "ones", domains[level], mask_data[level] );
+        linalg::assign( ones, 1.0 );
+        linalg::apply( a_d, ones, inverse_diagonals.back() );
+        linalg::invert_entries( inverse_diagonals.back() );
+    }
+
+    StokesD K_d( domains[velocity_level], domains[pressure_level], coords_shell[velocity_level],
+                 coords_radii[velocity_level], boundary_mask_data[velocity_level], eta[velocity_level].grid_data(),
+                 bcs, false );
+    K_d.block_11().set_hourglass_coefficient( hourglass_c );
+
+    ViscousMassD Mv( domains[velocity_level], coords_shell[velocity_level], coords_radii[velocity_level], false );
+    VectorQ1IsoQ2Q1< double > f_d( "f_d", domains[velocity_level], domains[pressure_level], mask_data[velocity_level],
+                                   mask_data[pressure_level] );
+    VectorQ1IsoQ2Q1< double > tmp_d( "tmp_d", domains[velocity_level], domains[pressure_level],
+                                     mask_data[velocity_level], mask_data[pressure_level] );
+    Kokkos::parallel_for( "radial_buoyancy_rhs", local_domain_md_range_policy_nodes( domains[velocity_level] ),
+                          RadialBuoyancyRHSInterpolator{ coords_shell[velocity_level], coords_radii[velocity_level],
+                                                         tmp_d.block_1().grid_data(), kRayleigh, perturb_amp } );
+    Kokkos::fence();
+    linalg::apply( Mv, tmp_d.block_1(), f_d.block_1() );
+    if ( bc == BCKind::FREESLIP )
+        fe::strong_algebraic_freeslip_enforcement_in_place( f_d, coords_shell[velocity_level],
+                                                            boundary_mask_data[velocity_level], BOUNDARY );
+    else
+        fe::strong_algebraic_homogeneous_velocity_dirichlet_enforcement_stokes_like(
+            f_d, boundary_mask_data[velocity_level], BOUNDARY );
+
+    // ---- everything in M from here ----
+    const auto coords_g_v = grid::shell::subdomain_unit_sphere_single_shell_coords< GeomM >( domains[velocity_level] );
+    const auto radii_g_v  = grid::shell::subdomain_shell_radii< GeomM >( domains[velocity_level] );
+    const auto coords_g_p = grid::shell::subdomain_unit_sphere_single_shell_coords< GeomM >( domains[pressure_level] );
+    const auto radii_g_p  = grid::shell::subdomain_shell_radii< GeomM >( domains[pressure_level] );
+
+    ScalM eta_m( "eta_m", domains[velocity_level], mask_data[velocity_level] );
+    linalg::convert( eta[velocity_level], eta_m );
+
+    StokesM K_m( domains[velocity_level], domains[pressure_level], coords_g_v, radii_g_v,
+                 boundary_mask_data[velocity_level], eta_m.grid_data(), bcs, false );
+    K_m.block_11().set_hourglass_coefficient( hourglass_c );
+
+    LowPrecABlock< M, M, GeomM > hierarchy( domains, coords_shell, coords_radii, mask_data, boundary_mask_data, eta,
+                                            inverse_diagonals, bcs, cheby_order, 3, coarse_tol, hourglass_c );
+
+    // Lumped pressure mass with coefficient 1/eta, its inverse diagonal as the Schur block.
+    ScalM k_pm( "k_pm", domains[pressure_level], mask_data[pressure_level] );
+    {
+        VectorQ1Scalar< double > k_pm_d( "k_pm_d", domains[pressure_level], mask_data[pressure_level] );
+        linalg::assign( k_pm_d, eta[pressure_level] );
+        linalg::invert_entries( k_pm_d );
+        linalg::convert( k_pm_d, k_pm );
+    }
+    PressureMassM pmass( domains[pressure_level], coords_g_p, radii_g_p, k_pm.grid_data(), false );
+    pmass.set_lumped_diagonal( true );
+    ScalM pmass_inv_diag( "pmass_inv_diag", domains[pressure_level], mask_data[pressure_level] );
+    {
+        ScalM ones_p( "ones_p", domains[pressure_level], mask_data[pressure_level] );
+        linalg::assign( ones_p, util::narrow< M >( 1.0 ) );
+        linalg::apply( pmass, ones_p, pmass_inv_diag );
+        linalg::invert_entries( pmass_inv_diag );
+    }
+    using PrecSchurM = InverseDiagonalPreconditioner< PressureMassM >;
+    PrecSchurM prec_schur( pmass_inv_diag );
+
+    using VelPrecM = linalg::solvers::VelocityPrecHandle< ViscousM >;
+    VecM b_scaled( "b_scaled_m", domains[velocity_level], mask_data[velocity_level] );
+    VelPrecM vel_prec( std::make_shared< VCyclePrecImpl< ViscousM, typename LowPrecABlock< M, M, GeomM >::MGM, VecM > >(
+        hierarchy.mg(), b_scaled ) );
+
+    using PrecStokesM = linalg::solvers::BlockTriangularPreconditioner2x2< StokesM, ViscousM, PressureMassM,
+                                                                           GradientM, VelPrecM, PrecSchurM >;
+    IsoM tri_tmp( "tri_tmp_m", domains[velocity_level], domains[pressure_level], mask_data[velocity_level],
+                  mask_data[pressure_level] );
+    // The (1,1) block handed to the preconditioner is the hierarchy's own fine
+    // operator (what its V-cycle smooths with); the outer operator is K_m.
+    PrecStokesM prec_stokes( hierarchy.a_fine(), pmass, K_m.block_12(), tri_tmp, vel_prec, prec_schur );
+
+    IsoM f_m( "f_m", domains[velocity_level], domains[pressure_level], mask_data[velocity_level], mask_data[pressure_level] );
+    IsoM u_m( "u_m", domains[velocity_level], domains[pressure_level], mask_data[velocity_level], mask_data[pressure_level] );
+    linalg::convert( f_d, f_m );
+    linalg::assign( u_m, util::narrow< M >( 0.0 ) );
+
+    const int outer_restart = ( outer_restart_in > 0 ) ? outer_restart_in : 50;
+    auto      outer_table   = std::make_shared< util::Table >();
+    linalg::solvers::FGMRESOptions< M > outer_opts;
+    outer_opts.restart                     = outer_restart;
+    outer_opts.max_iterations              = max_cycles;
+    outer_opts.relative_residual_tolerance = std::max( outer_tol, 10.0 * util::epsilon_of< M >() );
+    outer_opts.absolute_residual_tolerance = 1e-16;
+
+    util::logroot << "[stokes-in-M] storage " << sizeof( M ) << " B, geometry " << sizeof( GeomM )
+                  << " B, outer rel-tol " << outer_opts.relative_residual_tolerance << std::endl;
+
+    if ( outer_solver == OuterSolver::IR )
+    {
+        // Iterative refinement in M: residual, correction and update all in M.
+        IsoM r_ir( "r_ir_m", domains[velocity_level], domains[pressure_level], mask_data[velocity_level], mask_data[pressure_level] );
+        IsoM d_ir( "d_ir_m", domains[velocity_level], domains[pressure_level], mask_data[velocity_level], mask_data[pressure_level] );
+        const auto t0      = std::chrono::steady_clock::now();
+        auto       elapsed = [&]() { return std::chrono::duration< double >( std::chrono::steady_clock::now() - t0 ).count(); };
+        linalg::apply( K_m, u_m, r_ir );
+        linalg::lincomb( r_ir, { util::narrow< M >( 1.0 ), util::narrow< M >( -1.0 ) }, { f_m, r_ir } );
+        const double r0 = static_cast< double >( linalg::norm_2( r_ir ) );
+        outer_table->add_row( { { "tag", std::string( "stokes_fgmres" ) }, { "iteration", 0 }, { "elapsed_s", elapsed() },
+                                { "relative_residual", 1.0 }, { "absolute_residual", r0 } } );
+        for ( int k = 1; k <= max_cycles; ++k )
+        {
+            linalg::assign( d_ir, util::narrow< M >( 0.0 ) );
+            linalg::solvers::solve( prec_stokes, K_m, d_ir, r_ir );
+            if ( linalg::has_nan_or_inf( d_ir ) )
+            {
+                util::logroot << "IR: the preconditioner returned NaN/Inf at iteration " << k << "; stopping." << std::endl;
+                break;
+            }
+            linalg::lincomb( u_m, { util::narrow< M >( 1.0 ), util::narrow< M >( 1.0 ) }, { u_m, d_ir } );
+            linalg::apply( K_m, u_m, r_ir );
+            linalg::lincomb( r_ir, { util::narrow< M >( 1.0 ), util::narrow< M >( -1.0 ) }, { f_m, r_ir } );
+            const double rk = static_cast< double >( linalg::norm_2( r_ir ) );
+            const double rel = ( r0 > 0.0 ) ? rk / r0 : 0.0;
+            outer_table->add_row( { { "tag", std::string( "stokes_fgmres" ) }, { "iteration", k }, { "elapsed_s", elapsed() },
+                                    { "relative_residual", rel }, { "absolute_residual", rk } } );
+            if ( rel <= outer_opts.relative_residual_tolerance )
+                break;
+        }
+    }
+    else
+    {
+        std::vector< IsoM > tmp_fgmres;
+        for ( int i = 0; i < 2 * outer_restart + 4; ++i )
+            tmp_fgmres.emplace_back( "tmp_fgmres_m_" + std::to_string( i ), domains[velocity_level],
+                                     domains[pressure_level], mask_data[velocity_level], mask_data[pressure_level] );
+        linalg::solvers::FGMRES< StokesM, PrecStokesM > fgmres( tmp_fgmres, outer_opts, outer_table, prec_stokes );
+        fgmres.set_tag( "stokes_fgmres" );
+        linalg::solvers::solve( fgmres, K_m, u_m, f_m );
+    }
+
+    outer_table->query_rows_equals( "tag", "stokes_fgmres" )
+        .select_columns( { "absolute_residual", "relative_residual", "iteration", "elapsed_s" } )
+        .print_pretty();
+
+    // The true residual in double, against the double right-hand side.
+    VectorQ1IsoQ2Q1< double > u_d( "u_d", domains[velocity_level], domains[pressure_level], mask_data[velocity_level],
+                                   mask_data[pressure_level] );
+    linalg::convert( u_m, u_d );
+    linalg::apply( K_d, u_d, tmp_d );
+    linalg::lincomb( tmp_d, { 1.0, -1.0 }, { f_d, tmp_d } );
+    const double res_d = static_cast< double >( linalg::norm_2( tmp_d ) );
+    const double f_norm = static_cast< double >( linalg::norm_2( f_d ) );
+    util::logroot << "[stokes-in-M] true residual in double: " << res_d << "  relative to ||f|| " << res_d / f_norm
+                  << std::endl;
+
+    const auto   rows  = outer_table->query_rows_equals( "tag", "stokes_fgmres" ).rows();
+    const int    iters = rows.empty() ? 0 : static_cast< int >( rows.size() ) - 1;
+    const double rel_residual_final = rows.empty() ? 1.0 : std::get< double >( rows.back().at( "relative_residual" ) );
+    return { iters, rel_residual_final, res_d / f_norm, rel_residual_final <= 1e-6 };
+}
+
 // Direct fidelity check: does GCA's stored-matrix coarse operator reproduce the
 // TRUE Galerkin action R(A(P(x)))?  Builds a single coarse/fine level pair, the
 // Neumann fine block A (the GCA descent's source), coarsens it into A_c via
@@ -1536,10 +1822,14 @@ int main( int argc, char** argv )
     double      outer_tol    = 1e-6;             // --outer-tol T
     OuterSolver outer_solver = OuterSolver::FGMRES; // --outer-solver fgmres|ir
     int         outer_restart_in = 0;               // --outer-restart N (0 = default 50)
+    std::string stokes_prec      = "double";        // --stokes-prec double|float|fp16|bf16: the whole Stokes solve in M
+    bool        stokes_geom_low  = false;           // --stokes-geom low: geometry in float for the M arm
     for ( int i = 1; i + 1 < argc; ++i )
     {
         const std::string a = argv[i];
-        if ( a == "--min-level" )           min_level   = std::atoi( argv[i + 1] );
+        if ( a == "--stokes-prec" )         stokes_prec = argv[i + 1];
+        else if ( a == "--stokes-geom" )    stokes_geom_low = ( std::string( argv[i + 1] ) == "low" );
+        else if ( a == "--min-level" )           min_level   = std::atoi( argv[i + 1] );
         else if ( a == "--max-level" )      max_level   = std::atoi( argv[i + 1] );
         else if ( a == "--cheby-order" )    cheby_order = std::atoi( argv[i + 1] );
         else if ( a == "--max-cycles" )     max_cycles  = std::atoi( argv[i + 1] );
@@ -1684,8 +1974,27 @@ int main( int argc, char** argv )
         {
             util::logroot << "\n--- rmu = " << rmu << ", " << s.name << " ---\n";
 
-            const auto res =
-                run_ablock_mg( min_level, max_level, cheby_order, perturb_amp, rmu, s.gca, no_stokes_prec,
+            RunResult res;
+            if ( full_stokes && !ablock_outer && stokes_prec != "double" )
+            {
+                // The whole Stokes solve in M (DCA coarse operators only).
+                using Half  = Kokkos::Experimental::half_t;
+                using BHalf = Kokkos::Experimental::bhalf_t;
+                auto run_m  = [&]< typename M, typename G >() {
+                    return run_stokes_in_precision< M, G >( min_level, max_level, cheby_order, perturb_amp, rmu,
+                                                            max_cycles, bc, visc_profile, coarse_tol, hourglass_c,
+                                                            outer_tol, outer_solver, outer_restart_in );
+                };
+                util::logroot << "    stokes-prec = " << stokes_prec << ( stokes_geom_low ? " (geometry float)" : " (geometry double)" ) << "\n";
+                if ( stokes_prec == "float" )
+                    res = stokes_geom_low ? run_m.template operator()< float, float >() : run_m.template operator()< float, double >();
+                else if ( stokes_prec == "fp16" )
+                    res = stokes_geom_low ? run_m.template operator()< Half, float >() : run_m.template operator()< Half, double >();
+                else
+                    res = stokes_geom_low ? run_m.template operator()< BHalf, float >() : run_m.template operator()< BHalf, double >();
+            }
+            else
+                res = run_ablock_mg( min_level, max_level, cheby_order, perturb_amp, rmu, s.gca, no_stokes_prec,
                                max_cycles, bc, s.interp,
                                visc_profile, coarse_tol, full_stokes, ablock_outer, krylov_prec, ablock_prec, ablock_arith, ablock_geom,
                                hourglass_c, outer_tol, outer_solver, outer_restart_in );
