@@ -150,6 +150,11 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
         constexpr int total      = nxy * nslot;
         const int     ts         = team.team_size();
         const int     rank       = team.team_rank();
+        // Uniform per team: a tile whose nodes and levels all lie in the grid needs no
+        // per-item guard (ncu: the guarded form's selects and compares were 2.6e8 of
+        // the 16-bit kernel's instructions; only the boundary tiles need them).
+        const bool inside = ( x0 + lat_tile <= hex_lat_ ) && ( y0 + lat_tile <= hex_lat_ ) && ( r0 >= 1 ) &&
+                            ( r0 - 1 + nslot - 1 <= hex_rad_ );
         for ( int base = rank; base < total; base += ts * StageBatch )
         {
             ScalarType vk[StageBatch], v0[StageBatch], v1[StageBatch], v2[StageBatch];
@@ -163,7 +168,7 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                 const int xi   = x0 + node % ( lat_tile + 1 );
                 const int yi   = y0 + node / ( lat_tile + 1 );
                 const int rr   = r0 - 1 + lvl;
-                ok[u] = ( t < total ) && xi <= hex_lat_ && yi <= hex_lat_ && rr >= 0 && rr <= hex_rad_;
+                ok[u] = ( t < total ) && ( inside || ( xi <= hex_lat_ && yi <= hex_lat_ && rr >= 0 && rr <= hex_rad_ ) );
                 if ( ok[u] )
                 {
                     vk[u] = k_( local_subdomain_id, xi, yi, rr );
@@ -172,18 +177,38 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
                     v2[u] = src_( local_subdomain_id, xi, yi, rr, 2 );
                 }
             }
-#pragma unroll
-            for ( int u = 0; u < StageBatch; ++u )
+            if ( inside )
             {
-                const int t = base + u * ts;
-                if ( t < total )
+#pragma unroll
+                for ( int u = 0; u < StageBatch; ++u )
                 {
-                    const int node = t / nslot;
-                    const int lvl  = t - node * nslot;
-                    k_sh( node, lvl )      = ok[u] ? static_cast< StageT >( vk[u] ) : StageT( 0 );
-                    src_sh( node, 0, lvl ) = ok[u] ? static_cast< StageT >( v0[u] ) : StageT( 0 );
-                    src_sh( node, 1, lvl ) = ok[u] ? static_cast< StageT >( v1[u] ) : StageT( 0 );
-                    src_sh( node, 2, lvl ) = ok[u] ? static_cast< StageT >( v2[u] ) : StageT( 0 );
+                    const int t = base + u * ts;
+                    if ( t < total )
+                    {
+                        const int node = t / nslot;
+                        const int lvl  = t - node * nslot;
+                        k_sh( node, lvl )      = static_cast< StageT >( vk[u] );
+                        src_sh( node, 0, lvl ) = static_cast< StageT >( v0[u] );
+                        src_sh( node, 1, lvl ) = static_cast< StageT >( v1[u] );
+                        src_sh( node, 2, lvl ) = static_cast< StageT >( v2[u] );
+                    }
+                }
+            }
+            else
+            {
+#pragma unroll
+                for ( int u = 0; u < StageBatch; ++u )
+                {
+                    const int t = base + u * ts;
+                    if ( t < total )
+                    {
+                        const int node = t / nslot;
+                        const int lvl  = t - node * nslot;
+                        k_sh( node, lvl )      = ok[u] ? static_cast< StageT >( vk[u] ) : StageT( 0 );
+                        src_sh( node, 0, lvl ) = ok[u] ? static_cast< StageT >( v0[u] ) : StageT( 0 );
+                        src_sh( node, 1, lvl ) = ok[u] ? static_cast< StageT >( v1[u] ) : StageT( 0 );
+                        src_sh( node, 2, lvl ) = ok[u] ? static_cast< StageT >( v2[u] ) : StageT( 0 );
+                    }
                 }
             }
         }
