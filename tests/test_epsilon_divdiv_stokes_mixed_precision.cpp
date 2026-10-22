@@ -646,8 +646,9 @@ class LowPrecABlock final
     /// (one row per solve for iteration 0, one per iteration).
     std::pair< long, long > coarse_work() const
     {
-        long solves = 0, its = 0;
-        for ( const auto& r : coarse_table_->query_rows_equals( "tag", "mp_coarse_fgmres" ).rows() )
+        long       solves = 0, its = 0;
+        const auto rows = coarse_table_->query_rows_equals( "tag", "mp_coarse_fgmres" ).rows(); // a copy: the query is a temporary
+        for ( const auto& r : rows )
         {
             if ( std::get< int >( r.at( "iteration" ) ) == 0 )
                 ++solves;
@@ -1288,8 +1289,9 @@ RunResult run_ablock_mg( int    min_level,
         .select_columns( { "absolute_residual", "relative_residual", "iteration", "elapsed_s" } )
         .print_pretty();
     {
-        long cs = 0, ci = 0;
-        for ( const auto& r : coarse_table->query_rows_equals( "tag", "coarse_grid_fgmres" ).rows() )
+        long       cs = 0, ci = 0;
+        const auto crows = coarse_table->query_rows_equals( "tag", "coarse_grid_fgmres" ).rows(); // a copy
+        for ( const auto& r : crows )
             ( std::get< int >( r.at( "iteration" ) ) == 0 ) ? ++cs : ++ci;
         util::logroot << "[stokes] coarse FGMRES (double hierarchy): " << cs << " solves, " << ci << " iterations ("
                       << ( cs ? double( ci ) / cs : 0.0 ) << " per solve)" << std::endl;
