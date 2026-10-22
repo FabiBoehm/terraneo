@@ -192,6 +192,18 @@ class FGMRES
         {
             const int iters_at_cycle_start = total_iters;
 
+            // A 16-bit basis cannot normalise a residual whose inverse norm overflows
+            // the storage type (fp16: beta0 < 1.5e-5 gives 1/beta0 = Inf, V_0 = NaN and
+            // the preconditioner returns NaN on the next restart). Such a residual is at
+            // the precision's floor: leave with the solution as it stands.
+            if ( 1.0 / static_cast< double >( beta0 ) > util::max_of< ScalarType >() )
+            {
+                util::logroot << "FGMRES[" << tag_ << "]: residual norm " << double( beta0 )
+                              << " cannot be normalised in the basis precision; stopping. (total_iters = "
+                              << total_iters << ")" << std::endl;
+                break;
+            }
+
             // Initialize Arnoldi: V_0 = r / ||r||
             auto& V0 = tmp_[offV + 0];
             lincomb( V0, { util::narrow< ScalarType >( 1.0 / beta0 ) }, { r } );
@@ -253,7 +265,8 @@ class FGMRES
                 // made the test useless for a 16-bit basis -- epsilon 2^-10 (fp16) or
                 // 2^-7 (bf16) against an O(1e2) initial residual declares a breakdown for
                 // any h_{j+1,j} below ~0.2, i.e. on the very first Arnoldi step.
-                if ( h_jp1j < util::epsilon_of< DenseScalar >() * initial_residual )
+                if ( h_jp1j < util::epsilon_of< DenseScalar >() * initial_residual ||
+                     1.0 / static_cast< double >( h_jp1j ) > util::max_of< ScalarType >() )
                 {
                     H( j + 1, j ) = 0;
                     inner_its     = j + 1;

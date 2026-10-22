@@ -3,6 +3,7 @@
 #include <concepts>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <type_traits>
 
 #include "kokkos/kokkos_wrapper.hpp"
@@ -229,6 +230,18 @@ constexpr double epsilon_of()
         return 0x1p-10;
     else
         return 0x1p-7;
+}
+
+/// @brief Largest finite value of @p T, as a double (fp16 65504, bf16 ~3.39e38).
+template < FloatingPoint T >
+constexpr double max_of()
+{
+    if constexpr ( std::floating_point< T > )
+        return static_cast< double >( std::numeric_limits< T >::max() );
+    else if constexpr ( std::is_same_v< T, Kokkos::Experimental::half_t > )
+        return 65504.0;
+    else
+        return 0x1.FEp127;
 }
 
 /// @brief Narrow @p v to @p T, correctly on the host as well as inside a kernel.
