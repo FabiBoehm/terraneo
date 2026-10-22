@@ -1523,6 +1523,13 @@ RunResult run_stokes_in_precision( int    min_level,
     util::logroot << "[stokes-in-M] storage " << sizeof( M ) << " B, geometry " << sizeof( GeomM )
                   << " B, outer rel-tol " << outer_opts.relative_residual_tolerance << std::endl;
 
+    // The solution for the final residual check: in M for the all-M solves, in double
+    // for the mixed-precision IR (narrowing it to M first would add M's roundoff of
+    // the solution to the residual and hide what the refinement reached).
+    VectorQ1IsoQ2Q1< double > u_sol_d( "u_sol_d", domains[velocity_level], domains[pressure_level],
+                                       mask_data[velocity_level], mask_data[pressure_level] );
+    bool have_u_d = false;
+
     if ( outer_solver == OuterSolver::MPIR )
     {
         // Mixed-precision iterative refinement (GMRES-IR): the residual and the update
@@ -1581,7 +1588,8 @@ RunResult run_stokes_in_precision( int    min_level,
             if ( rel <= outer_tol )
                 break;
         }
-        linalg::convert( u_d, u_m ); // so the common residual check below sees the solution
+        linalg::assign( u_sol_d, u_d ); // the solution lives in double here
+        have_u_d = true;
         util::logroot << "[stokes-in-M] mixed-precision IR: " << inner_total << " inner FGMRES iterations in total" << std::endl;
     }
     else if ( outer_solver == OuterSolver::IR )
@@ -1637,10 +1645,9 @@ RunResult run_stokes_in_precision( int    min_level,
     }
 
     // The true residual in double, against the double right-hand side.
-    VectorQ1IsoQ2Q1< double > u_d( "u_d", domains[velocity_level], domains[pressure_level], mask_data[velocity_level],
-                                   mask_data[pressure_level] );
-    linalg::convert( u_m, u_d );
-    linalg::apply( K_d, u_d, tmp_d );
+    if ( !have_u_d )
+        linalg::convert( u_m, u_sol_d );
+    linalg::apply( K_d, u_sol_d, tmp_d );
     linalg::lincomb( tmp_d, { 1.0, -1.0 }, { f_d, tmp_d } );
     const double res_d = static_cast< double >( linalg::norm_2( tmp_d ) );
     const double f_norm = static_cast< double >( linalg::norm_2( f_d ) );
