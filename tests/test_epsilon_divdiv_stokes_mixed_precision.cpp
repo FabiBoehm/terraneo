@@ -684,6 +684,7 @@ RunResult run_ablock_mg( int    min_level,
                          int    visc_profile,   // 0 = Frank-Kamenetskii (smooth), 1 = sharp radial layer
                          double coarse_tol,     // coarse FGMRES relative tolerance
                          bool   full_stokes,    // false = solve A-block with MG; true = full Stokes outer FGMRES
+                         bool   ablock_outer,   // --solve ablock: the outer solver on the viscous block alone
                          KrylovPrec krylov_prec, // Krylov-basis precision for the full-Stokes outer FGMRES
                          ABlockPrec  ablock_prec, // working precision of the A-block V-cycle preconditioner
                          ABlockArith ablock_arith, // fast-path arithmetic precision in that V-cycle
@@ -1091,7 +1092,66 @@ RunResult run_ablock_mg( int    min_level,
     //                       reduced-precision basis vectors),
     // mirroring the mc app's reduced-precision Krylov-basis workspace in
     // stokes_solver.hpp.
-    if ( outer_solver == OuterSolver::IR )
+    if ( ablock_outer )
+    {
+        // ---- Viscous block only:  A u = f_u  with the outer FGMRES / IR in double and the
+        //      A-block V-cycle (in the arm's precision) as the preconditioner. Same history
+        //      tag as the Stokes solve, so the printing and the summary below are shared.
+        VectorQ1Vec< ScalarType > u_vel( "u_vel_outer", domains[velocity_level], mask_data[velocity_level] );
+        linalg::assign( u_vel, 0.0 );
+        Viscous& A_vel = K_op.block_11();
+
+        if ( outer_solver == OuterSolver::IR )
+        {
+            VectorQ1Vec< ScalarType > r_ir( "r_ir_vel", domains[velocity_level], mask_data[velocity_level] );
+            VectorQ1Vec< ScalarType > d_ir( "d_ir_vel", domains[velocity_level], mask_data[velocity_level] );
+            const auto t_ir0      = std::chrono::steady_clock::now();
+            auto       elapsed_ir = [&]() {
+                return std::chrono::duration< double >( std::chrono::steady_clock::now() - t_ir0 ).count();
+            };
+            linalg::apply( A_vel, u_vel, r_ir );
+            linalg::lincomb( r_ir, { 1.0, -1.0 }, { f_full.block_1(), r_ir } );
+            const double r0 = static_cast< double >( linalg::norm_2( r_ir ) );
+            outer_table->add_row( { { "tag", std::string( "stokes_fgmres" ) },
+                                    { "iteration", 0 },
+                                    { "elapsed_s", elapsed_ir() },
+                                    { "relative_residual", 1.0 },
+                                    { "absolute_residual", r0 } } );
+            for ( int k = 1; k <= max_cycles; ++k )
+            {
+                linalg::assign( d_ir, 0.0 );
+                linalg::solvers::solve( vel_prec, A_vel, d_ir, r_ir );
+                if ( linalg::has_nan_or_inf( d_ir ) )
+                {
+                    util::logroot << "IR: the preconditioner returned NaN/Inf at iteration " << k
+                                  << "; stopping (no Krylov space to fall back on)." << std::endl;
+                    break;
+                }
+                linalg::lincomb( u_vel, { 1.0, 1.0 }, { u_vel, d_ir } );
+                linalg::apply( A_vel, u_vel, r_ir );
+                linalg::lincomb( r_ir, { 1.0, -1.0 }, { f_full.block_1(), r_ir } );
+                const double rk  = static_cast< double >( linalg::norm_2( r_ir ) );
+                const double rel = ( r0 > 0.0 ) ? rk / r0 : 0.0;
+                outer_table->add_row( { { "tag", std::string( "stokes_fgmres" ) },
+                                        { "iteration", k },
+                                        { "elapsed_s", elapsed_ir() },
+                                        { "relative_residual", rel },
+                                        { "absolute_residual", rk } } );
+                if ( rel <= outer_tol )
+                    break;
+            }
+        }
+        else
+        {
+            std::vector< VectorQ1Vec< ScalarType > > tmp_vel;
+            for ( int i = 0; i < 2 * outer_restart + 4; ++i )
+                tmp_vel.emplace_back( "tmp_fgmres_vel_" + std::to_string( i ), domains[velocity_level], mask_data[velocity_level] );
+            linalg::solvers::FGMRES< Viscous, VelPrecHandle > fgmres( tmp_vel, outer_opts, outer_table, vel_prec );
+            fgmres.set_tag( "stokes_fgmres" );
+            linalg::solvers::solve( fgmres, A_vel, u_vel, f_full.block_1() );
+        }
+    }
+    else if ( outer_solver == OuterSolver::IR )
     {
         // Pure iterative refinement. The residual and the update are formed in double;
         // the correction comes from one application of the block preconditioner, whose
@@ -1466,6 +1526,7 @@ int main( int argc, char** argv )
     int    visc_profile = 0;  // 0 = Frank-Kamenetskii (smooth), 1 = sharp radial layer
     double coarse_tol   = 1e-6;  // coarse FGMRES relative tolerance
     bool   full_stokes  = false; // --solve stokes: outer FGMRES on full saddle point
+    bool   ablock_outer = false; // --solve ablock: outer FGMRES/IR on the viscous block only, V-cycle preconditioned
     KrylovPrec krylov_prec = KrylovPrec::DOUBLE; // --krylov-precision double|single|bf16|fp16 (full-Stokes only)
     ABlockPrec  ablock_prec  = ABlockPrec::DOUBLE;  // --ablock-prec double|float|fp16|bf16 (full-Stokes only)
     ABlockArith ablock_arith = ABlockArith::LOW; // --ablock-arith low|double (low = follow --ablock-prec)
@@ -1496,7 +1557,15 @@ int main( int argc, char** argv )
                            : ( std::string( argv[i + 1] ) == "lin" )    ? 3
                                                                         : 0;
         else if ( a == "--coarse-tol" )    coarse_tol  = std::atof( argv[i + 1] );
-        else if ( a == "--solve" )         full_stokes = ( std::string( argv[i + 1] ) == "stokes" );
+        else if ( a == "--solve" )
+        {
+            // stokes: outer solver on the saddle point; ablock: the same outer solver and the
+            // same A-block V-cycle preconditioner, but on  A u = f_u  alone (no gradient,
+            // divergence or Schur block in the loop -- the EpsDivDiv time-to-solution arm).
+            const std::string v = argv[i + 1];
+            full_stokes         = ( v == "stokes" || v == "ablock" );
+            ablock_outer        = ( v == "ablock" );
+        }
         else if ( a == "--outer-solver" )
         {
             const std::string q = argv[i + 1];
@@ -1577,7 +1646,8 @@ int main( int argc, char** argv )
             { 1, InterpolationMode::Constant, "GCA(constant)" },
         };
 
-    util::logroot << "=== " << ( full_stokes ? "FULL STOKES outer-FGMRES (w-BFBT Schur) " : "A-block (viscous) MG " )
+    util::logroot << "=== " << ( ablock_outer ? "A-BLOCK outer solve (viscous block only, V-cycle preconditioned) "
+                             : full_stokes ? "FULL STOKES outer-FGMRES (w-BFBT Schur) " : "A-block (viscous) MG " )
                   << "convergence vs viscosity contrast ===\n"
                   << "    solve = " << ( full_stokes ? "stokes (cycles = outer FGMRES iters)" : "ablock (cycles = MG V-cycles)" )
                   << ( full_stokes ? std::string( ", outer = " ) + outer_solver_name( outer_solver )
@@ -1617,7 +1687,7 @@ int main( int argc, char** argv )
             const auto res =
                 run_ablock_mg( min_level, max_level, cheby_order, perturb_amp, rmu, s.gca, no_stokes_prec,
                                max_cycles, bc, s.interp,
-                               visc_profile, coarse_tol, full_stokes, krylov_prec, ablock_prec, ablock_arith, ablock_geom,
+                               visc_profile, coarse_tol, full_stokes, ablock_outer, krylov_prec, ablock_prec, ablock_arith, ablock_geom,
                                hourglass_c, outer_tol, outer_solver, outer_restart_in );
 
             summary->add_row(
