@@ -237,7 +237,9 @@ class FGMRES
                            "        To at least provide a fix for the first case, we keep the input to the preconditioner\n"
                            "        and write it to the output (equivalent of skipping the preconditioner in this iteration).\n"
                            "        (Details: total_iters = "
-                        << total_iters << ", j = " << j << ")" << std::endl;
+                        << total_iters << ", j = " << j << ", beta0 = " << double( beta0 )
+                        << ", nan/inf in v_j = " << has_nan_or_inf( vj ) << ", in x = " << has_nan_or_inf( x )
+                        << ", in r = " << has_nan_or_inf( r ) << ")" << std::endl;
 
                     assign( zj, vj );
                 }
@@ -364,6 +366,25 @@ class FGMRES
                 for ( int col = row + 1; col < inner_its; ++col )
                     sum -= H( row, col ) * y( col );
                 y( row ) = sum / H( row, row );
+            }
+
+            // The least-squares coefficients are formed in DenseScalar; a 16-bit basis
+            // can leave H ill-conditioned far above DenseScalar's roundoff, and a
+            // coefficient beyond the storage type's range would narrow to Inf and put
+            // NaN into x. Such a basis has nothing representable left to contribute.
+            {
+                double y_max = 0.0;
+                for ( int i = 0; i < inner_its; ++i )
+                    y_max = std::max( y_max, std::abs( static_cast< double >( y( i ) ) ) );
+                if ( !( y_max <= util::max_of< ScalarType >() ) )
+                {
+                    util::logroot << "FGMRES[" << tag_ << "]: least-squares coefficient " << y_max
+                                  << " not representable in the basis precision; stopping without this update.\n"
+                                     "        (Details: total_iters = "
+                                  << total_iters << ", inner_its = " << inner_its << ", beta0 = " << double( beta0 )
+                                  << ")" << std::endl;
+                    break;
+                }
             }
 
             // Update solution: x += sum_{i=0}^{inner_its-1} y_i * z_i
