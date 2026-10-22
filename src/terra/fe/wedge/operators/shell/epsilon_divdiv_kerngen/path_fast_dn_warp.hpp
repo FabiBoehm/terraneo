@@ -116,16 +116,16 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
     constexpr bool AsyncStaging =
         std::is_same_v< ArithT, ScalarType > && ( sizeof( ScalarType ) == 4 || sizeof( ScalarType ) == 8 );
 
-    Kokkos::parallel_for( Kokkos::TeamThreadRange( team, nxy * nslot ), [&]( int t ) {
-        const int node = t / nslot;
-        const int lvl  = t - node * nslot;
-        const int xi   = x0 + node % ( lat_tile + 1 );
-        const int yi   = y0 + node / ( lat_tile + 1 );
-        const int rr   = r0 - 1 + lvl;
+    if constexpr ( AsyncStaging )
+    {
+        Kokkos::parallel_for( Kokkos::TeamThreadRange( team, nxy * nslot ), [&]( int t ) {
+            const int node = t / nslot;
+            const int lvl  = t - node * nslot;
+            const int xi   = x0 + node % ( lat_tile + 1 );
+            const int yi   = y0 + node / ( lat_tile + 1 );
+            const int rr   = r0 - 1 + lvl;
 
-        if ( xi <= hex_lat_ && yi <= hex_lat_ && rr >= 0 && rr <= hex_rad_ )
-        {
-            if constexpr ( AsyncStaging )
+            if ( xi <= hex_lat_ && yi <= hex_lat_ && rr >= 0 && rr <= hex_rad_ )
             {
                 util::cp_async( &k_sh( node, lvl ), &k_( local_subdomain_id, xi, yi, rr ) );
                 util::cp_async( &src_sh( node, 0, lvl ), &src_( local_subdomain_id, xi, yi, rr, 0 ) );
@@ -134,21 +134,60 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
             }
             else
             {
-                k_sh( node, lvl )      = static_cast< StageT >( k_( local_subdomain_id, xi, yi, rr ) );
-                src_sh( node, 0, lvl ) = static_cast< StageT >( src_( local_subdomain_id, xi, yi, rr, 0 ) );
-                src_sh( node, 1, lvl ) = static_cast< StageT >( src_( local_subdomain_id, xi, yi, rr, 1 ) );
-                src_sh( node, 2, lvl ) = static_cast< StageT >( src_( local_subdomain_id, xi, yi, rr, 2 ) );
+                k_sh( node, lvl )      = 0.0;
+                src_sh( node, 0, lvl ) = src_sh( node, 1, lvl ) = src_sh( node, 2, lvl ) = 0.0;
+            }
+        } );
+        util::cp_async_wait_all();
+    }
+    else
+    {
+        // Synchronous (16-bit) loads, a batch of independent ones per thread before any
+        // is consumed: the scratch pointers are generic, so the compiler could not hoist
+        // a load over the previous item's shared store, and every item paid the full
+        // latency (ncu: the conversion waiting on the load was 13 % of the stall samples).
+        constexpr int StageBatch = 8;
+        constexpr int total      = nxy * nslot;
+        const int     ts         = team.team_size();
+        const int     rank       = team.team_rank();
+        for ( int base = rank; base < total; base += ts * StageBatch )
+        {
+            ScalarType vk[StageBatch], v0[StageBatch], v1[StageBatch], v2[StageBatch];
+            bool       ok[StageBatch];
+#pragma unroll
+            for ( int u = 0; u < StageBatch; ++u )
+            {
+                const int t    = base + u * ts;
+                const int node = t / nslot;
+                const int lvl  = t - node * nslot;
+                const int xi   = x0 + node % ( lat_tile + 1 );
+                const int yi   = y0 + node / ( lat_tile + 1 );
+                const int rr   = r0 - 1 + lvl;
+                ok[u] = ( t < total ) && xi <= hex_lat_ && yi <= hex_lat_ && rr >= 0 && rr <= hex_rad_;
+                if ( ok[u] )
+                {
+                    vk[u] = k_( local_subdomain_id, xi, yi, rr );
+                    v0[u] = src_( local_subdomain_id, xi, yi, rr, 0 );
+                    v1[u] = src_( local_subdomain_id, xi, yi, rr, 1 );
+                    v2[u] = src_( local_subdomain_id, xi, yi, rr, 2 );
+                }
+            }
+#pragma unroll
+            for ( int u = 0; u < StageBatch; ++u )
+            {
+                const int t = base + u * ts;
+                if ( t < total )
+                {
+                    const int node = t / nslot;
+                    const int lvl  = t - node * nslot;
+                    k_sh( node, lvl )      = ok[u] ? static_cast< StageT >( vk[u] ) : StageT( 0 );
+                    src_sh( node, 0, lvl ) = ok[u] ? static_cast< StageT >( v0[u] ) : StageT( 0 );
+                    src_sh( node, 1, lvl ) = ok[u] ? static_cast< StageT >( v1[u] ) : StageT( 0 );
+                    src_sh( node, 2, lvl ) = ok[u] ? static_cast< StageT >( v2[u] ) : StageT( 0 );
+                }
             }
         }
-        else
-        {
-            k_sh( node, lvl )      = 0.0;
-            src_sh( node, 0, lvl ) = src_sh( node, 1, lvl ) = src_sh( node, 2, lvl ) = 0.0;
-        }
-    } );
-
-    if constexpr ( AsyncStaging )
-        util::cp_async_wait_all();
+    }
     team.team_barrier();
 
     // ---------------- per-thread column walk ----------------

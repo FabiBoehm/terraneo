@@ -1298,11 +1298,12 @@ class EpsilonDivDivKerngen
     {
         if constexpr ( sizeof( ScalarType ) == 2 )
         {
-            const bool odd = ( reinterpret_cast< std::uintptr_t >( p ) & 2u ) != 0;
-            if ( odd )
-                util::atomic_add_packed_pair( p - 1, 0.0f, static_cast< float >( v ) );
-            else
-                util::atomic_add_packed_pair( p, static_cast< float >( v ), 0.0f );
+            // Branch-free: as an if/else on the parity, a warp with lanes of both
+            // kinds executed both reductions (ncu: REDG, BRA, BSYNC, LOP3 and SHF
+            // each +6.3e7 against the float kernel, one per 16-bit global add).
+            const int   odd = int( ( reinterpret_cast< std::uintptr_t >( p ) & 2u ) != 0 );
+            const float fv  = static_cast< float >( v );
+            util::atomic_add_packed_pair( p - odd, odd ? 0.0f : fv, odd ? fv : 0.0f );
         }
         else
         {
