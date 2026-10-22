@@ -61,6 +61,7 @@
 #include "linalg/solvers/block_preconditioner_2x2.hpp"
 #include "linalg/solvers/fgmres.hpp"
 #include "linalg/solvers/fgmres_lowmem.hpp"
+#include "util/timer.hpp"
 #include "linalg/solvers/gca/gca.hpp"
 #include "linalg/solvers/gca/gca_elements_collector.hpp"
 
@@ -525,7 +526,10 @@ class LowPrecABlock final
             probe_ = false;
         }
 
-        linalg::solvers::solve( *mg_, *a_fine_, *x_m_, *b_m_ );
+        {
+            util::Timer t_vcycle( "mp_ablock_vcycle" );
+            linalg::solvers::solve( *mg_, *a_fine_, *x_m_, *b_m_ );
+        }
         linalg::convert( *x_m_, x );
         linalg::lincomb( x, { scale }, { x } );
     }
@@ -1638,6 +1642,10 @@ int main( int argc, char** argv )
     util::logroot << "\n=== SUMMARY: A-block MG convergence ===\n";
     summary->select_columns( { "rmu", "krylov", "scheme", "cycles", "final_rel_res", "asympt_rate", "converged" } )
         .print_pretty();
+
+    // Where the wall clock went (per-rank timer tree: fgmres_*, stokes_apply, mgmp_*,
+    // epsilon_divdiv_*), for the time-to-solution breakdown.
+    util::logroot << "\n=== TIMERS (json) ===\n" << util::TimerTree::instance().json() << std::endl;
 
     return 0;
 }
