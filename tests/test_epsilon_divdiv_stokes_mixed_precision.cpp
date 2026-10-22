@@ -314,9 +314,12 @@ enum class ABlockGeom { DOUBLE, LOW };
 /// exactly the preconditioner's contraction factor, with nothing in between. FGMRES
 /// builds a Krylov space that can compensate for a mediocre preconditioner, which is
 /// what makes a low-precision arm there look better than the V-cycle really is.
-enum class OuterSolver { FGMRES, IR };
+enum class OuterSolver { FGMRES, IR, MPIR };
 
-inline const char* outer_solver_name( OuterSolver o ) { return o == OuterSolver::IR ? "ir" : "fgmres"; }
+inline const char* outer_solver_name( OuterSolver o )
+{
+    return o == OuterSolver::IR ? "ir" : o == OuterSolver::MPIR ? "mpir" : "fgmres";
+}
 
 inline const char* ablock_arith_name( ABlockArith a )
 {
@@ -638,6 +641,21 @@ class LowPrecABlock final
     /// full-Stokes-in-M arm): the V-cycle and the finest-level operator it solves.
     MGM&   mg() { return *mg_; }
     ViscM& a_fine() { return *a_fine_; }
+
+    /// Coarse-grid FGMRES work so far: ( solves, iterations ) from its history rows
+    /// (one row per solve for iteration 0, one per iteration).
+    std::pair< long, long > coarse_work() const
+    {
+        long solves = 0, its = 0;
+        for ( const auto& r : coarse_table_->query_rows_equals( "tag", "mp_coarse_fgmres" ).rows() )
+        {
+            if ( std::get< int >( r.at( "iteration" ) ) == 0 )
+                ++solves;
+            else
+                ++its;
+        }
+        return { solves, its };
+    }
 
   private:
 
@@ -1269,6 +1287,13 @@ RunResult run_ablock_mg( int    min_level,
     outer_table->query_rows_equals( "tag", "stokes_fgmres" )
         .select_columns( { "absolute_residual", "relative_residual", "iteration", "elapsed_s" } )
         .print_pretty();
+    {
+        long cs = 0, ci = 0;
+        for ( const auto& r : coarse_table->query_rows_equals( "tag", "coarse_grid_fgmres" ).rows() )
+            ( std::get< int >( r.at( "iteration" ) ) == 0 ) ? ++cs : ++ci;
+        util::logroot << "[stokes] coarse FGMRES (double hierarchy): " << cs << " solves, " << ci << " iterations ("
+                      << ( cs ? double( ci ) / cs : 0.0 ) << " per solve)" << std::endl;
+    }
 
     const auto rows    = outer_table->query_rows_equals( "tag", "stokes_fgmres" ).rows();
     const int  iters   = rows.empty() ? 0 : static_cast< int >( rows.size() ) - 1;
@@ -1342,7 +1367,9 @@ RunResult run_stokes_in_precision( int    min_level,
                                    double hourglass_c,
                                    double outer_tol,
                                    OuterSolver outer_solver,
-                                   int    outer_restart_in )
+                                   int    outer_restart_in,
+                                   double inner_tol,
+                                   int    inner_its )
 {
     std::vector< DistributedDomain >                                  domains;
     std::vector< Grid3DDataVec< double, 3 > >                         coords_shell;
@@ -1494,7 +1521,68 @@ RunResult run_stokes_in_precision( int    min_level,
     util::logroot << "[stokes-in-M] storage " << sizeof( M ) << " B, geometry " << sizeof( GeomM )
                   << " B, outer rel-tol " << outer_opts.relative_residual_tolerance << std::endl;
 
-    if ( outer_solver == OuterSolver::IR )
+    if ( outer_solver == OuterSolver::MPIR )
+    {
+        // Mixed-precision iterative refinement (GMRES-IR): the residual and the update
+        // are formed in double with the double operator, the correction comes from an
+        // FGMRES solve in M to a loose inner tolerance. The history carries the true
+        // double residual, so this arm is judged exactly like the double run.
+        VectorQ1IsoQ2Q1< double > r_d( "r_d", domains[velocity_level], domains[pressure_level], mask_data[velocity_level], mask_data[pressure_level] );
+        VectorQ1IsoQ2Q1< double > u_d( "u_d_ir", domains[velocity_level], domains[pressure_level], mask_data[velocity_level], mask_data[pressure_level] );
+        IsoM r_m( "r_m", domains[velocity_level], domains[pressure_level], mask_data[velocity_level], mask_data[pressure_level] );
+        IsoM d_m( "d_m", domains[velocity_level], domains[pressure_level], mask_data[velocity_level], mask_data[pressure_level] );
+        std::vector< IsoM > tmp_inner;
+        for ( int i = 0; i < 2 * outer_restart + 4; ++i )
+            tmp_inner.emplace_back( "tmp_inner_m_" + std::to_string( i ), domains[velocity_level],
+                                    domains[pressure_level], mask_data[velocity_level], mask_data[pressure_level] );
+        linalg::solvers::FGMRESOptions< M > inner_opts;
+        inner_opts.restart                     = outer_restart;
+        inner_opts.max_iterations              = inner_its;
+        inner_opts.relative_residual_tolerance = std::max( inner_tol, 10.0 * util::epsilon_of< M >() );
+        inner_opts.absolute_residual_tolerance = 1e-30;
+        auto inner_table = std::make_shared< util::Table >();
+        linalg::solvers::FGMRES< StokesM, PrecStokesM > inner( tmp_inner, inner_opts, inner_table, prec_stokes );
+        inner.set_tag( "inner_fgmres" );
+        util::logroot << "[stokes-in-M] mixed-precision IR: inner rel-tol " << inner_opts.relative_residual_tolerance
+                      << ", inner max its " << inner_its << std::endl;
+
+        const auto t0      = std::chrono::steady_clock::now();
+        auto       elapsed = [&]() { return std::chrono::duration< double >( std::chrono::steady_clock::now() - t0 ).count(); };
+        linalg::assign( u_d, 0.0 );
+        linalg::apply( K_d, u_d, r_d );
+        linalg::lincomb( r_d, { 1.0, -1.0 }, { f_d, r_d } );
+        const double r0 = static_cast< double >( linalg::norm_2( r_d ) );
+        outer_table->add_row( { { "tag", std::string( "stokes_fgmres" ) }, { "iteration", 0 }, { "elapsed_s", elapsed() },
+                                { "relative_residual", 1.0 }, { "absolute_residual", r0 }, { "inner_total", 0 } } );
+        int inner_total = 0;
+        for ( int k = 1; k <= max_cycles; ++k )
+        {
+            {
+                util::Timer t_in( "mpir_inner_solve" );
+                linalg::convert( r_d, r_m );
+                linalg::assign( d_m, util::narrow< M >( 0.0 ) );
+                linalg::solvers::solve( inner, K_m, d_m, r_m );
+            }
+            {
+                util::Timer t_out( "mpir_outer_update" );
+                linalg::convert( d_m, r_d ); // r_d <- d in double (the residual vector is free now)
+                linalg::lincomb( u_d, { 1.0, 1.0 }, { u_d, r_d } );
+                linalg::apply( K_d, u_d, r_d );
+                linalg::lincomb( r_d, { 1.0, -1.0 }, { f_d, r_d } );
+            }
+            const auto rows_in = inner_table->query_rows_equals( "tag", "inner_fgmres" ).rows();
+            inner_total        = static_cast< int >( rows_in.size() ) - k; // minus the iteration-0 rows
+            const double rk    = static_cast< double >( linalg::norm_2( r_d ) );
+            const double rel   = ( r0 > 0.0 ) ? rk / r0 : 0.0;
+            outer_table->add_row( { { "tag", std::string( "stokes_fgmres" ) }, { "iteration", k }, { "elapsed_s", elapsed() },
+                                    { "relative_residual", rel }, { "absolute_residual", rk }, { "inner_total", inner_total } } );
+            if ( rel <= outer_tol )
+                break;
+        }
+        linalg::convert( u_d, u_m ); // so the common residual check below sees the solution
+        util::logroot << "[stokes-in-M] mixed-precision IR: " << inner_total << " inner FGMRES iterations in total" << std::endl;
+    }
+    else if ( outer_solver == OuterSolver::IR )
     {
         // Iterative refinement in M: residual, correction and update all in M.
         IsoM r_ir( "r_ir_m", domains[velocity_level], domains[pressure_level], mask_data[velocity_level], mask_data[pressure_level] );
@@ -1540,6 +1628,11 @@ RunResult run_stokes_in_precision( int    min_level,
     outer_table->query_rows_equals( "tag", "stokes_fgmres" )
         .select_columns( { "absolute_residual", "relative_residual", "iteration", "elapsed_s" } )
         .print_pretty();
+    {
+        const auto [cs, ci] = hierarchy.coarse_work();
+        util::logroot << "[stokes-in-M] coarse FGMRES: " << cs << " solves, " << ci << " iterations ("
+                      << ( cs ? double( ci ) / cs : 0.0 ) << " per solve)" << std::endl;
+    }
 
     // The true residual in double, against the double right-hand side.
     VectorQ1IsoQ2Q1< double > u_d( "u_d", domains[velocity_level], domains[pressure_level], mask_data[velocity_level],
@@ -1824,11 +1917,15 @@ int main( int argc, char** argv )
     int         outer_restart_in = 0;               // --outer-restart N (0 = default 50)
     std::string stokes_prec      = "double";        // --stokes-prec double|float|fp16|bf16: the whole Stokes solve in M
     bool        stokes_geom_low  = false;           // --stokes-geom low: geometry in float for the M arm
+    double      inner_tol        = 1e-2;            // --inner-tol: inner FGMRES tolerance of the mixed-precision IR
+    int         inner_its        = 10;              // --inner-its: inner FGMRES iteration cap per outer step
     for ( int i = 1; i + 1 < argc; ++i )
     {
         const std::string a = argv[i];
         if ( a == "--stokes-prec" )         stokes_prec = argv[i + 1];
         else if ( a == "--stokes-geom" )    stokes_geom_low = ( std::string( argv[i + 1] ) == "low" );
+        else if ( a == "--inner-tol" )      inner_tol = std::atof( argv[i + 1] );
+        else if ( a == "--inner-its" )      inner_its = std::atoi( argv[i + 1] );
         else if ( a == "--min-level" )           min_level   = std::atoi( argv[i + 1] );
         else if ( a == "--max-level" )      max_level   = std::atoi( argv[i + 1] );
         else if ( a == "--cheby-order" )    cheby_order = std::atoi( argv[i + 1] );
@@ -1859,7 +1956,9 @@ int main( int argc, char** argv )
         else if ( a == "--outer-solver" )
         {
             const std::string q = argv[i + 1];
-            outer_solver        = ( q == "ir" || q == "refinement" ) ? OuterSolver::IR : OuterSolver::FGMRES;
+            outer_solver        = ( q == "ir" || q == "refinement" ) ? OuterSolver::IR
+                                  : ( q == "mpir" || q == "gmres-ir" ) ? OuterSolver::MPIR
+                                                                       : OuterSolver::FGMRES;
         }
         else if ( a == "--hourglass" )      hourglass_c = std::atof( argv[i + 1] );
         else if ( a == "--outer-tol" )      outer_tol   = std::atof( argv[i + 1] );
@@ -1983,7 +2082,8 @@ int main( int argc, char** argv )
                 auto run_m  = [&]< typename M, typename G >() {
                     return run_stokes_in_precision< M, G >( min_level, max_level, cheby_order, perturb_amp, rmu,
                                                             max_cycles, bc, visc_profile, coarse_tol, hourglass_c,
-                                                            outer_tol, outer_solver, outer_restart_in );
+                                                            outer_tol, outer_solver, outer_restart_in, inner_tol,
+                                                            inner_its );
                 };
                 util::logroot << "    stokes-prec = " << stokes_prec << ( stokes_geom_low ? " (geometry float)" : " (geometry double)" ) << "\n";
                 if ( stokes_prec == "float" )

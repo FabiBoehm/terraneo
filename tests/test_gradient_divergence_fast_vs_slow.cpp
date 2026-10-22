@@ -3,8 +3,8 @@
 //
 // Same bilinear forms, same fields, same boundary conditions; the only difference is
 // the kernel. In double the two must agree to roundoff for every boundary set in
-// Replace and in Add mode; the float arm reports how far single-precision fields,
-// geometry and arithmetic move the result. Independently of the reference, the
+// Replace and in Add mode; the float arm compares the float warp path against the
+// float per-cell path the same way. Independently of the reference, the
 // divergence must be the transpose of the gradient: < G p, u > = < p, D u >.
 //
 // On a Serial build both paths are the per-cell path and the test is a no-op that
@@ -122,6 +122,39 @@ Arm run_arm( const DistributedDomain& dom_f, const DistributedDomain& dom_c, Bou
     linalg::apply( grad, p, gp );
     linalg::apply( div, u, du );
 
+    // The reference of a reduced-precision arm is the per-cell path in the same
+    // precision: what the comparison isolates is the kernel, not the precision (a
+    // float free-slip projection differs from double by 1e-4 in the max norm at level
+    // 6, in either path).
+    VectorQ1Vec< double >    grad_ref_s( "grad_ref_s", dom_f, mask_f );
+    VectorQ1Scalar< double > div_ref_s( "div_ref_s", dom_c, mask_c );
+    VectorQ1Vec< double >    grad_add_ref_s( "grad_add_ref_s", dom_f, mask_f );
+    if ( !double_reference )
+    {
+        Grad grad_s( dom_f, dom_c, coords_f, radii_f, bmask_f, bcs );
+        Div  div_s( dom_f, dom_c, coords_f, radii_f, bmask_f, bcs );
+        grad_s.set_fast_path( false );
+        div_s.set_fast_path( false );
+        VectorQ1Vec< S >    gp_s( "gp_s", dom_f, mask_f );
+        VectorQ1Scalar< S > du_s( "du_s", dom_c, mask_c );
+        linalg::apply( grad_s, p, gp_s );
+        linalg::apply( div_s, u, du_s );
+        linalg::convert( gp_s, grad_ref_s );
+        linalg::convert( du_s, div_ref_s );
+        VectorQ1Vec< S > gpa_s( "gpa_s", dom_f, mask_f );
+        linalg::assign( gpa_s, u );
+        grad_s.set_operator_apply_and_communication_modes( linalg::OperatorApplyMode::Add,
+                                                           linalg::OperatorCommunicationMode::CommunicateAdditively );
+        linalg::apply( grad_s, p, gpa_s );
+        linalg::convert( gpa_s, grad_add_ref_s );
+    }
+    else
+    {
+        linalg::assign( grad_ref_s, grad_ref );
+        linalg::assign( div_ref_s, div_ref );
+        linalg::assign( grad_add_ref_s, grad_add_ref );
+    }
+
     // Transpose check in the arm's own precision.
     const double lhs = static_cast< double >( linalg::dot( gp, u ) );
     const double rhs = static_cast< double >( linalg::dot( p, du ) );
@@ -144,23 +177,22 @@ Arm run_arm( const DistributedDomain& dom_f, const DistributedDomain& dom_c, Bou
     linalg::convert( du, du_d );
     linalg::convert( gp_add, gpa_d );
 
-    const double gref_inf = linalg::norm_inf( grad_ref );
-    const double gref_l2  = std::sqrt( linalg::dot( grad_ref, grad_ref ) );
-    const double dref_inf = linalg::norm_inf( div_ref );
-    const double dref_l2  = std::sqrt( linalg::dot( div_ref, div_ref ) );
+    const double gref_inf = linalg::norm_inf( grad_ref_s );
+    const double gref_l2  = std::sqrt( linalg::dot( grad_ref_s, grad_ref_s ) );
+    const double dref_inf = linalg::norm_inf( div_ref_s );
+    const double dref_l2  = std::sqrt( linalg::dot( div_ref_s, div_ref_s ) );
 
-    linalg::lincomb( gpa_d, { 1.0, -1.0 }, { gpa_d, grad_add_ref } );
-    linalg::lincomb( gp_d, { 1.0, -1.0 }, { gp_d, grad_ref } );
-    linalg::lincomb( du_d, { 1.0, -1.0 }, { du_d, div_ref } );
+    linalg::lincomb( gpa_d, { 1.0, -1.0 }, { gpa_d, grad_add_ref_s } );
+    linalg::lincomb( gp_d, { 1.0, -1.0 }, { gp_d, grad_ref_s } );
+    linalg::lincomb( du_d, { 1.0, -1.0 }, { du_d, div_ref_s } );
 
     Arm a;
     a.grad_inf      = linalg::norm_inf( gp_d ) / gref_inf;
     a.grad_l2       = std::sqrt( linalg::dot( gp_d, gp_d ) ) / gref_l2;
     a.div_inf       = linalg::norm_inf( du_d ) / dref_inf;
     a.div_l2        = std::sqrt( linalg::dot( du_d, du_d ) ) / dref_l2;
-    a.grad_add_inf  = linalg::norm_inf( gpa_d ) / linalg::norm_inf( grad_add_ref );
+    a.grad_add_inf  = linalg::norm_inf( gpa_d ) / linalg::norm_inf( grad_add_ref_s );
     a.transpose_rel = transpose_rel;
-    (void) double_reference;
     return a;
 }
 
@@ -252,7 +284,7 @@ int main( int argc, char** argv )
                 };
 
                 report( "double", run_arm< double, double >( dom_f, dom_c, bc.bcs, gp, du, gp_add, mask_f, mask_c, bmask_f, true ), 1e-11, 1e-10 );
-                report( "float", run_arm< float, float >( dom_f, dom_c, bc.bcs, gp, du, gp_add, mask_f, mask_c, bmask_f, false ), 5e-5, 2e-3 );
+                report( "float", run_arm< float, float >( dom_f, dom_c, bc.bcs, gp, du, gp_add, mask_f, mask_c, bmask_f, false ), 2e-5, 2e-3 );
             }
         }
     }

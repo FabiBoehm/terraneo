@@ -1,5 +1,7 @@
 #pragma once
 
+#include "util/timer.hpp"
+
 #include "util/floating_point.hpp"
 #include "linalg/diagonally_scaled_operator.hpp"
 #include "linalg/operator.hpp"
@@ -102,6 +104,7 @@ class Chebyshev
     {
         if ( need_max_ev_estimation_ )
         {
+            util::Timer t( "chebyshev_eigenvalue_estimate" );
             estimate_max_eigenvalues( A );
             need_max_ev_estimation_ = false;
         }

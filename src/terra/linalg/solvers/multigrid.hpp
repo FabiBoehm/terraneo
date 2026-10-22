@@ -1,5 +1,7 @@
 #pragma once
 
+#include "util/timer.hpp"
+
 #include "solver.hpp"
 #include "util/table.hpp"
 
@@ -186,29 +188,45 @@ class Multigrid
     {
         if ( level == 0 )
         {
+            util::Timer t( "mg_coarse_solve" );
             solve( coarse_grid_solver_, A, tmp_e_[0], tmp_r_[0] );
             return;
         }
 
         // relax on Ax = b
-        solve( smoothers_pre_[level], A, x, b );
+        {
+            util::Timer t( "mg_smooth" );
+            solve( smoothers_pre_[level], A, x, b );
+        }
 
         // compute the residual r = b - Ax
-        apply( A, x, tmp_[level] );
-        lincomb( tmp_[level], { 1.0, -1.0 }, { b, tmp_[level] } );
+        {
+            util::Timer t( "mg_residual" );
+            apply( A, x, tmp_[level] );
+            lincomb( tmp_[level], { 1.0, -1.0 }, { b, tmp_[level] } );
+        }
 
         // restrict the residual r_c = R r_f
-        apply( R_[level - 1], tmp_[level], tmp_r_[level - 1] );
+        {
+            util::Timer t( "mg_restrict" );
+            apply( R_[level - 1], tmp_[level], tmp_r_[level - 1] );
+            assign( tmp_e_[level - 1], 0.0 );
+        }
 
         // solve (recursively) A_c e_c = r_c
-        assign( tmp_e_[level - 1], 0.0 );
         solve_recursive( A_c_[level - 1], tmp_e_[level - 1], tmp_r_[level - 1], level - 1 );
 
         // apply the coarse grid correction x = x + P e_c
-        apply( P_additive_[level - 1], tmp_e_[level - 1], x );
+        {
+            util::Timer t( "mg_prolong" );
+            apply( P_additive_[level - 1], tmp_e_[level - 1], x );
+        }
 
         // relax on A x = b
-        solve( smoothers_post_[level], A, x, b );
+        {
+            util::Timer t( "mg_smooth" );
+            solve( smoothers_post_[level], A, x, b );
+        }
     }
 };
 

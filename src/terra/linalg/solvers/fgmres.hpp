@@ -1,5 +1,7 @@
 #pragma once
 
+#include "util/timer.hpp"
+
 #include "util/floating_point.hpp"
 #include "eigen/eigen_wrapper.hpp"
 #include "identity_solver.hpp"
@@ -224,7 +226,10 @@ class FGMRES
                 auto& vj = tmp_[offV + j];
                 auto& zj = tmp_[offZ + j];
                 assign( zj, 0 );
-                solve( preconditioner_, A, zj, vj );
+                {
+                    util::Timer t( "fgmres_preconditioner" );
+                    solve( preconditioner_, A, zj, vj );
+                }
 
                 const bool preconditioner_result_contains_nan_or_inf = has_nan_or_inf( zj );
 
@@ -246,8 +251,12 @@ class FGMRES
 
                 // Apply operator: w = A * z_j
                 auto& w = tmp_[idxW];
-                apply( A, zj, w );
+                {
+                    util::Timer t( "fgmres_operator" );
+                    apply( A, zj, w );
+                }
 
+                util::Timer t_orth( "fgmres_orthogonalization" );
                 // Modified Gram-Schmidt orthogonalization against V_0..V_j
                 for ( int i = 0; i <= j; ++i )
                 {
@@ -259,6 +268,7 @@ class FGMRES
 
                 // Compute h_{j+1,j} and normalize to get v_{j+1}
                 const DenseScalar h_jp1j = Kokkos::sqrt( dot( w, w ) );
+                t_orth.stop();
 
                 // SAFE BREAK 1: Arnoldi Breakdown. The threshold is the unit roundoff of
                 // DenseScalar, not of ScalarType: H, g and the Givens rotations are all
@@ -388,6 +398,7 @@ class FGMRES
             }
 
             // Update solution: x += sum_{i=0}^{inner_its-1} y_i * z_i
+            util::Timer t_upd( "fgmres_update_and_restart" );
             auto& acc = tmp_[idxAcc];
             assign( acc, 0 );
             for ( int i = 0; i < inner_its; ++i )

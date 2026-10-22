@@ -103,29 +103,47 @@ Arm run_arm( const DistributedDomain& dom, const Config& c, const VectorQ1Scalar
         linalg::convert( ug, u );
     }
 
-    Op op( dom, coords, radii, bmask, u, util::narrow< S >( c.kappa ), util::narrow< S >( c.dt ), c.treat_boundary,
-           c.diagonal, util::narrow< S >( 1.5 ), c.lumped );
+    // Both paths in S; the double reference handed in is used for the double arm
+    // only (for a reduced precision the per-cell path in S is the reference, so
+    // the comparison isolates the kernel, not the precision).
+    auto run = [&]( bool fast, VectorQ1Scalar< S >& y, VectorQ1Scalar< S >& y_add ) {
+        Op op( dom, coords, radii, bmask, u, util::narrow< S >( c.kappa ), util::narrow< S >( c.dt ), c.treat_boundary,
+               c.diagonal, util::narrow< S >( 1.5 ), c.lumped );
+        op.set_fast_path( fast );
+        linalg::apply( op, T, y );
+        linalg::assign( y_add, T );
+        op.set_operator_apply_and_communication_modes( linalg::OperatorApplyMode::Add,
+                                                       linalg::OperatorCommunicationMode::CommunicateAdditively );
+        linalg::apply( op, T, y_add );
+    };
+    VectorQ1Scalar< S > y( "y", dom, mask ), y_add( "y_add", dom, mask );
+    run( true, y, y_add );
 
-    VectorQ1Scalar< S > y( "y", dom, mask );
-    linalg::apply( op, T, y );
-
-    VectorQ1Scalar< S > y_add( "y_add", dom, mask );
-    linalg::assign( y_add, T );
-    op.set_operator_apply_and_communication_modes( linalg::OperatorApplyMode::Add,
-                                                   linalg::OperatorCommunicationMode::CommunicateAdditively );
-    linalg::apply( op, T, y_add );
+    VectorQ1Scalar< double > ref_s( "ref_s", dom, mask ), add_ref_s( "add_ref_s", dom, mask );
+    if constexpr ( std::is_same_v< S, double > )
+    {
+        linalg::assign( ref_s, ref );
+        linalg::assign( add_ref_s, add_ref );
+    }
+    else
+    {
+        VectorQ1Scalar< S > ys( "ys", dom, mask ), ys_add( "ys_add", dom, mask );
+        run( false, ys, ys_add );
+        linalg::convert( ys, ref_s );
+        linalg::convert( ys_add, add_ref_s );
+    }
 
     VectorQ1Scalar< double > y_d( "y_d", dom, mask ), ya_d( "ya_d", dom, mask );
     linalg::convert( y, y_d );
     linalg::convert( y_add, ya_d );
-    const double ref_inf = linalg::norm_inf( ref );
-    const double ref_l2  = std::sqrt( static_cast< double >( linalg::dot( ref, ref ) ) );
-    linalg::lincomb( y_d, { 1.0, -1.0 }, { y_d, ref } );
-    linalg::lincomb( ya_d, { 1.0, -1.0 }, { ya_d, add_ref } );
+    const double ref_inf = linalg::norm_inf( ref_s );
+    const double ref_l2  = std::sqrt( static_cast< double >( linalg::dot( ref_s, ref_s ) ) );
+    linalg::lincomb( y_d, { 1.0, -1.0 }, { y_d, ref_s } );
+    linalg::lincomb( ya_d, { 1.0, -1.0 }, { ya_d, add_ref_s } );
     Arm a;
     a.inf     = linalg::norm_inf( y_d ) / ref_inf;
     a.l2      = std::sqrt( static_cast< double >( linalg::dot( y_d, y_d ) ) ) / ref_l2;
-    a.add_inf = linalg::norm_inf( ya_d ) / linalg::norm_inf( add_ref );
+    a.add_inf = linalg::norm_inf( ya_d ) / linalg::norm_inf( add_ref_s );
     return a;
 }
 
@@ -190,7 +208,7 @@ int main( int argc, char** argv )
                         ++failures;
                 };
                 report( "double", run_arm< double, double >( dom, c, ref, add_ref, mask, bmask ), 1e-10 );
-                report( "float", run_arm< float, float >( dom, c, ref, add_ref, mask, bmask ), 1e-4 );
+                report( "float", run_arm< float, float >( dom, c, ref, add_ref, mask, bmask ), 2e-5 );
             }
         }
     }
