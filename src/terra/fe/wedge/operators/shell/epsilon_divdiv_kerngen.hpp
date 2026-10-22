@@ -134,7 +134,9 @@ class EpsilonDivDivKerngen
     /// makes (ncu: the 16-bit kernels ran the ALU pipe at 43 % vs 26 % for float, the
     /// half->float conversions and 16-bit extractions). The tile then has the float
     /// kernel's footprint, which the warp launch allows.
-    using StageT = std::conditional_t< ( sizeof( ArithT ) >= 4 ), ArithT, float >;
+    /// Measured: widening at staging bought nothing (the reads were not the cost), so
+    /// the tile stays in ArithT and its half-size footprint buys occupancy instead.
+    using StageT = ArithT;
     /// Whether the scatter goes through the team's tile buffer instead of straight to
     /// global memory. With the buffer's accumulation a native shared-space reduction
     /// (tile_accumulate), H100 level 8 at the swept tile measured, buffer off -> on:
@@ -729,8 +731,10 @@ class EpsilonDivDivKerngen
         const size_t cap       = per_sm / size_t( min_blocks ) < per_block ? per_sm / size_t( min_blocks ) : per_block;
         return cap - size_t( team + 2 ) * sizeof( double ) - 256u;
     }
-    /// Warp teams launch with LaunchBounds< 64, 8 >.
-    static constexpr size_t warp_shmem_limit() { return kokkos_shmem_limit( 64, 8 ); }
+    /// Warp teams launch with LaunchBounds< 64, warp_min_blocks >: 8 for 4/8-byte
+    /// storage (128 registers), 10 for 16-bit (its tile is half the size, 102 registers).
+    static constexpr int    warp_min_blocks = ( sizeof( ScalarType ) <= 2 ) ? 10 : 8;
+    static constexpr size_t warp_shmem_limit() { return kokkos_shmem_limit( 64, warp_min_blocks ); }
     double hourglass_coefficient() const { return stab_c_; }
 
     void set_boundary_conditions( BoundaryConditions bcs )
@@ -989,7 +993,7 @@ class EpsilonDivDivKerngen
             else if ( tile_scatter_ == 2 && warp_shape_ok() )
             {
                 // 128 registers per thread, eight 64-thread teams per SM.
-                Kokkos::TeamPolicy< Kokkos::LaunchBounds< 64, 8 > > warp_policy( blocks_, team_size_ );
+                Kokkos::TeamPolicy< Kokkos::LaunchBounds< 64, warp_min_blocks > > warp_policy( blocks_, team_size_ );
                 warp_policy.set_scratch_size( 0, Kokkos::PerTeam( team_shmem_size_dn( team_size_ ) ) );
                 launch_fast_dn_warp( warp_policy );
             }
