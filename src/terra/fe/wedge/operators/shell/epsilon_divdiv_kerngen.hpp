@@ -563,13 +563,18 @@ class EpsilonDivDivKerngen
             Kokkos::fence();
         }
 
-        // Gram-Schmidt orthonormalization
+        // Gram-Schmidt orthonormalization. The dot products, norms and coefficients
+        // stay in the accumulator type (double for the 16-bit storages): the squared
+        // norm of a rotation mode over a level is ~1e5 at level 4 already, past
+        // half_t's 65504, and narrowing it zeroed the modes (and with them the
+        // penalty) in every fp16 fs/fs operator from level 4 on.
+        using Acc = util::Accumulator< ScalarType >;
         for ( int i = 0; i < 3; ++i )
         {
             // Subtract projections of previous modes
             for ( int j = 0; j < i; ++j )
             {
-                ScalarType dot_ij = kernels::common::masked_dot_product(
+                const Acc dot_ij = kernels::common::masked_dot_product(
                     null_modes_[i], null_modes_[j], ownership_mask_, grid::NodeOwnershipFlag::OWNED );
 
                 auto ni = null_modes_[i];
@@ -580,15 +585,16 @@ class EpsilonDivDivKerngen
                         { 0, 0, 0, 0 }, { nsub, nlat, nlat, nrad } ),
                     KOKKOS_LAMBDA( int s, int x, int y, int r ) {
                         for ( int d = 0; d < VecDim; ++d )
-                            ni( s, x, y, r, d ) -= dot_ij * nj( s, x, y, r, d );
+                            ni( s, x, y, r, d ) = static_cast< ScalarType >(
+                                static_cast< Acc >( ni( s, x, y, r, d ) ) - dot_ij * static_cast< Acc >( nj( s, x, y, r, d ) ) );
                     } );
                 Kokkos::fence();
             }
 
             // Normalize
-            ScalarType norm_sq = kernels::common::masked_dot_product(
+            const Acc norm_sq = kernels::common::masked_dot_product(
                 null_modes_[i], null_modes_[i], ownership_mask_, grid::NodeOwnershipFlag::OWNED );
-            ScalarType inv_norm = 1.0 / Kokkos::sqrt( norm_sq );
+            const Acc inv_norm = Acc( 1.0 ) / Kokkos::sqrt( norm_sq );
 
             auto ni = null_modes_[i];
             Kokkos::parallel_for(
@@ -597,7 +603,7 @@ class EpsilonDivDivKerngen
                     { 0, 0, 0, 0 }, { nsub, nlat, nlat, nrad } ),
                 KOKKOS_LAMBDA( int s, int x, int y, int r ) {
                     for ( int d = 0; d < VecDim; ++d )
-                        ni( s, x, y, r, d ) *= inv_norm;
+                        ni( s, x, y, r, d ) = static_cast< ScalarType >( static_cast< Acc >( ni( s, x, y, r, d ) ) * inv_norm );
                 } );
             Kokkos::fence();
         }
@@ -1009,11 +1015,14 @@ class EpsilonDivDivKerngen
         // Null-space penalty for fs/fs: dst += epsilon * sum_i (n_i^T src) n_i
         if ( penalty_active_ && !diagonal_ )
         {
+            // The coefficient stays in the accumulator type (double for the 16-bit
+            // storages, see init_penalty).
+            using Acc = util::Accumulator< ScalarType >;
             for ( int i = 0; i < 3; ++i )
             {
-                ScalarType alpha = penalty_epsilon_ *
-                    kernels::common::masked_dot_product(
-                        null_modes_[i], src_, ownership_mask_, grid::NodeOwnershipFlag::OWNED );
+                const Acc alpha = static_cast< Acc >( penalty_epsilon_ ) *
+                                  kernels::common::masked_dot_product(
+                                      null_modes_[i], src_, ownership_mask_, grid::NodeOwnershipFlag::OWNED );
 
                 auto nm        = null_modes_[i];
                 auto dst_local = dst_;
@@ -1025,7 +1034,8 @@ class EpsilonDivDivKerngen
                           dst_local.extent( 2 ), dst_local.extent( 3 ) } ),
                     KOKKOS_LAMBDA( int s, int x, int y, int r ) {
                         for ( int d = 0; d < VecDim; ++d )
-                            dst_local( s, x, y, r, d ) += alpha * nm( s, x, y, r, d );
+                            dst_local( s, x, y, r, d ) = static_cast< ScalarType >(
+                                static_cast< Acc >( dst_local( s, x, y, r, d ) ) + alpha * static_cast< Acc >( nm( s, x, y, r, d ) ) );
                     } );
             }
             Kokkos::fence( "penalty" );
