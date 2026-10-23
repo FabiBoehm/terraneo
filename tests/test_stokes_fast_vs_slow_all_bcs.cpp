@@ -3,15 +3,21 @@
 //
 // EpsDivDiv: the fast Dirichlet/Neumann (warp-owner) and fast free-slip kernels
 // against the slow per-cell path -- matvec and diagonal, hourglass off and on, in
-// Replace and Add mode. Gradient and Divergence are covered block by block in
-// test_gradient_divergence_fast_vs_slow; here the composed EpsDivDivStokes apply
-// (A with its communication deferred, B^T added on top, then B) is checked against
-// the same composition out of the three slow paths. Storage double, float, bf16 and
-// fp16 with the geometry in double, float, float, float. The double arms must agree
-// with the slow path to roundoff; float to single-precision roundoff; the 16-bit
-// arms are compared against the double reference (their slow path assembles the
-// local matrix in 16 bits and is no reference) and must stay within the storage
-// format's resolution.
+// Replace and Add mode. Only the Dirichlet/Neumann kernel carries the hourglass
+// term (neither the free-slip kernel nor the slow path do), so with the hourglass
+// on the matvec reference is the stored-local-matrix path, whose assembly folds
+// the term in exactly where the matrix-free kernel adds it; the hourglass diagonal
+// has no independent reference and is reported only. Gradient and Divergence are
+// covered block by block in test_gradient_divergence_fast_vs_slow; here the
+// composed EpsDivDivStokes apply (A with its communication deferred, B^T added on
+// top, then B) is checked against the same composition out of the three slow paths.
+//
+// Storage double, float, bf16 and fp16 with the geometry in double, float, float,
+// float. Double must agree with its reference to roundoff, float to single-precision
+// roundoff. A 16-bit arm is referenced by the float per-cell path applied to its own
+// 16-bit-rounded inputs, so the comparison isolates the kernel (one output rounding
+// plus the perimeter atomics) from the storage format's rounding of the fields; the
+// error against the double reference, which includes that, is printed next to it.
 //
 // On a Serial build every path is the slow path and the test passes trivially.
 
@@ -129,52 +135,81 @@ double rel_inf( V& diff, const V& ref )
 
 struct EpsErrors
 {
-    double vs_slow, vs_slow_add, vs_double, vs_double_add;
+    double vs_ref, vs_ref_add, vs_double, vs_double_add;
     bool   warp;
 };
 
-/// EpsDivDiv in storage S: fast path against the slow path in S (Replace and Add), and
-/// against the double slow-path results handed in.
+/// Arithmetic/reference precision of a storage type: itself for double and float,
+/// float for the 16-bit types.
 template < typename S >
+using Ref = std::conditional_t< ( sizeof( S ) >= 4 ), S, float >;
+
+/// Turn `op` into the reference kernel: the slow per-cell path, or, for the matvec
+/// with the hourglass term, the stored-local-matrix path (see the header).
+template < typename OpT, typename V >
+void make_reference( OpT& op, bool diagonal, double hourglass, const V& no_gca )
+{
+    op.set_hourglass_coefficient( hourglass );
+    if ( hourglass > 0.0 && !diagonal )
+        op.set_stored_local_matrices( true );
+    else
+        // Any stored-matrix mode routes the apply through the slow per-cell path; with
+        // no element marked nothing is stored, so this IS the slow path.
+        op.set_stored_matrix_mode( linalg::OperatorStoredMatrixMode::Selective, 0, no_gca.grid_data() );
+}
+
+/// Replace apply, then Add mode onto a prefilled vector whose seams are still
+/// unsummed (the Stokes operator's B^T p onto A u); every reference is produced the
+/// same way.
+template < typename OpT, typename V >
+void apply_both( OpT& op, const V& src, V& y, V& y_add )
+{
+    op.set_operator_apply_and_communication_modes( linalg::OperatorApplyMode::Replace,
+                                                   linalg::OperatorCommunicationMode::CommunicateAdditively );
+    linalg::apply( op, src, y );
+    linalg::assign( y_add, src );
+    op.set_operator_apply_and_communication_modes( linalg::OperatorApplyMode::Add,
+                                                   linalg::OperatorCommunicationMode::CommunicateAdditively );
+    linalg::apply( op, src, y_add );
+}
+
+/// EpsDivDiv in storage S with the staging/contraction in A: the fast path against
+/// the reference kernel in Ref< S > on the same (S-rounded) inputs, and against the
+/// double reference handed in.
+template < typename S, typename A = S >
 EpsErrors eps_arm( const Level& lv, BoundaryConditions bcs, bool diagonal, double hourglass,
                    const VectorQ1Vec< double >& ref, const VectorQ1Vec< double >& ref_add )
 {
-    using G  = Geom< S >;
-    using Op = fe::wedge::operators::shell::EpsilonDivDivKerngen< S, 3, G, S >;
+    using G     = Geom< S >;
+    using R     = Ref< S >;
+    using Op    = fe::wedge::operators::shell::EpsilonDivDivKerngen< S, 3, G, A >;
+    using RefOp = fe::wedge::operators::shell::EpsilonDivDivKerngen< R, 3, R, R >;
 
     const auto coords = grid::shell::subdomain_unit_sphere_single_shell_coords< G >( lv.dom_f );
     const auto radii  = grid::shell::subdomain_shell_radii< G >( lv.dom_f );
 
     VectorQ1Vec< S >    u( "u", lv.dom_f, lv.mask_f );
     VectorQ1Scalar< S > k( "k", lv.dom_f, lv.mask_f );
-    VectorQ1Scalar< S > no_gca( "no_gca", lv.dom_f, lv.mask_f );
     linalg::convert( lv.u, u );
     linalg::convert( lv.k, k );
-    linalg::assign( no_gca, util::narrow< S >( 0.0 ) );
 
     Op fast( lv.dom_f, coords, radii, lv.bmask_f, k.grid_data(), bcs, diagonal );
-    Op slow( lv.dom_f, coords, radii, lv.bmask_f, k.grid_data(), bcs, diagonal );
     fast.set_hourglass_coefficient( hourglass );
-    slow.set_hourglass_coefficient( hourglass );
-    // Any stored-matrix mode routes the apply through the slow per-cell path; with no
-    // element marked nothing is stored, so this IS the slow path.
-    slow.set_stored_matrix_mode( linalg::OperatorStoredMatrixMode::Selective, 0, no_gca.grid_data() );
-
-    auto run = [&]( Op& op, VectorQ1Vec< S >& y, VectorQ1Vec< S >& y_add ) {
-        op.set_operator_apply_and_communication_modes( linalg::OperatorApplyMode::Replace,
-                                                       linalg::OperatorCommunicationMode::CommunicateAdditively );
-        linalg::apply( op, u, y );
-        // Add mode onto a prefilled vector whose seams are still unsummed (the Stokes
-        // operator's B^T p onto A u); the reference was produced the same way.
-        linalg::assign( y_add, u );
-        op.set_operator_apply_and_communication_modes( linalg::OperatorApplyMode::Add,
-                                                       linalg::OperatorCommunicationMode::CommunicateAdditively );
-        linalg::apply( op, u, y_add );
-    };
     VectorQ1Vec< S > yf( "yf", lv.dom_f, lv.mask_f ), yfa( "yfa", lv.dom_f, lv.mask_f );
-    VectorQ1Vec< S > ys( "ys", lv.dom_f, lv.mask_f ), ysa( "ysa", lv.dom_f, lv.mask_f );
-    run( fast, yf, yfa );
-    run( slow, ys, ysa );
+    apply_both( fast, u, yf, yfa );
+
+    // The reference in R on the S-rounded inputs.
+    const auto          coords_r = grid::shell::subdomain_unit_sphere_single_shell_coords< R >( lv.dom_f );
+    const auto          radii_r  = grid::shell::subdomain_shell_radii< R >( lv.dom_f );
+    VectorQ1Vec< R >    u_r( "u_r", lv.dom_f, lv.mask_f );
+    VectorQ1Scalar< R > k_r( "k_r", lv.dom_f, lv.mask_f ), no_gca( "no_gca", lv.dom_f, lv.mask_f );
+    linalg::convert( u, u_r );
+    linalg::convert( k, k_r );
+    linalg::assign( no_gca, util::narrow< R >( 0.0 ) );
+    RefOp slow( lv.dom_f, coords_r, radii_r, lv.bmask_f, k_r.grid_data(), bcs, diagonal );
+    make_reference( slow, diagonal, hourglass, no_gca );
+    VectorQ1Vec< R > ys( "ys", lv.dom_f, lv.mask_f ), ysa( "ysa", lv.dom_f, lv.mask_f );
+    apply_both( slow, u_r, ys, ysa );
 
     VectorQ1Vec< double > yf_d( "yf_d", lv.dom_f, lv.mask_f ), yfa_d( "yfa_d", lv.dom_f, lv.mask_f );
     VectorQ1Vec< double > ys_d( "ys_d", lv.dom_f, lv.mask_f ), ysa_d( "ysa_d", lv.dom_f, lv.mask_f );
@@ -186,9 +221,9 @@ EpsErrors eps_arm( const Level& lv, BoundaryConditions bcs, bool diagonal, doubl
 
     EpsErrors e;
     linalg::assign( d, yf_d );
-    e.vs_slow = rel_inf( d, ys_d );
+    e.vs_ref = rel_inf( d, ys_d );
     linalg::assign( d, yfa_d );
-    e.vs_slow_add = rel_inf( d, ysa_d );
+    e.vs_ref_add = rel_inf( d, ysa_d );
     linalg::assign( d, yf_d );
     e.vs_double = rel_inf( d, ref );
     linalg::assign( d, yfa_d );
@@ -199,51 +234,69 @@ EpsErrors eps_arm( const Level& lv, BoundaryConditions bcs, bool diagonal, doubl
 
 struct StokesErrors
 {
-    double u_vs_slow, p_vs_slow, u_vs_double, p_vs_double;
+    double u_vs_ref, p_vs_ref, u_vs_double, p_vs_double;
 };
 
-/// The composed Stokes apply (all fast paths) against the composition of the slow
-/// EpsDivDiv, the per-cell Gradient and the per-cell Divergence in the same storage.
-template < typename S >
-StokesErrors stokes_arm( const Level& lv, BoundaryConditions bcs, const VectorQ1IsoQ2Q1< double >& ref )
+/// The composition EpsDivDivStokes::apply_impl runs, out of the slow paths in R.
+template < typename R >
+void slow_composition( const Level& lv, BoundaryConditions bcs, const VectorQ1IsoQ2Q1< R >& x,
+                       const VectorQ1Scalar< R >& k, VectorQ1IsoQ2Q1< R >& y )
 {
-    using G      = Geom< S >;
-    using Stokes = fe::wedge::operators::shell::EpsDivDivStokes< S, 3, G, S >;
+    using G      = Geom< R >;
+    using Stokes = fe::wedge::operators::shell::EpsDivDivStokes< R, 3, G, R >;
     using A      = typename Stokes::Block11Type;
     using Grad   = typename Stokes::Block12Type;
     using Div    = typename Stokes::Block21Type;
-
     const auto coords = grid::shell::subdomain_unit_sphere_single_shell_coords< G >( lv.dom_f );
     const auto radii  = grid::shell::subdomain_shell_radii< G >( lv.dom_f );
-
-    VectorQ1IsoQ2Q1< S > x( "x", lv.dom_f, lv.dom_c, lv.mask_f, lv.mask_c );
-    VectorQ1Scalar< S >  k( "k", lv.dom_f, lv.mask_f ), no_gca( "no_gca", lv.dom_f, lv.mask_f );
-    linalg::convert( lv.u, x.block_1() );
-    linalg::convert( lv.p, x.block_2() );
-    linalg::convert( lv.k, k );
-    linalg::assign( no_gca, util::narrow< S >( 0.0 ) );
-
-    Stokes               K( lv.dom_f, lv.dom_c, coords, radii, lv.bmask_f, k.grid_data(), bcs, false );
-    VectorQ1IsoQ2Q1< S > yf( "yf", lv.dom_f, lv.dom_c, lv.mask_f, lv.mask_c );
-    linalg::apply( K, x, yf );
-
-    // The same composition out of the slow paths (EpsDivDivStokes::apply_impl).
+    VectorQ1Scalar< R > no_gca( "no_gca", lv.dom_f, lv.mask_f );
+    linalg::assign( no_gca, util::narrow< R >( 0.0 ) );
     A a( lv.dom_f, coords, radii, lv.bmask_f, k.grid_data(), bcs, false );
     a.set_stored_matrix_mode( linalg::OperatorStoredMatrixMode::Selective, 0, no_gca.grid_data() );
     Grad g( lv.dom_f, lv.dom_c, coords, radii, lv.bmask_f, bcs );
     Div  dv( lv.dom_f, lv.dom_c, coords, radii, lv.bmask_f, bcs );
     g.set_fast_path( false );
     dv.set_fast_path( false );
-    VectorQ1IsoQ2Q1< S > ys( "ys", lv.dom_f, lv.dom_c, lv.mask_f, lv.mask_c );
     a.set_operator_apply_and_communication_modes( linalg::OperatorApplyMode::Replace,
                                                   linalg::OperatorCommunicationMode::SkipCommunication );
     g.set_operator_apply_and_communication_modes( linalg::OperatorApplyMode::Add,
                                                   linalg::OperatorCommunicationMode::CommunicateAdditively );
     dv.set_operator_apply_and_communication_modes( linalg::OperatorApplyMode::Replace,
                                                    linalg::OperatorCommunicationMode::CommunicateAdditively );
-    linalg::apply( a, x.block_1(), ys.block_1() );
-    linalg::apply( g, x.block_2(), ys.block_1() );
-    linalg::apply( dv, x.block_1(), ys.block_2() );
+    linalg::apply( a, x.block_1(), y.block_1() );
+    linalg::apply( g, x.block_2(), y.block_1() );
+    linalg::apply( dv, x.block_1(), y.block_2() );
+}
+
+/// The composed Stokes apply (all fast paths) in S against the slow composition in
+/// Ref< S > on the same inputs, and against the double slow composition.
+template < typename S, typename A = S >
+StokesErrors stokes_arm( const Level& lv, BoundaryConditions bcs, const VectorQ1IsoQ2Q1< double >& ref )
+{
+    using G      = Geom< S >;
+    using R      = Ref< S >;
+    using Stokes = fe::wedge::operators::shell::EpsDivDivStokes< S, 3, G, A >;
+
+    const auto coords = grid::shell::subdomain_unit_sphere_single_shell_coords< G >( lv.dom_f );
+    const auto radii  = grid::shell::subdomain_shell_radii< G >( lv.dom_f );
+
+    VectorQ1IsoQ2Q1< S > x( "x", lv.dom_f, lv.dom_c, lv.mask_f, lv.mask_c );
+    VectorQ1Scalar< S >  k( "k", lv.dom_f, lv.mask_f );
+    linalg::convert( lv.u, x.block_1() );
+    linalg::convert( lv.p, x.block_2() );
+    linalg::convert( lv.k, k );
+
+    Stokes               K( lv.dom_f, lv.dom_c, coords, radii, lv.bmask_f, k.grid_data(), bcs, false );
+    VectorQ1IsoQ2Q1< S > yf( "yf", lv.dom_f, lv.dom_c, lv.mask_f, lv.mask_c );
+    linalg::apply( K, x, yf );
+
+    VectorQ1IsoQ2Q1< R > x_r( "x_r", lv.dom_f, lv.dom_c, lv.mask_f, lv.mask_c );
+    VectorQ1Scalar< R >  k_r( "k_r", lv.dom_f, lv.mask_f );
+    linalg::convert( x.block_1(), x_r.block_1() );
+    linalg::convert( x.block_2(), x_r.block_2() );
+    linalg::convert( k, k_r );
+    VectorQ1IsoQ2Q1< R > ys( "ys", lv.dom_f, lv.dom_c, lv.mask_f, lv.mask_c );
+    slow_composition< R >( lv, bcs, x_r, k_r, ys );
 
     VectorQ1IsoQ2Q1< double > yf_d( "yf_d", lv.dom_f, lv.dom_c, lv.mask_f, lv.mask_c );
     VectorQ1IsoQ2Q1< double > ys_d( "ys_d", lv.dom_f, lv.dom_c, lv.mask_f, lv.mask_c );
@@ -255,47 +308,14 @@ StokesErrors stokes_arm( const Level& lv, BoundaryConditions bcs, const VectorQ1
 
     StokesErrors e{};
     linalg::assign( d.block_1(), yf_d.block_1() );
-    e.u_vs_slow = rel_inf( d.block_1(), ys_d.block_1() );
+    e.u_vs_ref = rel_inf( d.block_1(), ys_d.block_1() );
     linalg::assign( d.block_2(), yf_d.block_2() );
-    e.p_vs_slow = rel_inf( d.block_2(), ys_d.block_2() );
+    e.p_vs_ref = rel_inf( d.block_2(), ys_d.block_2() );
     linalg::assign( d.block_1(), yf_d.block_1() );
     e.u_vs_double = rel_inf( d.block_1(), ref.block_1() );
     linalg::assign( d.block_2(), yf_d.block_2() );
     e.p_vs_double = rel_inf( d.block_2(), ref.block_2() );
     return e;
-}
-
-/// The double slow composition for the Stokes reference.
-VectorQ1IsoQ2Q1< double > stokes_slow_double( const Level& lv, BoundaryConditions bcs )
-{
-    using Stokes = fe::wedge::operators::shell::EpsDivDivStokes< double >;
-    using A      = Stokes::Block11Type;
-    using Grad   = Stokes::Block12Type;
-    using Div    = Stokes::Block21Type;
-    const auto coords = grid::shell::subdomain_unit_sphere_single_shell_coords< double >( lv.dom_f );
-    const auto radii  = grid::shell::subdomain_shell_radii< double >( lv.dom_f );
-    VectorQ1IsoQ2Q1< double > x( "x", lv.dom_f, lv.dom_c, lv.mask_f, lv.mask_c );
-    linalg::assign( x.block_1(), lv.u );
-    linalg::assign( x.block_2(), lv.p );
-    VectorQ1Scalar< double > no_gca( "no_gca", lv.dom_f, lv.mask_f );
-    linalg::assign( no_gca, 0.0 );
-    A a( lv.dom_f, coords, radii, lv.bmask_f, lv.k.grid_data(), bcs, false );
-    a.set_stored_matrix_mode( linalg::OperatorStoredMatrixMode::Selective, 0, no_gca.grid_data() );
-    Grad g( lv.dom_f, lv.dom_c, coords, radii, lv.bmask_f, bcs );
-    Div  dv( lv.dom_f, lv.dom_c, coords, radii, lv.bmask_f, bcs );
-    g.set_fast_path( false );
-    dv.set_fast_path( false );
-    VectorQ1IsoQ2Q1< double > y( "y_slow_double", lv.dom_f, lv.dom_c, lv.mask_f, lv.mask_c );
-    a.set_operator_apply_and_communication_modes( linalg::OperatorApplyMode::Replace,
-                                                  linalg::OperatorCommunicationMode::SkipCommunication );
-    g.set_operator_apply_and_communication_modes( linalg::OperatorApplyMode::Add,
-                                                  linalg::OperatorCommunicationMode::CommunicateAdditively );
-    dv.set_operator_apply_and_communication_modes( linalg::OperatorApplyMode::Replace,
-                                                   linalg::OperatorCommunicationMode::CommunicateAdditively );
-    linalg::apply( a, x.block_1(), y.block_1() );
-    linalg::apply( g, x.block_2(), y.block_1() );
-    linalg::apply( dv, x.block_1(), y.block_2() );
-    return y;
 }
 
 int main( int argc, char** argv )
@@ -319,13 +339,15 @@ int main( int argc, char** argv )
         };
 
         // Pass criteria per storage: relative max-norm error of the fast path against
-        // the slow path in the same storage (double, float) or against the double
-        // reference (16-bit: bf16 resolves 3 digits, fp16 4; the Add arms carry the
-        // prefilled field through one more rounding).
+        // its reference kernel on the same inputs. With the arithmetic in float a
+        // 16-bit arm differs by one output rounding (bf16 2^-8, fp16 2^-11) plus the
+        // 16-bit atomics on the tile perimeters; with the arithmetic in 16 bits too
+        // (the "/16" rows, the configuration the sweeps time) the contraction itself
+        // rounds and the bound is looser.
         struct Tol
         {
-            double double_, float_, bf16, fp16;
-        } const tol{ 1e-11, 5e-5, 1e-1, 2e-2 };
+            double double_, float_, bf16, fp16, bf16_16, fp16_16;
+        } const tol{ 1e-11, 5e-5, 2e-2, 4e-3, 1e-1, 2e-2 };
 
         for ( int level = min_level; level <= max_level; ++level )
         {
@@ -367,53 +389,59 @@ int main( int argc, char** argv )
                     VectorQ1Scalar< double > no_gca( "no_gca_ref", dom_f, mask_f );
                     linalg::assign( no_gca, 0.0 );
                     RefOp ref_op( dom_f, coords_f, radii_f, bmask_f, k.grid_data(), bcs, diagonal );
-                    ref_op.set_hourglass_coefficient( hourglass );
-                    ref_op.set_stored_matrix_mode( linalg::OperatorStoredMatrixMode::Selective, 0, no_gca.grid_data() );
+                    make_reference( ref_op, diagonal, hourglass, no_gca );
                     VectorQ1Vec< double > ref( "ref", dom_f, mask_f ), ref_add( "ref_add", dom_f, mask_f );
-                    linalg::apply( ref_op, u, ref );
-                    linalg::assign( ref_add, u );
-                    ref_op.set_operator_apply_and_communication_modes(
-                        linalg::OperatorApplyMode::Add, linalg::OperatorCommunicationMode::CommunicateAdditively );
-                    linalg::apply( ref_op, u, ref_add );
+                    apply_both( ref_op, u, ref, ref_add );
 
+                    // The hourglass diagonal exists in the fast Dirichlet/Neumann kernel
+                    // only; its row reports the distance to the hourglass-free diagonal.
+                    const bool informational = diagonal && hourglass > 0.0;
                     std::cout << "level " << level << "  " << std::setw( 5 ) << bc.name << "  epsdivdiv "
-                              << ( diagonal ? "diagonal" : "matvec  " ) << " hourglass " << hourglass << std::endl;
+                              << ( diagonal ? "diagonal" : "matvec  " ) << " hourglass " << hourglass
+                              << ( informational ? "  (no reference for the hourglass diagonal: informational)" : "" )
+                              << std::endl;
 
-                    auto report = [&]( const char* name, const EpsErrors& e, double t, bool against_double ) {
-                        const double crit = against_double ? std::max( e.vs_double, e.vs_double_add )
-                                                           : std::max( e.vs_slow, e.vs_slow_add );
-                        const bool ok = std::isfinite( crit ) && crit <= t;
-                        std::cout << "    " << std::setw( 6 ) << name << ( e.warp ? "  warp " : "  tile " )
-                                  << std::scientific << std::setprecision( 2 ) << " vs slow " << e.vs_slow
-                                  << " add " << e.vs_slow_add << "   vs double " << e.vs_double << " add "
-                                  << e.vs_double_add << ( ok ? "" : "   <-- FAIL" ) << std::endl;
+                    auto report = [&]( const char* name, const EpsErrors& e, double t ) {
+                        const double crit = std::max( e.vs_ref, e.vs_ref_add );
+                        const bool   ok   = informational || ( std::isfinite( crit ) && crit <= t );
+                        std::cout << "    " << std::setw( 7 ) << name << ( e.warp ? "  warp " : "  tile " )
+                                  << std::scientific << std::setprecision( 2 ) << " vs ref " << e.vs_ref << " add "
+                                  << e.vs_ref_add << "   vs double " << e.vs_double << " add " << e.vs_double_add
+                                  << ( ok ? "" : "   <-- FAIL" ) << std::endl;
                         if ( !ok )
                             ++failures;
                     };
-                    report( "double", eps_arm< double >( lv, bcs, diagonal, hourglass, ref, ref_add ), tol.double_, false );
-                    report( "float", eps_arm< float >( lv, bcs, diagonal, hourglass, ref, ref_add ), tol.float_, false );
-                    report( "bf16", eps_arm< BHalf >( lv, bcs, diagonal, hourglass, ref, ref_add ), tol.bf16, true );
-                    report( "fp16", eps_arm< Half >( lv, bcs, diagonal, hourglass, ref, ref_add ), tol.fp16, true );
+                    report( "double", eps_arm< double >( lv, bcs, diagonal, hourglass, ref, ref_add ), tol.double_ );
+                    report( "float", eps_arm< float >( lv, bcs, diagonal, hourglass, ref, ref_add ), tol.float_ );
+                    report( "bf16", eps_arm< BHalf, float >( lv, bcs, diagonal, hourglass, ref, ref_add ), tol.bf16 );
+                    report( "fp16", eps_arm< Half, float >( lv, bcs, diagonal, hourglass, ref, ref_add ), tol.fp16 );
+                    report( "bf16/16", eps_arm< BHalf >( lv, bcs, diagonal, hourglass, ref, ref_add ), tol.bf16_16 );
+                    report( "fp16/16", eps_arm< Half >( lv, bcs, diagonal, hourglass, ref, ref_add ), tol.fp16_16 );
                 }
 
                 // ---- composed Stokes apply ----------------------------------------------
                 {
-                    const auto ref = stokes_slow_double( lv, bcs );
+                    VectorQ1IsoQ2Q1< double > x( "x_ref", dom_f, dom_c, mask_f, mask_c );
+                    VectorQ1IsoQ2Q1< double > ref( "ref", dom_f, dom_c, mask_f, mask_c );
+                    linalg::assign( x.block_1(), u );
+                    linalg::assign( x.block_2(), p );
+                    slow_composition< double >( lv, bcs, x, k, ref );
                     std::cout << "level " << level << "  " << std::setw( 5 ) << bc.name << "  stokes apply" << std::endl;
-                    auto report = [&]( const char* name, const StokesErrors& e, double t, bool against_double ) {
-                        const double crit = against_double ? std::max( e.u_vs_double, e.p_vs_double )
-                                                           : std::max( e.u_vs_slow, e.p_vs_slow );
-                        const bool ok = std::isfinite( crit ) && crit <= t;
-                        std::cout << "    " << std::setw( 6 ) << name << std::scientific << std::setprecision( 2 )
-                                  << "  u vs slow " << e.u_vs_slow << " p " << e.p_vs_slow << "   vs double u "
+                    auto report = [&]( const char* name, const StokesErrors& e, double t ) {
+                        const double crit = std::max( e.u_vs_ref, e.p_vs_ref );
+                        const bool   ok   = std::isfinite( crit ) && crit <= t;
+                        std::cout << "    " << std::setw( 7 ) << name << std::scientific << std::setprecision( 2 )
+                                  << "  u vs ref " << e.u_vs_ref << " p " << e.p_vs_ref << "   vs double u "
                                   << e.u_vs_double << " p " << e.p_vs_double << ( ok ? "" : "   <-- FAIL" ) << std::endl;
                         if ( !ok )
                             ++failures;
                     };
-                    report( "double", stokes_arm< double >( lv, bcs, ref ), tol.double_, false );
-                    report( "float", stokes_arm< float >( lv, bcs, ref ), tol.float_, false );
-                    report( "bf16", stokes_arm< BHalf >( lv, bcs, ref ), tol.bf16, true );
-                    report( "fp16", stokes_arm< Half >( lv, bcs, ref ), tol.fp16, true );
+                    report( "double", stokes_arm< double >( lv, bcs, ref ), tol.double_ );
+                    report( "float", stokes_arm< float >( lv, bcs, ref ), tol.float_ );
+                    report( "bf16", stokes_arm< BHalf, float >( lv, bcs, ref ), tol.bf16 );
+                    report( "fp16", stokes_arm< Half, float >( lv, bcs, ref ), tol.fp16 );
+                    report( "bf16/16", stokes_arm< BHalf >( lv, bcs, ref ), tol.bf16_16 );
+                    report( "fp16/16", stokes_arm< Half >( lv, bcs, ref ), tol.fp16_16 );
                 }
             }
         }

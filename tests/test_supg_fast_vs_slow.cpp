@@ -79,12 +79,12 @@ struct Arm
     double inf, l2, add_inf;
 };
 
-template < typename S, typename G >
+template < typename S, typename G, typename A = S >
 Arm run_arm( const DistributedDomain& dom, const Config& c, const VectorQ1Scalar< double >& ref,
              const VectorQ1Scalar< double >& add_ref, const Grid4DDataScalar< grid::NodeOwnershipFlag >& mask,
              const Grid4DDataScalar< grid::shell::ShellBoundaryFlag >& bmask )
 {
-    using Op = fe::wedge::operators::shell::UnsteadyAdvectionDiffusionSUPG< S, 3, G, S >;
+    using Op = fe::wedge::operators::shell::UnsteadyAdvectionDiffusionSUPG< S, 3, G, A >;
 
     const auto coords = grid::shell::subdomain_unit_sphere_single_shell_coords< G >( dom );
     const auto radii  = grid::shell::subdomain_shell_radii< G >( dom );
@@ -127,8 +127,26 @@ Arm run_arm( const DistributedDomain& dom, const Config& c, const VectorQ1Scalar
     }
     else
     {
-        VectorQ1Scalar< S > ys( "ys", dom, mask ), ys_add( "ys_add", dom, mask );
-        run( false, ys, ys_add );
+        // The per-cell path on the same inputs: in float for the float arms, and for
+        // the 16-bit arms the FLOAT per-cell path on the 16-bit-rounded fields, so the
+        // comparison isolates the kernel from the storage format's rounding of the
+        // fields (the 16-bit per-cell path rounds every wedge contribution into the
+        // 16-bit destination and is no reference).
+        using R = std::conditional_t< ( sizeof( S ) >= 4 ), S, float >;
+        using OpR = fe::wedge::operators::shell::UnsteadyAdvectionDiffusionSUPG< R, 3, G, R >;
+        VectorQ1Scalar< R > T_r( "T_r", dom, mask );
+        VectorQ1Vec< R >    u_r( "u_r", dom, mask );
+        linalg::convert( T, T_r );
+        linalg::convert( u, u_r );
+        OpR op( dom, coords, radii, bmask, u_r, util::narrow< R >( c.kappa ), util::narrow< R >( c.dt ), c.treat_boundary,
+                c.diagonal, util::narrow< R >( 1.5 ), c.lumped );
+        op.set_fast_path( false );
+        VectorQ1Scalar< R > ys( "ys", dom, mask ), ys_add( "ys_add", dom, mask );
+        linalg::apply( op, T_r, ys );
+        linalg::assign( ys_add, T_r );
+        op.set_operator_apply_and_communication_modes( linalg::OperatorApplyMode::Add,
+                                                       linalg::OperatorCommunicationMode::CommunicateAdditively );
+        linalg::apply( op, T_r, ys_add );
         linalg::convert( ys, ref_s );
         linalg::convert( ys_add, add_ref_s );
     }
@@ -212,11 +230,13 @@ int main( int argc, char** argv )
                 report( "double", run_arm< double, double >( dom, c, ref, add_ref, mask, bmask ), 1e-10 );
                 report( "float", run_arm< float, float >( dom, c, ref, add_ref, mask, bmask ), 2e-5 );
                 report( "flt/dg", run_arm< float, double >( dom, c, ref, add_ref, mask, bmask ), 2e-5 );
-                // 16-bit storage and arithmetic on float geometry (informational
-                // tolerances: the per-cell path rounds every atomic add into the 16-bit
-                // destination, the warp path reduces in 16-bit registers).
-                report( "bf16", run_arm< BHalf, float >( dom, c, ref, add_ref, mask, bmask ), 2e-1 );
-                report( "fp16", run_arm< Half, float >( dom, c, ref, add_ref, mask, bmask ), 5e-2 );
+                // 16-bit storage and arithmetic on float geometry, against the float
+                // per-cell path on the same rounded fields (see run_arm).
+                report( "bf16", run_arm< BHalf, float, float >( dom, c, ref, add_ref, mask, bmask ), 2e-2 );
+                report( "fp16", run_arm< Half, float, float >( dom, c, ref, add_ref, mask, bmask ), 4e-3 );
+                // Arithmetic in 16 bits too (the configuration the sweeps time).
+                report( "bf16/16", run_arm< BHalf, float >( dom, c, ref, add_ref, mask, bmask ), 1e-1 );
+                report( "fp16/16", run_arm< Half, float >( dom, c, ref, add_ref, mask, bmask ), 2e-2 );
             }
         }
     }

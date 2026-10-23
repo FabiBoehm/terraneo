@@ -80,8 +80,9 @@ struct Arm
     double grad_inf, grad_l2, div_inf, div_l2, grad_add_inf, transpose_rel;
 };
 
-/// Fields and operators in S (geometry in G), the per-cell path as the reference.
-template < typename S, typename G >
+/// Fields in S, geometry in G, staging/contraction in A; the per-cell path as the
+/// reference.
+template < typename S, typename G, typename A = S >
 Arm run_arm( const DistributedDomain& dom_f, const DistributedDomain& dom_c, BoundaryConditions bcs,
              const VectorQ1Vec< double >& grad_ref, const VectorQ1Scalar< double >& div_ref,
              const VectorQ1Vec< double >& grad_add_ref,
@@ -90,8 +91,8 @@ Arm run_arm( const DistributedDomain& dom_f, const DistributedDomain& dom_c, Bou
              const Grid4DDataScalar< grid::shell::ShellBoundaryFlag >& bmask_f,
              bool double_reference )
 {
-    using Grad = fe::wedge::operators::shell::Gradient< S, G, S >;
-    using Div  = fe::wedge::operators::shell::Divergence< S, G, S >;
+    using Grad = fe::wedge::operators::shell::Gradient< S, G, A >;
+    using Div  = fe::wedge::operators::shell::Divergence< S, G, A >;
 
     const auto coords_f = grid::shell::subdomain_unit_sphere_single_shell_coords< G >( dom_f );
     const auto radii_f  = grid::shell::subdomain_shell_radii< G >( dom_f );
@@ -122,30 +123,41 @@ Arm run_arm( const DistributedDomain& dom_f, const DistributedDomain& dom_c, Bou
     linalg::apply( grad, p, gp );
     linalg::apply( div, u, du );
 
-    // The reference of a reduced-precision arm is the per-cell path in the same
-    // precision: what the comparison isolates is the kernel, not the precision (a
-    // float free-slip projection differs from double by 1e-4 in the max norm at level
-    // 6, in either path).
+    // The reference of a reduced-precision arm is the per-cell path on the same
+    // inputs: in float for the float arms, and for the 16-bit arms the FLOAT per-cell
+    // path on the 16-bit-rounded fields (widened), so the comparison isolates the
+    // kernel -- one output rounding plus the 16-bit atomics on the tile perimeters --
+    // from the storage format's rounding of the fields. (The 16-bit per-cell path
+    // itself is no reference: it rounds every one of the ~18 wedge contributions of
+    // a node into the 16-bit destination, and the gradient of a smooth pressure is
+    // the small difference of those, so its error doubles per level.)
+    using R = std::conditional_t< ( sizeof( S ) >= 4 ), S, float >;
     VectorQ1Vec< double >    grad_ref_s( "grad_ref_s", dom_f, mask_f );
     VectorQ1Scalar< double > div_ref_s( "div_ref_s", dom_c, mask_c );
     VectorQ1Vec< double >    grad_add_ref_s( "grad_add_ref_s", dom_f, mask_f );
     if ( !double_reference )
     {
-        Grad grad_s( dom_f, dom_c, coords_f, radii_f, bmask_f, bcs );
-        Div  div_s( dom_f, dom_c, coords_f, radii_f, bmask_f, bcs );
+        using GradR = fe::wedge::operators::shell::Gradient< R, G, R >;
+        using DivR  = fe::wedge::operators::shell::Divergence< R, G, R >;
+        VectorQ1Scalar< R > p_r( "p_r", dom_c, mask_c );
+        VectorQ1Vec< R >    u_r( "u_r", dom_f, mask_f );
+        linalg::convert( p, p_r );
+        linalg::convert( u, u_r );
+        GradR grad_s( dom_f, dom_c, coords_f, radii_f, bmask_f, bcs );
+        DivR  div_s( dom_f, dom_c, coords_f, radii_f, bmask_f, bcs );
         grad_s.set_fast_path( false );
         div_s.set_fast_path( false );
-        VectorQ1Vec< S >    gp_s( "gp_s", dom_f, mask_f );
-        VectorQ1Scalar< S > du_s( "du_s", dom_c, mask_c );
-        linalg::apply( grad_s, p, gp_s );
-        linalg::apply( div_s, u, du_s );
+        VectorQ1Vec< R >    gp_s( "gp_s", dom_f, mask_f );
+        VectorQ1Scalar< R > du_s( "du_s", dom_c, mask_c );
+        linalg::apply( grad_s, p_r, gp_s );
+        linalg::apply( div_s, u_r, du_s );
         linalg::convert( gp_s, grad_ref_s );
         linalg::convert( du_s, div_ref_s );
-        VectorQ1Vec< S > gpa_s( "gpa_s", dom_f, mask_f );
-        linalg::assign( gpa_s, u );
+        VectorQ1Vec< R > gpa_s( "gpa_s", dom_f, mask_f );
+        linalg::assign( gpa_s, u_r );
         grad_s.set_operator_apply_and_communication_modes( linalg::OperatorApplyMode::Add,
                                                            linalg::OperatorCommunicationMode::CommunicateAdditively );
-        linalg::apply( grad_s, p, gpa_s );
+        linalg::apply( grad_s, p_r, gpa_s );
         linalg::convert( gpa_s, grad_add_ref_s );
     }
     else
@@ -155,10 +167,20 @@ Arm run_arm( const DistributedDomain& dom_f, const DistributedDomain& dom_c, Bou
         linalg::assign( grad_add_ref_s, grad_add_ref );
     }
 
-    // Transpose check in the arm's own precision.
-    const double lhs = static_cast< double >( linalg::dot( gp, u ) );
-    const double rhs = static_cast< double >( linalg::dot( p, du ) );
-    const double transpose_rel = std::abs( lhs - rhs ) / std::max( std::abs( lhs ), 1e-300 );
+    // Transpose check < G p, u > = < p, D u > with the dot products in double, so it
+    // measures the two kernels' outputs and not the arm's accumulation.
+    double transpose_rel;
+    {
+        VectorQ1Vec< double >    gp_t( "gp_t", dom_f, mask_f ), u_t( "u_t", dom_f, mask_f );
+        VectorQ1Scalar< double > du_t( "du_t", dom_c, mask_c ), p_t( "p_t", dom_c, mask_c );
+        linalg::convert( gp, gp_t );
+        linalg::convert( u, u_t );
+        linalg::convert( du, du_t );
+        linalg::convert( p, p_t );
+        const double lhs = linalg::dot( gp_t, u_t );
+        const double rhs = linalg::dot( p_t, du_t );
+        transpose_rel    = std::abs( lhs - rhs ) / std::max( std::abs( lhs ), 1e-300 );
+    }
 
     // Add mode: dst holds u beforehand (the Stokes operator adds B^T p onto A u with
     // the communication still pending, so the seams of the prefilled vector are
@@ -272,8 +294,9 @@ int main( int argc, char** argv )
                           << "  reference transpose rel " << std::scientific << std::setprecision( 2 )
                           << ref_transpose << std::endl;
 
-                // The transpose identity is checked with the arm's own dot products, whose
-                // accumulation is in the arm's precision: float gets ~1e-4 over 1e5 terms.
+                // The transpose identity is checked in double from each arm's two outputs:
+                // what remains is the kernels' output rounding (float 2^-24, bf16 2^-8,
+                // fp16 2^-11) weighted by the fields.
                 auto report = [&]( const char* name, const Arm& a, double tol, double transpose_tol ) {
                     const bool ok = a.grad_inf <= tol && a.div_inf <= tol && a.grad_add_inf <= tol &&
                                     a.transpose_rel <= transpose_tol && std::isfinite( a.grad_l2 ) &&
@@ -287,14 +310,18 @@ int main( int argc, char** argv )
                 };
 
                 report( "double", run_arm< double, double >( dom_f, dom_c, bc.bcs, gp, du, gp_add, mask_f, mask_c, bmask_f, true ), 1e-11, 1e-10 );
-                report( "float", run_arm< float, float >( dom_f, dom_c, bc.bcs, gp, du, gp_add, mask_f, mask_c, bmask_f, false ), 2e-5, 2e-3 );
+                report( "float", run_arm< float, float >( dom_f, dom_c, bc.bcs, gp, du, gp_add, mask_f, mask_c, bmask_f, false ), 2e-5, 1e-4 );
                 // Float fields on double geometry (the Stokes solve's default float arm).
-                report( "flt/dg", run_arm< float, double >( dom_f, dom_c, bc.bcs, gp, du, gp_add, mask_f, mask_c, bmask_f, false ), 2e-5, 2e-3 );
-                // 16-bit storage on float geometry: the per-cell path rounds every atomic
-                // add into the 16-bit destination, the warp path reduces in float and
-                // rounds once, so the two differ by a few 16-bit ulps of the entries.
-                report( "bf16", run_arm< BHalf, float >( dom_f, dom_c, bc.bcs, gp, du, gp_add, mask_f, mask_c, bmask_f, false ), 1e-1, 1e-1 );
-                report( "fp16", run_arm< Half, float >( dom_f, dom_c, bc.bcs, gp, du, gp_add, mask_f, mask_c, bmask_f, false ), 2e-2, 5e-2 );
+                report( "flt/dg", run_arm< float, double >( dom_f, dom_c, bc.bcs, gp, du, gp_add, mask_f, mask_c, bmask_f, false ), 2e-5, 1e-4 );
+                // 16-bit storage on float geometry, against the float per-cell path on the
+                // same rounded fields (see run_arm): with the arithmetic in float the
+                // kernel differs by one output rounding plus the perimeter atomics; the
+                // "/16" rows (arithmetic in 16 bits too, the configuration the sweeps
+                // time) round in the contraction as well.
+                report( "bf16", run_arm< BHalf, float, float >( dom_f, dom_c, bc.bcs, gp, du, gp_add, mask_f, mask_c, bmask_f, false ), 2e-2, 3e-2 );
+                report( "fp16", run_arm< Half, float, float >( dom_f, dom_c, bc.bcs, gp, du, gp_add, mask_f, mask_c, bmask_f, false ), 4e-3, 6e-3 );
+                report( "bf16/16", run_arm< BHalf, float >( dom_f, dom_c, bc.bcs, gp, du, gp_add, mask_f, mask_c, bmask_f, false ), 1e-1, 1e-1 );
+                report( "fp16/16", run_arm< Half, float >( dom_f, dom_c, bc.bcs, gp, du, gp_add, mask_f, mask_c, bmask_f, false ), 2e-2, 2e-2 );
             }
         }
     }
