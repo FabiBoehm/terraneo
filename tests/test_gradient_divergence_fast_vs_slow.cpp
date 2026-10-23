@@ -2,9 +2,9 @@
 // stand in for.
 //
 // Same bilinear forms, same fields, same boundary conditions; the only difference is
-// the kernel. In double the two must agree to roundoff for every boundary set in
-// Replace and in Add mode; the float arm compares the float warp path against the
-// float per-cell path the same way. Independently of the reference, the
+// the kernel. In double the two must agree to roundoff for all nine CMB/SURFACE
+// boundary sets in Replace and in Add mode; the float, bf16 and fp16 arms compare the
+// warp path against the per-cell path in the same storage the same way. Independently of the reference, the
 // divergence must be the transpose of the gradient: < G p, u > = < p, D u >.
 //
 // On a Serial build both paths are the per-cell path and the test is a no-op that
@@ -213,13 +213,16 @@ int main( int argc, char** argv )
             const char*        name;
             BoundaryConditions bcs;
         };
+        // All nine CMB/SURFACE combinations of Dirichlet, Neumann and free-slip.
         BCSet bc_sets[] = {
-            { "dirichlet/dirichlet", { { CMB, DIRICHLET }, { SURFACE, DIRICHLET } } },
-            { "freeslip/freeslip", { { CMB, FREESLIP }, { SURFACE, FREESLIP } } },
-            { "neumann/neumann", { { CMB, NEUMANN }, { SURFACE, NEUMANN } } },
-            { "dirichlet/freeslip", { { CMB, DIRICHLET }, { SURFACE, FREESLIP } } },
-            { "freeslip/neumann", { { CMB, FREESLIP }, { SURFACE, NEUMANN } } },
+            { "D/D", { { CMB, DIRICHLET }, { SURFACE, DIRICHLET } } }, { "D/N", { { CMB, DIRICHLET }, { SURFACE, NEUMANN } } },
+            { "D/FS", { { CMB, DIRICHLET }, { SURFACE, FREESLIP } } }, { "N/D", { { CMB, NEUMANN }, { SURFACE, DIRICHLET } } },
+            { "N/N", { { CMB, NEUMANN }, { SURFACE, NEUMANN } } },     { "N/FS", { { CMB, NEUMANN }, { SURFACE, FREESLIP } } },
+            { "FS/D", { { CMB, FREESLIP }, { SURFACE, DIRICHLET } } }, { "FS/N", { { CMB, FREESLIP }, { SURFACE, NEUMANN } } },
+            { "FS/FS", { { CMB, FREESLIP }, { SURFACE, FREESLIP } } },
         };
+        using Half  = Kokkos::Experimental::half_t;
+        using BHalf = Kokkos::Experimental::bhalf_t;
 
         for ( int level = min_level; level <= max_level; ++level )
         {
@@ -264,7 +267,7 @@ int main( int argc, char** argv )
                 const double ref_transpose = std::abs( lhs - rhs ) / std::abs( lhs );
 
                 Grad probe( dom_f, dom_c, coords_f, radii_f, bmask_f, bc.bcs );
-                std::cout << "level " << level << "  " << std::setw( 20 ) << bc.name
+                std::cout << "level " << level << "  " << std::setw( 5 ) << bc.name
                           << "  warp path " << ( probe.fast_path_runs() ? "on" : "OFF (per-cell both)" )
                           << "  reference transpose rel " << std::scientific << std::setprecision( 2 )
                           << ref_transpose << std::endl;
@@ -285,6 +288,13 @@ int main( int argc, char** argv )
 
                 report( "double", run_arm< double, double >( dom_f, dom_c, bc.bcs, gp, du, gp_add, mask_f, mask_c, bmask_f, true ), 1e-11, 1e-10 );
                 report( "float", run_arm< float, float >( dom_f, dom_c, bc.bcs, gp, du, gp_add, mask_f, mask_c, bmask_f, false ), 2e-5, 2e-3 );
+                // Float fields on double geometry (the Stokes solve's default float arm).
+                report( "flt/dg", run_arm< float, double >( dom_f, dom_c, bc.bcs, gp, du, gp_add, mask_f, mask_c, bmask_f, false ), 2e-5, 2e-3 );
+                // 16-bit storage on float geometry: the per-cell path rounds every atomic
+                // add into the 16-bit destination, the warp path reduces in float and
+                // rounds once, so the two differ by a few 16-bit ulps of the entries.
+                report( "bf16", run_arm< BHalf, float >( dom_f, dom_c, bc.bcs, gp, du, gp_add, mask_f, mask_c, bmask_f, false ), 1e-1, 1e-1 );
+                report( "fp16", run_arm< Half, float >( dom_f, dom_c, bc.bcs, gp, du, gp_add, mask_f, mask_c, bmask_f, false ), 2e-2, 5e-2 );
             }
         }
     }

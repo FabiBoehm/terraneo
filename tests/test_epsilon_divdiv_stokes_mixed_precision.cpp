@@ -681,7 +681,55 @@ class LowPrecABlock final
     double                         coarse_tol_eff_ = 0.0;
 };
 
-enum class BCKind { DIRICHLET, FREESLIP };
+/// The velocity boundary conditions of the Stokes solve, one flag per shell, so any of
+/// the nine CMB/SURFACE combinations of Dirichlet, free-slip and Neumann can be run
+/// (--bc dirichlet | freeslip | neumann | <cmb>/<surface>).
+struct BCKind
+{
+    grid::shell::BoundaryConditionFlag cmb     = DIRICHLET;
+    grid::shell::BoundaryConditionFlag surface = DIRICHLET;
+};
+
+/// The RHS side of the strongly imposed conditions, shell by shell: Dirichlet zeroes
+/// the velocity RHS on the shell, free-slip zeroes its normal component, Neumann
+/// leaves it alone.
+template < typename VecT, typename CoordT, typename FlagT >
+void enforce_rhs_bcs( const BCKind& bc, VecT& f, const grid::Grid3DDataVec< CoordT, 3 >& coords,
+                      const grid::Grid4DDataScalar< FlagT >& bmask )
+{
+    for ( const auto& [shell, flag] : { std::pair{ CMB, bc.cmb }, std::pair{ SURFACE, bc.surface } } )
+    {
+        if ( flag == DIRICHLET )
+            fe::strong_algebraic_homogeneous_velocity_dirichlet_enforcement_stokes_like( f, bmask, shell );
+        else if ( flag == FREESLIP )
+            fe::strong_algebraic_freeslip_enforcement_in_place( f, coords, bmask, shell );
+    }
+}
+
+inline const char* bc_flag_name( grid::shell::BoundaryConditionFlag f )
+{
+    return f == DIRICHLET ? "dirichlet" : f == FREESLIP ? "freeslip" : "neumann";
+}
+
+inline std::string bc_label( const BCKind& bc )
+{
+    return std::string( bc_flag_name( bc.cmb ) ) + "/" + bc_flag_name( bc.surface );
+}
+
+inline BCKind parse_bc( const std::string& s )
+{
+    auto flag = []( const std::string& t ) {
+        if ( t == "freeslip" || t == "fs" )
+            return FREESLIP;
+        if ( t == "neumann" || t == "n" )
+            return NEUMANN;
+        return DIRICHLET;
+    };
+    const auto slash = s.find( '/' );
+    if ( slash == std::string::npos )
+        return { flag( s ), flag( s ) };
+    return { flag( s.substr( 0, slash ) ), flag( s.substr( slash + 1 ) ) };
+}
 
 struct RunResult
 {
@@ -740,11 +788,7 @@ RunResult run_ablock_mg( int    min_level,
     const size_t velocity_level = num_levels - 1;
     const size_t pressure_level = num_levels - 2;
 
-    const auto bc_flag = ( bc == BCKind::DIRICHLET ) ? DIRICHLET : FREESLIP;
-    BoundaryConditions bcs = {
-        { CMB, bc_flag },
-        { SURFACE, bc_flag },
-    };
+    BoundaryConditions bcs = { { CMB, bc.cmb }, { SURFACE, bc.surface } };
     // GCA descent always coarsens from the Neumann block (gca.hpp does not
     // transfer Dirichlet/free-slip BCs; they are imposed on the fine operator
     // and -- for Dirichlet -- algebraically on the RHS).
@@ -976,17 +1020,7 @@ RunResult run_ablock_mg( int    min_level,
     Kokkos::fence();
 
     linalg::apply( M, tmp_full.block_1(), f_full.block_1() );
-    if ( bc == BCKind::FREESLIP )
-    {
-        fe::strong_algebraic_freeslip_enforcement_in_place(
-            f_full, coords_shell[velocity_level], boundary_mask_data[velocity_level], BOUNDARY );
-    }
-    else
-    {
-        // Homogeneous no-slip: zero the velocity RHS on both shells.
-        fe::strong_algebraic_homogeneous_velocity_dirichlet_enforcement_stokes_like(
-            f_full, boundary_mask_data[velocity_level], BOUNDARY );
-    }
+    enforce_rhs_bcs( bc, f_full, coords_shell[velocity_level], boundary_mask_data[velocity_level] );
 
     if ( !full_stokes )
     {
@@ -1392,8 +1426,7 @@ RunResult run_stokes_in_precision( int    min_level,
     const size_t velocity_level = num_levels - 1;
     const size_t pressure_level = num_levels - 2;
 
-    const auto         bc_flag = ( bc == BCKind::DIRICHLET ) ? DIRICHLET : FREESLIP;
-    BoundaryConditions bcs     = { { CMB, bc_flag }, { SURFACE, bc_flag } };
+    BoundaryConditions bcs = { { CMB, bc.cmb }, { SURFACE, bc.surface } };
 
     using StokesD      = fe::wedge::operators::shell::EpsDivDivStokes< double >;
     using ViscousD     = StokesD::Block11Type;
@@ -1451,12 +1484,7 @@ RunResult run_stokes_in_precision( int    min_level,
                                                          tmp_d.block_1().grid_data(), kRayleigh, perturb_amp } );
     Kokkos::fence();
     linalg::apply( Mv, tmp_d.block_1(), f_d.block_1() );
-    if ( bc == BCKind::FREESLIP )
-        fe::strong_algebraic_freeslip_enforcement_in_place( f_d, coords_shell[velocity_level],
-                                                            boundary_mask_data[velocity_level], BOUNDARY );
-    else
-        fe::strong_algebraic_homogeneous_velocity_dirichlet_enforcement_stokes_like(
-            f_d, boundary_mask_data[velocity_level], BOUNDARY );
+    enforce_rhs_bcs( bc, f_d, coords_shell[velocity_level], boundary_mask_data[velocity_level] );
 
     // ---- everything in M from here ----
     const auto coords_g_v = grid::shell::subdomain_unit_sphere_single_shell_coords< GeomM >( domains[velocity_level] );
@@ -1908,7 +1936,7 @@ int main( int argc, char** argv )
     double perturb_amp = kPerturbDefault;
     int    single_gca  = -1;     // -1 => sweep schemes; otherwise run that gca only
     double single_rmu  = -1.0;   // <0 => sweep the rmu ladder; otherwise single rmu
-    BCKind bc          = BCKind::DIRICHLET;  // default: full (no-slip) Dirichlet
+    BCKind bc;                                // default: no-slip Dirichlet on both shells
     using linalg::solvers::InterpolationMode;
     InterpolationMode single_interp = InterpolationMode::Constant;  // for --gca single runs
     int    visc_profile = 0;  // 0 = Frank-Kamenetskii (smooth), 1 = sharp radial layer
@@ -1943,7 +1971,7 @@ int main( int argc, char** argv )
         else if ( a == "--gca" )            single_gca  = std::atoi( argv[i + 1] );
         else if ( a == "--rmu" )            single_rmu  = std::atof( argv[i + 1] );
         else if ( a == "--bc" )
-            bc = ( std::string( argv[i + 1] ) == "freeslip" ) ? BCKind::FREESLIP : BCKind::DIRICHLET;
+            bc = parse_bc( argv[i + 1] );
         else if ( a == "--gca-interp" )
             single_interp = ( std::string( argv[i + 1] ) == "linear" ) ? InterpolationMode::Linear
                                                                        : InterpolationMode::Constant;
@@ -2020,7 +2048,7 @@ int main( int argc, char** argv )
         verify_gca_rap( max_level, r, InterpolationMode::Linear );
         return 0;
     }
-    const char* bc_name = ( bc == BCKind::DIRICHLET ) ? "dirichlet/dirichlet (no-slip)" : "freeslip/freeslip";
+    const std::string bc_name = bc_label( bc );
 
     // Published radial profiles (Stotz/Lin) are fixed (rmu irrelevant) => single run.
     std::vector< double > rmus = ( visc_profile == 2 || visc_profile == 3 )

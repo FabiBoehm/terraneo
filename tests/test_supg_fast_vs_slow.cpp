@@ -156,7 +156,9 @@ int main( int argc, char** argv )
         const int min_level = ( argc > 1 ) ? std::atoi( argv[1] ) : 3;
         const int max_level = ( argc > 2 ) ? std::atoi( argv[2] ) : 5;
 
-        using Op = fe::wedge::operators::shell::UnsteadyAdvectionDiffusionSUPG< double >;
+        using Op    = fe::wedge::operators::shell::UnsteadyAdvectionDiffusionSUPG< double >;
+        using Half  = Kokkos::Experimental::half_t;
+        using BHalf = Kokkos::Experimental::bhalf_t;
 
         const Config configs[] = {
             { "boundary, consistent mass", true, false, false, 1e-2, 1e-3 },
@@ -209,6 +211,12 @@ int main( int argc, char** argv )
                 };
                 report( "double", run_arm< double, double >( dom, c, ref, add_ref, mask, bmask ), 1e-10 );
                 report( "float", run_arm< float, float >( dom, c, ref, add_ref, mask, bmask ), 2e-5 );
+                report( "flt/dg", run_arm< float, double >( dom, c, ref, add_ref, mask, bmask ), 2e-5 );
+                // 16-bit storage and arithmetic on float geometry (informational
+                // tolerances: the per-cell path rounds every atomic add into the 16-bit
+                // destination, the warp path reduces in 16-bit registers).
+                report( "bf16", run_arm< BHalf, float >( dom, c, ref, add_ref, mask, bmask ), 2e-1 );
+                report( "fp16", run_arm< Half, float >( dom, c, ref, add_ref, mask, bmask ), 5e-2 );
             }
         }
     }
