@@ -12,6 +12,7 @@
 #include "util/table.hpp"
 
 #include <chrono>
+#include <functional>
 
 namespace terra::linalg::solvers {
 
@@ -109,6 +110,14 @@ class FGMRES
     /// @brief Set the number of inner iterations before restart (FGMRES(m)).
     /// @param m Restart parameter (must be at least 1).
     void set_restart( int m ) { options_.restart = std::max( 1, m ); }
+
+    /// Called after every restart cycle, once the iterate has been updated and the
+    /// true residual recomputed, with (total iterations, iterate, relative residual).
+    /// Returning false stops the solve there: a caller that measures something the
+    /// solver cannot see (the error against a known solution, say) decides when the
+    /// iterate is good enough.
+    using RestartCallback = std::function< bool( int, const SolutionVectorType&, double ) >;
+    void set_restart_callback( RestartCallback callback ) { restart_callback_ = std::move( callback ); }
 
     /// @brief Solve the linear system \f$ Ax = b \f$ using flexible GMRES with restarts.
     ///
@@ -414,6 +423,12 @@ class FGMRES
             lincomb( r, { 1.0, -1.0 }, { b, r } );
             beta0 = Kokkos::sqrt( dot( r, r ) );
 
+            if ( restart_callback_ &&
+                 !restart_callback_( total_iters, x, static_cast< double >( beta0 / initial_residual ) ) )
+            {
+                return;
+            }
+
             // Check for final convergence
             if ( beta0 <= options_.absolute_residual_tolerance ||
                  beta0 / initial_residual <= options_.relative_residual_tolerance )
@@ -452,6 +467,7 @@ class FGMRES
     FGMRESOptions< ScalarType > options_; ///< Solver parameters (restart, tolerances, max_iterations).
 
     std::shared_ptr< util::Table > statistics_; ///< Statistics table for iteration logging (optional).
+    RestartCallback                restart_callback_; ///< Per-restart observer, may stop the solve (optional).
 
     PreconditionerT preconditioner_; ///< Preconditioner solver.
 

@@ -76,6 +76,7 @@
 #include "terra/dense/mat.hpp"
 #include "terra/grid/grid_types.hpp"
 #include "terra/grid/shell/spherical_shell.hpp"
+#include "terra/mpi/mpi.hpp"
 #include "terra/kernels/common/grid_operations.hpp"
 #include "terra/kokkos/kokkos_wrapper.hpp"
 
@@ -86,6 +87,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <functional>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -254,6 +257,174 @@ struct RadialBuoyancyRHSInterpolator
         const double f_radial = -rayleigh_ * T;
         for ( int d = 0; d < 3; ++d )
             data_( sd, x, y, r, d ) = f_radial * c( d ) / rad;
+    }
+};
+
+// =============================================================================
+// Problem selection.
+//   a7     -- the A7 benchmark buoyancy above (no known solution; convergence is judged
+//             by the residual).
+//   assess -- an analytic Stokes solution on the same Earth-like shell (Rm = 1.22,
+//             Rp = 2.22) from the "assess" package (Kramer, Sime & Davies, GMD 2021):
+//             degree l = 2, order m = 2, smooth forcing f = -(r/Rp)^2 Y_22 r_hat,
+//             viscosity 1. The error against it is measured during the solve, which
+//             is what tells discretization error from algebraic error and from the
+//             floor of a reduced precision (the "hockey sticks" of error against level
+//             for a solver run in a fixed precision, cf. Bauer, Kohl, McCormick &
+//             Tamstorf, arXiv:2511.19036, Fig. 1).
+// =============================================================================
+enum class Problem { A7, ASSESS };
+
+namespace assess_solution
+{
+// Poloidal potential P = Pl(r) Y_22 with Pl(r) = A r^2 + B r^-3 + C r^4 + D r^-1 + E r^5,
+// pressure p = (G r^2 + H r^-3 + K r^3) Y_22. The coefficients are the package's
+// output for (l, m, k) = (2, 2, 2), Rp = 2.22, Rm = 1.22, nu = 1, g = 1.
+struct Coeffs
+{
+    double A, B, C, D, E, G, H, K;
+};
+// SphericalStokesSolutionSmoothZeroSlip: no-slip on both shells.
+constexpr Coeffs kZeroSlip = { 1.21730989234782628616e-02, 1.77096899185784292796e-02, -5.20909146306425870770e-03,
+                               -2.45704394205095918990e-02, 1.40906672438203942922e-03, 2.18781841448698860519e-01,
+                               2.94845273046115075033e-01, -1.35270405540675792144e-01 };
+// SphericalStokesSolutionSmoothFreeSlip: free-slip on both shells. The solution is
+// poloidal, so it carries no rigid rotation and the operator's rotation penalty
+// leaves it unchanged.
+constexpr Coeffs kFreeSlip = { 1.43802541280018732900e-02, 1.03597000853293194633e-02, -5.66961372969629427004e-03,
+                               -2.23954586666666663475e-02, 1.40906672438203942922e-03, 2.38123776647244350668e-01,
+                               2.68745503999999968414e-01, -1.35270405540675792144e-01 };
+constexpr int    l_deg   = 2;
+constexpr double gravity = 1.0;
+
+// Y_22(theta, phi) = sqrt(15/(32 pi)) sin^2(theta) cos(2 phi) and its derivatives.
+KOKKOS_INLINE_FUNCTION double Y22( const double theta, const double phi )
+{
+    constexpr double c  = 0.38627420202318958;
+    const double     st = Kokkos::sin( theta );
+    return c * st * st * Kokkos::cos( 2.0 * phi );
+}
+KOKKOS_INLINE_FUNCTION double dY22_dtheta( const double theta, const double phi )
+{
+    constexpr double c = 0.38627420202318958;
+    return c * 2.0 * Kokkos::sin( theta ) * Kokkos::cos( theta ) * Kokkos::cos( 2.0 * phi );
+}
+KOKKOS_INLINE_FUNCTION double dY22_dphi( const double theta, const double phi )
+{
+    constexpr double c  = 0.38627420202318958;
+    const double     st = Kokkos::sin( theta );
+    return c * st * st * ( -2.0 * Kokkos::sin( 2.0 * phi ) );
+}
+KOKKOS_INLINE_FUNCTION double Pl( const Coeffs& c, const double r )
+{
+    const double r2 = r * r, r4 = r2 * r2, inv_r = 1.0 / r;
+    return c.A * r2 + c.B * inv_r * inv_r * inv_r + c.C * r4 + c.D * inv_r + c.E * r4 * r;
+}
+KOKKOS_INLINE_FUNCTION double dPldr( const Coeffs& c, const double r )
+{
+    const double r2 = r * r, r3 = r2 * r, inv_r2 = 1.0 / r2;
+    return 2.0 * c.A * r - 3.0 * c.B * inv_r2 * inv_r2 + 4.0 * c.C * r3 - c.D * inv_r2 + 5.0 * c.E * r2 * r2;
+}
+KOKKOS_INLINE_FUNCTION void to_spherical( const double cx, const double cy, const double cz, double& r, double& theta,
+                                          double& phi )
+{
+    r     = Kokkos::sqrt( cx * cx + cy * cy + cz * cz );
+    theta = Kokkos::acos( cz / r );
+    phi   = Kokkos::atan2( cy, cx );
+}
+// u_r = -l(l+1) Pl Y / r,  u_theta = -(Pl/r + Pl') dY/dtheta,  u_phi = -(Pl/r + Pl') / sin(theta) dY/dphi.
+KOKKOS_INLINE_FUNCTION void velocity_cartesian( const Coeffs& c, const double cx, const double cy, const double cz,
+                                                double& ux, double& uy, double& uz )
+{
+    double r, theta, phi;
+    to_spherical( cx, cy, cz, r, theta, phi );
+    const double st = Kokkos::sin( theta ), ct = Kokkos::cos( theta );
+    const double P = Pl( c, r ), dP = dPldr( c, r );
+    const double u_r     = -static_cast< double >( l_deg * ( l_deg + 1 ) ) * P * Y22( theta, phi ) / r;
+    const double radial  = P / r + dP;
+    const double u_theta = -radial * dY22_dtheta( theta, phi );
+    const double req     = Kokkos::sqrt( cx * cx + cy * cy );
+    if ( req < 1.0e-14 * r )
+    {
+        ux = uy = uz = 0.0; // Y_22 and its derivatives vanish at the poles
+        return;
+    }
+    const double u_phi   = -radial / st * dY22_dphi( theta, phi );
+    const double inv_req = 1.0 / req;
+    ux = cx / r * u_r + cx * inv_req * ct * u_theta - cy * inv_req * u_phi;
+    uy = cy / r * u_r + cy * inv_req * ct * u_theta + cx * inv_req * u_phi;
+    uz = cz / r * u_r - st * u_theta;
+}
+KOKKOS_INLINE_FUNCTION double pressure_cartesian( const Coeffs& c, const double cx, const double cy, const double cz )
+{
+    double r, theta, phi;
+    to_spherical( cx, cy, cz, r, theta, phi );
+    const double r2 = r * r, r3 = r2 * r;
+    return ( c.G * r2 + c.H / r3 + c.K * r3 ) * Y22( theta, phi );
+}
+// Body force f = -g (r/Rp)^2 Y_22 r_hat (the same for both boundary condition sets).
+KOKKOS_INLINE_FUNCTION void body_force_cartesian( const double cx, const double cy, const double cz, double& fx,
+                                                  double& fy, double& fz )
+{
+    double r, theta, phi;
+    to_spherical( cx, cy, cz, r, theta, phi );
+    const double rho      = ( r / kRp ) * ( r / kRp ) * Y22( theta, phi );
+    const double f_radial = -gravity * rho / r;
+    fx = f_radial * cx;
+    fy = f_radial * cy;
+    fz = f_radial * cz;
+}
+} // namespace assess_solution
+
+struct AssessBodyForceInterpolator
+{
+    Grid3DDataVec< double, 3 >       grid_;
+    Grid2DDataScalar< double >       radii_;
+    grid::Grid4DDataVec< double, 3 > data_;
+
+    KOKKOS_INLINE_FUNCTION
+    void operator()( const int sd, const int x, const int y, const int r ) const
+    {
+        const dense::Vec< double, 3 > c = grid::shell::coords( sd, x, y, r, grid_, radii_ );
+        double                        fx, fy, fz;
+        assess_solution::body_force_cartesian( c( 0 ), c( 1 ), c( 2 ), fx, fy, fz );
+        data_( sd, x, y, r, 0 ) = fx;
+        data_( sd, x, y, r, 1 ) = fy;
+        data_( sd, x, y, r, 2 ) = fz;
+    }
+};
+
+struct AssessVelocityInterpolator
+{
+    Grid3DDataVec< double, 3 >       grid_;
+    Grid2DDataScalar< double >       radii_;
+    grid::Grid4DDataVec< double, 3 > data_;
+    assess_solution::Coeffs          c_;
+
+    KOKKOS_INLINE_FUNCTION
+    void operator()( const int sd, const int x, const int y, const int r ) const
+    {
+        const dense::Vec< double, 3 > c = grid::shell::coords( sd, x, y, r, grid_, radii_ );
+        double                        ux, uy, uz;
+        assess_solution::velocity_cartesian( c_, c( 0 ), c( 1 ), c( 2 ), ux, uy, uz );
+        data_( sd, x, y, r, 0 ) = ux;
+        data_( sd, x, y, r, 1 ) = uy;
+        data_( sd, x, y, r, 2 ) = uz;
+    }
+};
+
+struct AssessPressureInterpolator
+{
+    Grid3DDataVec< double, 3 >    grid_;
+    Grid2DDataScalar< double >    radii_;
+    grid::Grid4DDataScalar< double > data_;
+    assess_solution::Coeffs       c_;
+
+    KOKKOS_INLINE_FUNCTION
+    void operator()( const int sd, const int x, const int y, const int r ) const
+    {
+        const dense::Vec< double, 3 > c = grid::shell::coords( sd, x, y, r, grid_, radii_ );
+        data_( sd, x, y, r )            = assess_solution::pressure_cartesian( c_, c( 0 ), c( 1 ), c( 2 ) );
     }
 };
 
@@ -731,12 +902,224 @@ inline BCKind parse_bc( const std::string& s )
     return { flag( s.substr( 0, slash ) ), flag( s.substr( slash + 1 ) ) };
 }
 
+// Subdomain refinement (lateral and radial) of every level, --subdomain-level: the
+// shell has 10 * 8^s subdomains and that many ranks can share it. 0 = one subdomain
+// per diamond (at most 10 ranks).
+static int g_subdomain_level = 0;
+
+inline const assess_solution::Coeffs& assess_coeffs( const BCKind& bc )
+{
+    return ( bc.cmb == FREESLIP && bc.surface == FREESLIP ) ? assess_solution::kFreeSlip : assess_solution::kZeroSlip;
+}
+
+inline bool assess_supports( const BCKind& bc )
+{
+    return ( bc.cmb == DIRICHLET && bc.surface == DIRICHLET ) || ( bc.cmb == FREESLIP && bc.surface == FREESLIP );
+}
+
+// The strong-form body force of the chosen problem at the nodes of one level.
+inline void fill_body_force( Problem problem, const DistributedDomain& dom, const Grid3DDataVec< double, 3 >& coords,
+                             const Grid2DDataScalar< double >& radii, grid::Grid4DDataVec< double, 3 > data,
+                             double perturb_amp )
+{
+    if ( problem == Problem::ASSESS )
+        Kokkos::parallel_for( "assess_body_force", local_domain_md_range_policy_nodes( dom ),
+                              AssessBodyForceInterpolator{ coords, radii, data } );
+    else
+        Kokkos::parallel_for( "radial_buoyancy_rhs", local_domain_md_range_policy_nodes( dom ),
+                              RadialBuoyancyRHSInterpolator{ coords, radii, data, kRayleigh, perturb_amp } );
+    Kokkos::fence();
+}
+
+// The analytic solution (velocity on the velocity level, pressure on the pressure
+// level) interpolated at the nodes.
+inline void interpolate_exact_solution( const BCKind& bc, const DistributedDomain& dom_v, const DistributedDomain& dom_p,
+                                        const Grid3DDataVec< double, 3 >& coords_v,
+                                        const Grid2DDataScalar< double >& radii_v,
+                                        const Grid3DDataVec< double, 3 >& coords_p,
+                                        const Grid2DDataScalar< double >& radii_p, VectorQ1IsoQ2Q1< double >& exact )
+{
+    const auto& c = assess_coeffs( bc );
+    Kokkos::parallel_for( "assess_velocity", local_domain_md_range_policy_nodes( dom_v ),
+                          AssessVelocityInterpolator{ coords_v, radii_v, exact.block_1().grid_data(), c } );
+    Kokkos::parallel_for( "assess_pressure", local_domain_md_range_policy_nodes( dom_p ),
+                          AssessPressureInterpolator{ coords_p, radii_p, exact.block_2().grid_data(), c } );
+    Kokkos::fence();
+}
+
+inline void widen( const VectorQ1IsoQ2Q1< double >& src, VectorQ1IsoQ2Q1< double >& dst ) { linalg::assign( dst, src ); }
+template < typename S >
+void widen( const VectorQ1IsoQ2Q1< S >& src, VectorQ1IsoQ2Q1< double >& dst )
+{
+    linalg::convert( src, dst );
+}
+
+// Error against the analytic solution, taken after every outer restart cycle (FGMRES)
+// or every step (IR): the iterate is widened to double, the mean pressure removed
+// from both, and the relative root-mean-square nodal errors of velocity and pressure
+// recorded next to the solver's own relative residual.
+//
+// It also ends the solve. Once the velocity error improves by less than `stall_frac`
+// over a cycle twice in a row, the algebraic error is below the discretization error
+// and iterating further only polishes digits the discretization does not have --
+// solve to discretization error, not further. An error climbing back above twice its
+// best value (a reduced precision drifting off its floor) ends it too, as does NaN.
+class ErrorMonitor
+{
+  public:
+    ErrorMonitor( const VectorQ1IsoQ2Q1< double >& exact, const VectorQ1IsoQ2Q1< double >& tmp,
+                  const VectorQ1IsoQ2Q1< double >& err, long ndof_v, long ndof_p, double stall_frac,
+                  std::shared_ptr< util::Table > table )
+    : exact_( exact )
+    , tmp_( tmp )
+    , err_( err )
+    , ndof_v_( static_cast< double >( ndof_v ) )
+    , ndof_p_( static_cast< double >( ndof_p ) )
+    , stall_frac_( stall_frac )
+    , table_( std::move( table ) )
+    {
+        remove_mean_pressure( exact_ );
+        norm_v_ = std::sqrt( static_cast< double >( linalg::dot( exact_.block_1(), exact_.block_1() ) ) / ndof_v_ );
+        norm_p_ = std::sqrt( static_cast< double >( linalg::dot( exact_.block_2(), exact_.block_2() ) ) / ndof_p_ );
+    }
+
+    /// Records the error of `x` at outer iteration `iteration`; returns false when the
+    /// solve should stop.
+    template < typename VecT >
+    bool record( int iteration, const VecT& x, double rel_residual, double elapsed_s )
+    {
+        widen( x, tmp_ );
+        remove_mean_pressure( tmp_ );
+        linalg::lincomb( err_, { 1.0, -1.0 }, { tmp_, exact_ } );
+        const double ev =
+            std::sqrt( static_cast< double >( linalg::dot( err_.block_1(), err_.block_1() ) ) / ndof_v_ ) / norm_v_;
+        const double ep =
+            std::sqrt( static_cast< double >( linalg::dot( err_.block_2(), err_.block_2() ) ) / ndof_p_ ) / norm_p_;
+        const double ev_inf = static_cast< double >( linalg::norm_inf( err_.block_1() ) ) /
+                              static_cast< double >( linalg::norm_inf( exact_.block_1() ) );
+        table_->add_row( { { "tag", std::string( "error" ) },
+                           { "iteration", iteration },
+                           { "elapsed_s", elapsed_s },
+                           { "relative_residual", rel_residual },
+                           { "err_vel", ev },
+                           { "err_pre", ep },
+                           { "err_vel_inf", ev_inf } } );
+        final_vel_ = ev;
+        final_pre_ = ep;
+        final_it_  = iteration;
+        if ( !( ev == ev ) || !( ep == ep ) )
+        {
+            util::logroot << "[assess] error is NaN at iteration " << iteration << "; stopping." << std::endl;
+            return false;
+        }
+        if ( ev < best_vel_ )
+        {
+            best_vel_ = ev;
+            best_pre_ = ep;
+            best_it_  = iteration;
+        }
+        bool stop = false;
+        if ( have_prev_ && iteration > 0 )
+        {
+            const double gain = ( prev_vel_ - ev ) / prev_vel_;
+            stalls_           = ( gain < stall_frac_ ) ? stalls_ + 1 : 0;
+            if ( stalls_ >= 2 )
+            {
+                util::logroot << "[assess] velocity error settled at " << ev << " (gain " << gain
+                              << " over the last cycle, twice below " << stall_frac_
+                              << "): discretization error reached at iteration " << iteration << std::endl;
+                stop = true;
+            }
+            if ( ev > 2.0 * best_vel_ )
+            {
+                util::logroot << "[assess] velocity error " << ev << " is above twice its best " << best_vel_
+                              << " (iteration " << best_it_ << "); stopping at iteration " << iteration << std::endl;
+                stop = true;
+            }
+        }
+        prev_vel_  = ev;
+        have_prev_ = true;
+        return !stop;
+    }
+
+    double best_vel() const { return best_vel_; }
+    double best_pre() const { return best_pre_; }
+    int    best_iteration() const { return best_it_; }
+    double final_vel() const { return final_vel_; }
+    double final_pre() const { return final_pre_; }
+    int    final_iteration() const { return final_it_; }
+
+    void print( const std::string& label ) const
+    {
+        table_->query_rows_equals( "tag", "error" )
+            .select_columns( { "iteration", "elapsed_s", "relative_residual", "err_vel", "err_pre", "err_vel_inf" } )
+            .print_pretty();
+        util::logroot << "[assess] " << label << ": best relative velocity error " << best_vel_ << " (pressure "
+                      << best_pre_ << ") at iteration " << best_it_ << "; final " << final_vel_ << " (pressure "
+                      << final_pre_ << ") at iteration " << final_it_ << std::endl;
+    }
+
+  private:
+    void remove_mean_pressure( VectorQ1IsoQ2Q1< double >& v ) const
+    {
+        const double mean = static_cast< double >( kernels::common::masked_sum(
+                                v.block_2().grid_data(), v.block_2().mask_data(), grid::NodeOwnershipFlag::OWNED ) ) /
+                            ndof_p_;
+        linalg::lincomb( v.block_2(), { 1.0 }, { v.block_2() }, -mean );
+    }
+
+    VectorQ1IsoQ2Q1< double >      exact_;
+    VectorQ1IsoQ2Q1< double >      tmp_;
+    VectorQ1IsoQ2Q1< double >      err_;
+    double                         ndof_v_, ndof_p_, norm_v_ = 1.0, norm_p_ = 1.0;
+    double                         stall_frac_;
+    std::shared_ptr< util::Table > table_;
+    double                         best_vel_ = std::numeric_limits< double >::infinity(), best_pre_ = 0.0;
+    int                            best_it_ = -1;
+    double                         final_vel_ = 0.0, final_pre_ = 0.0;
+    int                            final_it_ = -1;
+    double                         prev_vel_  = 0.0;
+    bool                           have_prev_ = false;
+    int                            stalls_    = 0;
+};
+
+// Builds the monitor for the assess problem (nullptr for a7): exact solution, DoF counts.
+inline std::unique_ptr< ErrorMonitor > make_error_monitor( Problem problem, const BCKind& bc, double stall_frac,
+                                                           const DistributedDomain& dom_v,
+                                                           const DistributedDomain& dom_p,
+                                                           const Grid3DDataVec< double, 3 >& coords_v,
+                                                           const Grid2DDataScalar< double >& radii_v,
+                                                           const Grid3DDataVec< double, 3 >& coords_p,
+                                                           const Grid2DDataScalar< double >& radii_p,
+                                                           const Grid4DDataScalar< grid::NodeOwnershipFlag >& mask_v,
+                                                           const Grid4DDataScalar< grid::NodeOwnershipFlag >& mask_p )
+{
+    if ( problem != Problem::ASSESS )
+        return nullptr;
+    VectorQ1IsoQ2Q1< double > exact( "assess_exact", dom_v, dom_p, mask_v, mask_p );
+    interpolate_exact_solution( bc, dom_v, dom_p, coords_v, radii_v, coords_p, radii_p, exact );
+    const long ndof_v = 3 * kernels::common::count_masked< long >( mask_v, grid::NodeOwnershipFlag::OWNED );
+    const long ndof_p = kernels::common::count_masked< long >( mask_p, grid::NodeOwnershipFlag::OWNED );
+    util::logroot << "[assess] " << ( assess_coeffs( bc ).A == assess_solution::kFreeSlip.A ? "free-slip" : "no-slip" )
+                  << " analytic solution (l = 2, m = 2, k = 2) on " << mpi::num_processes() << " rank(s), subdomain level "
+                  << g_subdomain_level << "; velocity DoFs " << ndof_v << ", pressure DoFs " << ndof_p << std::endl;
+    VectorQ1IsoQ2Q1< double > tmp( "assess_tmp", dom_v, dom_p, mask_v, mask_p );
+    VectorQ1IsoQ2Q1< double > err( "assess_err", dom_v, dom_p, mask_v, mask_p );
+    return std::make_unique< ErrorMonitor >( exact, tmp, err, ndof_v, ndof_p, stall_frac,
+                                             std::make_shared< util::Table >() );
+}
+
 struct RunResult
 {
     int    cycles;              // number of MG V-cycles performed
     double rel_residual_final;  // final relative residual
     double asymptotic_rate;     // residual_convergence_rate of the last cycle
     bool   converged;
+    // --problem assess: relative RMS errors against the analytic solution (NaN for a7).
+    double err_vel_best  = std::numeric_limits< double >::quiet_NaN();
+    double err_pre_best  = std::numeric_limits< double >::quiet_NaN();
+    int    err_best_iter = -1;
+    double err_vel_final = std::numeric_limits< double >::quiet_NaN();
 };
 
 // Build the viscous A-block MG and run it as the solver for  A u = f.
@@ -764,7 +1147,9 @@ RunResult run_ablock_mg( int    min_level,
                          double      hourglass_c, // rank-6 hourglass stabilization coefficient (0 = off)
                          double      outer_tol,   // outer relative residual tolerance
                          OuterSolver outer_solver, // fgmres or pure iterative refinement
-                         int         outer_restart_in ) // outer FGMRES restart length (<=0 = default 50)
+                         int         outer_restart_in, // outer FGMRES restart length (<=0 = default 50)
+                         Problem     problem,          // a7 buoyancy or the analytic assess solution
+                         double      stall_frac )      // --stall-frac: error gain per cycle below which the solve ends
 {
     using ScalarType = double;
 
@@ -777,7 +1162,8 @@ RunResult run_ablock_mg( int    min_level,
     for ( int level = min_level; level <= max_level; ++level )
     {
         const int idx = level - min_level;
-        domains.push_back( DistributedDomain::create_uniform( level, level, kRm, kRp, 0, 0 ) );
+        domains.push_back(
+            DistributedDomain::create_uniform( level, level, kRm, kRp, g_subdomain_level, g_subdomain_level ) );
         coords_shell.push_back( grid::shell::subdomain_unit_sphere_single_shell_coords< ScalarType >( domains[idx] ) );
         coords_radii.push_back( grid::shell::subdomain_shell_radii< ScalarType >( domains[idx] ) );
         mask_data.push_back( grid::setup_node_ownership_mask_data( domains[idx] ) );
@@ -1011,16 +1397,22 @@ RunResult run_ablock_mg( int    min_level,
     VectorQ1IsoQ2Q1< ScalarType > tmp_full(
         "tmp_full", domains[velocity_level], domains[pressure_level], mask_data[velocity_level], mask_data[pressure_level] );
 
-    Kokkos::parallel_for(
-        "radial_buoyancy_rhs",
-        local_domain_md_range_policy_nodes( domains[velocity_level] ),
-        RadialBuoyancyRHSInterpolator{
-            coords_shell[velocity_level], coords_radii[velocity_level],
-            tmp_full.block_1().grid_data(), kRayleigh, perturb_amp } );
-    Kokkos::fence();
+    fill_body_force( problem, domains[velocity_level], coords_shell[velocity_level], coords_radii[velocity_level],
+                     tmp_full.block_1().grid_data(), perturb_amp );
 
     linalg::apply( M, tmp_full.block_1(), f_full.block_1() );
     enforce_rhs_bcs( bc, f_full, coords_shell[velocity_level], boundary_mask_data[velocity_level] );
+
+    // --problem assess: the error against the analytic solution, recorded per restart
+    // cycle / IR step; it ends the solve at discretization accuracy.
+    auto monitor = make_error_monitor( problem, bc, stall_frac, domains[velocity_level], domains[pressure_level],
+                                       coords_shell[velocity_level], coords_radii[velocity_level],
+                                       coords_shell[pressure_level], coords_radii[pressure_level],
+                                       mask_data[velocity_level], mask_data[pressure_level] );
+    const auto t_solve0 = std::chrono::steady_clock::now();
+    auto       solve_elapsed = [&]() {
+        return std::chrono::duration< double >( std::chrono::steady_clock::now() - t_solve0 ).count();
+    };
 
     if ( !full_stokes )
     {
@@ -1260,12 +1652,19 @@ RunResult run_ablock_mg( int    min_level,
                                     { "elapsed_s", elapsed_ir() },
                                     { "relative_residual", rel },
                                     { "absolute_residual", rk } } );
+            if ( monitor && !monitor->record( k, u_stokes, rel, solve_elapsed() ) )
+                break;
             if ( rel <= outer_tol )
                 break;
         }
     }
     else if ( krylov_prec == KrylovPrec::DOUBLE )
     {
+        if ( monitor )
+            monitor->record( 0, u_stokes, 1.0, solve_elapsed() );
+        auto on_restart = [&]( int it, const VectorQ1IsoQ2Q1< ScalarType >& x, double rel ) {
+            return monitor->record( it, x, rel, solve_elapsed() );
+        };
         std::vector< VectorQ1IsoQ2Q1< ScalarType > > tmp_fgmres;
         for ( int i = 0; i < 2 * outer_restart + 4; ++i )
             tmp_fgmres.emplace_back( "tmp_fgmres_" + std::to_string( i ),
@@ -1281,17 +1680,24 @@ RunResult run_ablock_mg( int    min_level,
             // reduced via query_rows_equals( "tag", "stokes_fgmres" ), so a
             // distinct tag here silently yields an empty convergence table.
             fgmres.set_tag( "stokes_fgmres" );
+            if ( monitor )
+                fgmres.set_restart_callback( on_restart );
             linalg::solvers::solve( fgmres, K_op, u_stokes, f_full );
         }
         else
         {
             linalg::solvers::FGMRES< Stokes, PrecStokes > fgmres( tmp_fgmres, outer_opts, outer_table, prec_stokes );
             fgmres.set_tag( "stokes_fgmres" );
+            if ( monitor )
+                fgmres.set_restart_callback( on_restart );
             linalg::solvers::solve( fgmres, K_op, u_stokes, f_full );
         }
     }
     else
     {
+        if ( monitor )
+            util::logroot << "[assess] note: the reduced-precision Krylov basis solver has no restart hook; the error "
+                             "is recorded after the solve only.\n";
         std::vector< VectorQ1IsoQ2Q1< ScalarType > > work;  // FGMRESLowMem aliases r/w => 3 scratch
         for ( int i = 0; i < 3; ++i )
             work.emplace_back( "work_fgmres_" + std::to_string( i ),
@@ -1335,7 +1741,18 @@ RunResult run_ablock_mg( int    min_level,
     const int  iters   = rows.empty() ? 0 : static_cast< int >( rows.size() ) - 1;
     const double rel_residual_final =
         rows.empty() ? 1.0 : std::get< double >( rows.back().at( "relative_residual" ) );
-    return { iters, rel_residual_final, std::numeric_limits< double >::quiet_NaN(), rel_residual_final <= 1e-6 };
+    RunResult result{ iters, rel_residual_final, std::numeric_limits< double >::quiet_NaN(), rel_residual_final <= 1e-6 };
+    if ( monitor && !ablock_outer )
+    {
+        if ( monitor->final_iteration() < iters ) // no hook fired (LowMem basis): take the final iterate
+            monitor->record( iters, u_stokes, rel_residual_final, solve_elapsed() );
+        monitor->print( "double outer, A-block " + std::string( ablock_prec_name( ablock_prec ) ) );
+        result.err_vel_best  = monitor->best_vel();
+        result.err_pre_best  = monitor->best_pre();
+        result.err_best_iter = monitor->best_iteration();
+        result.err_vel_final = monitor->final_vel();
+    }
+    return result;
 }
 
 // =============================================================================
@@ -1405,7 +1822,9 @@ RunResult run_stokes_in_precision( int    min_level,
                                    OuterSolver outer_solver,
                                    int    outer_restart_in,
                                    double inner_tol,
-                                   int    inner_its )
+                                   int    inner_its,
+                                   Problem problem,
+                                   double stall_frac )
 {
     std::vector< DistributedDomain >                                  domains;
     std::vector< Grid3DDataVec< double, 3 > >                         coords_shell;
@@ -1416,7 +1835,8 @@ RunResult run_stokes_in_precision( int    min_level,
     for ( int level = min_level; level <= max_level; ++level )
     {
         const int idx = level - min_level;
-        domains.push_back( DistributedDomain::create_uniform( level, level, kRm, kRp, 0, 0 ) );
+        domains.push_back(
+            DistributedDomain::create_uniform( level, level, kRm, kRp, g_subdomain_level, g_subdomain_level ) );
         coords_shell.push_back( grid::shell::subdomain_unit_sphere_single_shell_coords< double >( domains[idx] ) );
         coords_radii.push_back( grid::shell::subdomain_shell_radii< double >( domains[idx] ) );
         mask_data.push_back( grid::setup_node_ownership_mask_data( domains[idx] ) );
@@ -1479,12 +1899,19 @@ RunResult run_stokes_in_precision( int    min_level,
                                    mask_data[pressure_level] );
     VectorQ1IsoQ2Q1< double > tmp_d( "tmp_d", domains[velocity_level], domains[pressure_level],
                                      mask_data[velocity_level], mask_data[pressure_level] );
-    Kokkos::parallel_for( "radial_buoyancy_rhs", local_domain_md_range_policy_nodes( domains[velocity_level] ),
-                          RadialBuoyancyRHSInterpolator{ coords_shell[velocity_level], coords_radii[velocity_level],
-                                                         tmp_d.block_1().grid_data(), kRayleigh, perturb_amp } );
-    Kokkos::fence();
+    fill_body_force( problem, domains[velocity_level], coords_shell[velocity_level], coords_radii[velocity_level],
+                     tmp_d.block_1().grid_data(), perturb_amp );
     linalg::apply( Mv, tmp_d.block_1(), f_d.block_1() );
     enforce_rhs_bcs( bc, f_d, coords_shell[velocity_level], boundary_mask_data[velocity_level] );
+
+    auto monitor = make_error_monitor( problem, bc, stall_frac, domains[velocity_level], domains[pressure_level],
+                                       coords_shell[velocity_level], coords_radii[velocity_level],
+                                       coords_shell[pressure_level], coords_radii[pressure_level],
+                                       mask_data[velocity_level], mask_data[pressure_level] );
+    const auto t_solve0 = std::chrono::steady_clock::now();
+    auto       solve_elapsed = [&]() {
+        return std::chrono::duration< double >( std::chrono::steady_clock::now() - t_solve0 ).count();
+    };
 
     // ---- everything in M from here ----
     const auto coords_g_v = grid::shell::subdomain_unit_sphere_single_shell_coords< GeomM >( domains[velocity_level] );
@@ -1613,6 +2040,8 @@ RunResult run_stokes_in_precision( int    min_level,
             const double rel   = ( r0 > 0.0 ) ? rk / r0 : 0.0;
             outer_table->add_row( { { "tag", std::string( "stokes_fgmres" ) }, { "iteration", k }, { "elapsed_s", elapsed() },
                                     { "relative_residual", rel }, { "absolute_residual", rk }, { "inner_total", inner_total } } );
+            if ( monitor && !monitor->record( k, u_d, rel, solve_elapsed() ) )
+                break;
             if ( rel <= outer_tol )
                 break;
         }
@@ -1648,18 +2077,25 @@ RunResult run_stokes_in_precision( int    min_level,
             const double rel = ( r0 > 0.0 ) ? rk / r0 : 0.0;
             outer_table->add_row( { { "tag", std::string( "stokes_fgmres" ) }, { "iteration", k }, { "elapsed_s", elapsed() },
                                     { "relative_residual", rel }, { "absolute_residual", rk } } );
+            if ( monitor && !monitor->record( k, u_m, rel, solve_elapsed() ) )
+                break;
             if ( rel <= outer_opts.relative_residual_tolerance )
                 break;
         }
     }
     else
     {
+        if ( monitor )
+            monitor->record( 0, u_m, 1.0, solve_elapsed() );
         std::vector< IsoM > tmp_fgmres;
         for ( int i = 0; i < 2 * outer_restart + 4; ++i )
             tmp_fgmres.emplace_back( "tmp_fgmres_m_" + std::to_string( i ), domains[velocity_level],
                                      domains[pressure_level], mask_data[velocity_level], mask_data[pressure_level] );
         linalg::solvers::FGMRES< StokesM, PrecStokesM > fgmres( tmp_fgmres, outer_opts, outer_table, prec_stokes );
         fgmres.set_tag( "stokes_fgmres" );
+        if ( monitor )
+            fgmres.set_restart_callback(
+                [&]( int it, const IsoM& x, double rel ) { return monitor->record( it, x, rel, solve_elapsed() ); } );
         linalg::solvers::solve( fgmres, K_m, u_m, f_m );
     }
 
@@ -1685,7 +2121,19 @@ RunResult run_stokes_in_precision( int    min_level,
     const auto   rows  = outer_table->query_rows_equals( "tag", "stokes_fgmres" ).rows();
     const int    iters = rows.empty() ? 0 : static_cast< int >( rows.size() ) - 1;
     const double rel_residual_final = rows.empty() ? 1.0 : std::get< double >( rows.back().at( "relative_residual" ) );
-    return { iters, rel_residual_final, res_d / f_norm, rel_residual_final <= 1e-6 };
+    RunResult result{ iters, rel_residual_final, res_d / f_norm, rel_residual_final <= 1e-6 };
+    if ( monitor )
+    {
+        if ( monitor->final_iteration() < iters )
+            monitor->record( iters, u_sol_d, rel_residual_final, solve_elapsed() );
+        monitor->print( std::string( "all in " ) + std::to_string( 8 * sizeof( M ) ) + "-bit storage, " +
+                        std::to_string( 8 * sizeof( GeomM ) ) + "-bit geometry, outer " + outer_solver_name( outer_solver ) );
+        result.err_vel_best  = monitor->best_vel();
+        result.err_pre_best  = monitor->best_pre();
+        result.err_best_iter = monitor->best_iteration();
+        result.err_vel_final = monitor->final_vel();
+    }
+    return result;
 }
 
 // Direct fidelity check: does GCA's stored-matrix coarse operator reproduce the
@@ -1956,6 +2404,8 @@ int main( int argc, char** argv )
     bool        stokes_geom_low  = false;           // --stokes-geom low: geometry in float for the M arm
     double      inner_tol        = 1e-2;            // --inner-tol: inner FGMRES tolerance of the mixed-precision IR
     int         inner_its        = 10;              // --inner-its: inner FGMRES iteration cap per outer step
+    Problem     problem          = Problem::A7;     // --problem a7|assess
+    double      stall_frac       = 0.02;            // --stall-frac: assess stop rule, error gain per cycle
     for ( int i = 1; i + 1 < argc; ++i )
     {
         const std::string a = argv[i];
@@ -1963,6 +2413,9 @@ int main( int argc, char** argv )
         else if ( a == "--stokes-geom" )    stokes_geom_low = ( std::string( argv[i + 1] ) == "low" );
         else if ( a == "--inner-tol" )      inner_tol = std::atof( argv[i + 1] );
         else if ( a == "--inner-its" )      inner_its = std::atoi( argv[i + 1] );
+        else if ( a == "--problem" )        problem = ( std::string( argv[i + 1] ) == "assess" ) ? Problem::ASSESS : Problem::A7;
+        else if ( a == "--subdomain-level" ) g_subdomain_level = std::atoi( argv[i + 1] );
+        else if ( a == "--stall-frac" )     stall_frac = std::atof( argv[i + 1] );
         else if ( a == "--min-level" )           min_level   = std::atoi( argv[i + 1] );
         else if ( a == "--max-level" )      max_level   = std::atoi( argv[i + 1] );
         else if ( a == "--cheby-order" )    cheby_order = std::atoi( argv[i + 1] );
@@ -2056,6 +2509,22 @@ int main( int argc, char** argv )
                                      : ( single_rmu > 0.0 )
                                            ? std::vector< double >{ single_rmu }
                                            : std::vector< double >{ 1.0e1, 1.0e2, 1.0e3, 1.0e4, 1.0e5, 1.0e6 };
+    if ( problem == Problem::ASSESS )
+    {
+        // The analytic solution has constant viscosity and exists for no-slip/no-slip
+        // and free-slip/free-slip; it needs the full saddle-point solve.
+        if ( !assess_supports( bc ) || !full_stokes || ablock_outer || visc_profile != 0 )
+        {
+            util::logroot << "--problem assess needs --solve stokes, --bc dirichlet or --bc freeslip and the "
+                             "Frank-Kamenetskii viscosity (constant at rmu 1).\n";
+            return 1;
+        }
+        rmus = { 1.0 };
+        util::logroot << "problem = assess (analytic l=2 m=2 k=2 solution, " << bc_name
+                      << "), stop rule: velocity error gain below " << stall_frac
+                      << " per cycle twice in a row; subdomain level " << g_subdomain_level << " on "
+                      << mpi::num_processes() << " rank(s)\n";
+    }
 
     // A scheme = (gca mode, GCA interpolation, label).  Default sweep compares
     // re-discretized coarse ops against full GCA with constant vs linear P.
@@ -2120,7 +2589,7 @@ int main( int argc, char** argv )
                     return run_stokes_in_precision< M, G >( min_level, max_level, cheby_order, perturb_amp, rmu,
                                                             max_cycles, bc, visc_profile, coarse_tol, hourglass_c,
                                                             outer_tol, outer_solver, outer_restart_in, inner_tol,
-                                                            inner_its );
+                                                            inner_its, problem, stall_frac );
                 };
                 util::logroot << "    stokes-prec = " << stokes_prec << ( stokes_geom_low ? " (geometry float)" : " (geometry double)" ) << "\n";
                 if ( stokes_prec == "float" )
@@ -2134,7 +2603,7 @@ int main( int argc, char** argv )
                 res = run_ablock_mg( min_level, max_level, cheby_order, perturb_amp, rmu, s.gca, no_stokes_prec,
                                max_cycles, bc, s.interp,
                                visc_profile, coarse_tol, full_stokes, ablock_outer, krylov_prec, ablock_prec, ablock_arith, ablock_geom,
-                               hourglass_c, outer_tol, outer_solver, outer_restart_in );
+                               hourglass_c, outer_tol, outer_solver, outer_restart_in, problem, stall_frac );
 
             summary->add_row(
                 { { "rmu", rmu },
@@ -2151,13 +2620,23 @@ int main( int argc, char** argv )
                   { "cycles", res.cycles },
                   { "final_rel_res", res.rel_residual_final },
                   { "asympt_rate", res.asymptotic_rate },
-                  { "converged", res.converged ? 1 : 0 } } );
+                  { "converged", res.converged ? 1 : 0 },
+                  { "err_vel", res.err_vel_best },
+                  { "err_pre", res.err_pre_best },
+                  { "err_it", res.err_best_iter },
+                  { "err_vel_final", res.err_vel_final } } );
         }
     }
 
     util::logroot << "\n=== SUMMARY: A-block MG convergence ===\n";
-    summary->select_columns( { "rmu", "krylov", "scheme", "cycles", "final_rel_res", "asympt_rate", "converged" } )
-        .print_pretty();
+    if ( problem == Problem::ASSESS )
+        summary
+            ->select_columns( { "rmu", "scheme", "cycles", "final_rel_res", "asympt_rate", "err_vel", "err_pre", "err_it",
+                                "err_vel_final" } )
+            .print_pretty();
+    else
+        summary->select_columns( { "rmu", "krylov", "scheme", "cycles", "final_rel_res", "asympt_rate", "converged" } )
+            .print_pretty();
 
     // Where the wall clock went (per-rank timer tree: fgmres_*, stokes_apply, mgmp_*,
     // epsilon_divdiv_*), for the time-to-solution breakdown.
