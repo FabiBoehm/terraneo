@@ -277,7 +277,7 @@ class EpsilonDivDivKerngen
 
     // Rotation null-space penalty (active only for fs/fs)
     bool                                              penalty_active_  = false;
-    ScalarT                                           penalty_epsilon_ = 1.0;
+    double                                            penalty_epsilon_ = 1.0;
     grid::Grid4DDataVec< ScalarType, VecDim >         null_modes_[3];
     grid::Grid4DDataScalar< grid::NodeOwnershipFlag > ownership_mask_;
 
@@ -395,7 +395,7 @@ class EpsilonDivDivKerngen
         init_penalty();
     }
 
-    void set_penalty_epsilon( ScalarT eps ) { penalty_epsilon_ = eps; }
+    void set_penalty_epsilon( double eps ) { penalty_epsilon_ = eps; }
 
     /// @brief Override the team-tile shape at runtime, for tuning.
     ///

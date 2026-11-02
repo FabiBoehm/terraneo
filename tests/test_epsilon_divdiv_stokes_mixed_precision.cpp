@@ -290,6 +290,10 @@ enum class Problem { A7, ASSESS };
 static assess_solution::Params g_assess;
 static assess_solution::Coeffs g_assess_coeffs;
 static assess_solution::Visc   g_assess_visc;
+// --penalty-eps: strength of the fs/fs rotation null-space penalty on every A-block operator
+// (default 1 = the operator default; it pollutes the Chebyshev eigenvalue bound at high levels).
+static double g_penalty_eps = 1.0;
+static std::string fmt_g( double v ) { std::ostringstream o; o << v; return o.str(); }
 
 inline std::string assess_describe()
 {
@@ -535,6 +539,7 @@ class LowPrecABlock final
                 a_c_.emplace_back( domains[l], coords_g_[l], radii_g_[l],
                                    boundary_mask_data[l], eta_m_[l].grid_data(), bcs, false );
                 a_c_.back().set_hourglass_coefficient( hourglass_c );
+                a_c_.back().set_penalty_epsilon( g_penalty_eps );
                 p_.emplace_back( linalg::OperatorApplyMode::Add );
                 r_.emplace_back( domains[l] );
             }
@@ -545,6 +550,7 @@ class LowPrecABlock final
         a_fine_ = std::make_unique< ViscM >( domains[fine], coords_g_[fine], radii_g_[fine],
                                              boundary_mask_data[fine], eta_m_[fine].grid_data(), bcs, false );
         a_fine_->set_hourglass_coefficient( hourglass_c );
+        a_fine_->set_penalty_epsilon( g_penalty_eps );
 
         for ( size_t l = 0; l < num_levels; ++l )
         {
@@ -1232,7 +1238,9 @@ RunResult run_ablock_mg( int    min_level,
     // as well as on its coarse levels, otherwise the smoother and the fine residual
     // disagree about what the operator is.
     K_op.block_11().set_hourglass_coefficient( hourglass_c );
+    K_op.block_11().set_penalty_epsilon( g_penalty_eps );
     K_op_neumann.block_11().set_hourglass_coefficient( hourglass_c );
+    K_op_neumann.block_11().set_penalty_epsilon( g_penalty_eps );
 
     ViscousMass M( domains[velocity_level], coords_shell[velocity_level], coords_radii[velocity_level], false );
 
@@ -1268,6 +1276,7 @@ RunResult run_ablock_mg( int    min_level,
                 domains[level], coords_shell[level], coords_radii[level],
                 boundary_mask_data[level], eta[level].grid_data(), bcs, false );
             A_c.back().set_hourglass_coefficient( hourglass_c );
+            A_c.back().set_penalty_epsilon( g_penalty_eps );
 
             if ( gca == 1 )
             {
@@ -1863,6 +1872,7 @@ RunResult run_stokes_in_precision( int    min_level,
         ViscousD a_d( domains[level], coords_shell[level], coords_radii[level], boundary_mask_data[level],
                       eta[level].grid_data(), bcs, true );
         a_d.set_hourglass_coefficient( hourglass_c );
+        a_d.set_penalty_epsilon( g_penalty_eps );
         inverse_diagonals.emplace_back( "inv_diag_" + std::to_string( level ), domains[level], mask_data[level] );
         VectorQ1Vec< double > ones( "ones", domains[level], mask_data[level] );
         linalg::assign( ones, 1.0 );
@@ -1874,6 +1884,7 @@ RunResult run_stokes_in_precision( int    min_level,
                  coords_radii[velocity_level], boundary_mask_data[velocity_level], eta[velocity_level].grid_data(),
                  bcs, false );
     K_d.block_11().set_hourglass_coefficient( hourglass_c );
+    K_d.block_11().set_penalty_epsilon( g_penalty_eps );
 
     ViscousMassD Mv( domains[velocity_level], coords_shell[velocity_level], coords_radii[velocity_level], false );
     VectorQ1IsoQ2Q1< double > f_d( "f_d", domains[velocity_level], domains[pressure_level], mask_data[velocity_level],
@@ -1908,6 +1919,7 @@ RunResult run_stokes_in_precision( int    min_level,
     StokesM K_m( domains[velocity_level], domains[pressure_level], coords_g_v, radii_g_v,
                  boundary_mask_data[velocity_level], eta_m.grid_data(), bcs, false );
     K_m.block_11().set_hourglass_coefficient( hourglass_c );
+    K_m.block_11().set_penalty_epsilon( g_penalty_eps );
 
     LowPrecABlock< M, M, GeomM > hierarchy( domains, coords_shell, coords_radii, mask_data, boundary_mask_data, eta,
                                             inverse_diagonals, bcs, cheby_order, 3, coarse_tol, hourglass_c );
@@ -2441,6 +2453,7 @@ int main( int argc, char** argv )
                                                                        : OuterSolver::FGMRES;
         }
         else if ( a == "--hourglass" )      hourglass_c = std::atof( argv[i + 1] );
+        else if ( a == "--penalty-eps" )    g_penalty_eps = std::atof( argv[i + 1] );
         else if ( a == "--outer-tol" )      outer_tol   = std::atof( argv[i + 1] );
         else if ( a == "--outer-restart" )  outer_restart_in = std::atoi( argv[i + 1] );
         else if ( a == "--ablock-arith" )
@@ -2552,6 +2565,7 @@ int main( int argc, char** argv )
                                            + ", A-block arith = " + ablock_arith_name( ablock_arith )
                                            + ", A-block geom = " + ablock_geom_name( ablock_geom )
                                            + ", hourglass = " + std::to_string( hourglass_c )
+                                           + ", penalty eps = " + fmt_g( g_penalty_eps )
                                            + ", outer tol = " + std::to_string( outer_tol )
                                            + ", outer restart = "
                                            + std::to_string( outer_restart_in > 0 ? outer_restart_in : 50 )
