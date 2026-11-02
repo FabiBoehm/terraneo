@@ -293,6 +293,11 @@ static assess_solution::Visc   g_assess_visc;
 // --penalty-eps: strength of the fs/fs rotation null-space penalty on every A-block operator
 // (default 1 = the operator default; it pollutes the Chebyshev eigenvalue bound at high levels).
 static double g_penalty_eps = 1.0;
+// --penalty-eps-coarse: the penalty on the coarsest level, solved by FGMRES without a
+// smoother, so the Chebyshev pollution does not apply there; it keeps that system
+// non-singular, which a 16-bit coarse solve needs (an inconsistent rounded RHS on a
+// singular operator is amplified by 1/eps).
+static double g_penalty_eps_coarse = 1.0;
 // --rot-proj 0|1: for free-slip/free-slip, remove the rigid-rotation content of the RHS and
 // measure the error modulo rigid rotations (the null space of the viscous operator).
 static int g_rot_proj = 1;
@@ -542,7 +547,7 @@ class LowPrecABlock final
                 a_c_.emplace_back( domains[l], coords_g_[l], radii_g_[l],
                                    boundary_mask_data[l], eta_m_[l].grid_data(), bcs, false );
                 a_c_.back().set_hourglass_coefficient( hourglass_c );
-                a_c_.back().set_penalty_epsilon( g_penalty_eps );
+                a_c_.back().set_penalty_epsilon( l == 0 ? g_penalty_eps_coarse : g_penalty_eps );
                 p_.emplace_back( linalg::OperatorApplyMode::Add );
                 r_.emplace_back( domains[l] );
             }
@@ -1406,7 +1411,7 @@ RunResult run_ablock_mg( int    min_level,
                 domains[level], coords_shell[level], coords_radii[level],
                 boundary_mask_data[level], eta[level].grid_data(), bcs, false );
             A_c.back().set_hourglass_coefficient( hourglass_c );
-            A_c.back().set_penalty_epsilon( g_penalty_eps );
+            A_c.back().set_penalty_epsilon( level == 0 ? g_penalty_eps_coarse : g_penalty_eps );
 
             if ( gca == 1 )
             {
@@ -2596,6 +2601,7 @@ int main( int argc, char** argv )
         }
         else if ( a == "--hourglass" )      hourglass_c = std::atof( argv[i + 1] );
         else if ( a == "--penalty-eps" )    g_penalty_eps = std::atof( argv[i + 1] );
+        else if ( a == "--penalty-eps-coarse" ) g_penalty_eps_coarse = std::atof( argv[i + 1] );
         else if ( a == "--rot-proj" )       g_rot_proj = std::atoi( argv[i + 1] );
         else if ( a == "--outer-tol" )      outer_tol   = std::atof( argv[i + 1] );
         else if ( a == "--outer-restart" )  outer_restart_in = std::atoi( argv[i + 1] );
@@ -2708,7 +2714,7 @@ int main( int argc, char** argv )
                                            + ", A-block arith = " + ablock_arith_name( ablock_arith )
                                            + ", A-block geom = " + ablock_geom_name( ablock_geom )
                                            + ", hourglass = " + std::to_string( hourglass_c )
-                                           + ", penalty eps = " + fmt_g( g_penalty_eps )
+                                           + ", penalty eps = " + fmt_g( g_penalty_eps ) + " (coarsest " + fmt_g( g_penalty_eps_coarse ) + ")"
                                            + ", rot-proj = " + std::to_string( g_rot_proj )
                                            + ", outer tol = " + std::to_string( outer_tol )
                                            + ", outer restart = "
