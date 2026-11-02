@@ -1100,6 +1100,42 @@ class ErrorMonitor
     int                            stalls_    = 0;
 };
 
+// Wraps a velocity preconditioner: the rigid-rotation content of its output is removed
+// (in double) after every application. A V-cycle on the singular fs/fs A-block emits
+// rotation components that the outer FGMRES cannot see (A m ~ 0) and so accumulates;
+// in 16-bit storage a large rotation in the iterate is no longer annihilated by the
+// operator and feeds noise into the residual (bf16 A-block dead from MT32 with a weak
+// penalty), while a strong penalty pollutes the Chebyshev bound at high levels.
+template < typename ViscT, typename VecT >
+class RotationFreePrecImpl : public linalg::solvers::VelocityPrecHandle< ViscT >::Impl
+{
+  public:
+    using Base = typename linalg::solvers::VelocityPrecHandle< ViscT >::Impl;
+    RotationFreePrecImpl( std::shared_ptr< Base > inner, std::shared_ptr< RigidRotations > rot,
+                          const DistributedDomain& dom, const Grid4DDataScalar< grid::NodeOwnershipFlag >& mask )
+    : inner_( std::move( inner ) )
+    , rot_( std::move( rot ) )
+    , tmp_( "rotation_free_tmp", dom, mask )
+    {}
+    void solve_impl( ViscT& A, VecT& x, const VecT& b ) override
+    {
+        inner_->solve_impl( A, x, b );
+        if constexpr ( std::is_same_v< VecT, VectorQ1Vec< double, 3 > > )
+            rot_->project( x );
+        else
+        {
+            linalg::convert( x, tmp_ );
+            rot_->project( tmp_ );
+            linalg::convert( tmp_, x );
+        }
+    }
+
+  private:
+    std::shared_ptr< Base >           inner_;
+    std::shared_ptr< RigidRotations > rot_;
+    VectorQ1Vec< double, 3 >          tmp_;
+};
+
 // Free-slip/free-slip assess problem: the rigid rotations of the velocity level, with the
 // RHS velocity block made consistent (nullptr otherwise).
 template < typename VecT >
@@ -1603,6 +1639,9 @@ RunResult run_ablock_mg( int    min_level,
         vel_impl = std::make_shared< linalg::solvers::ForwardingPrecImpl< Viscous, MG > >( mg );
         break;
     }
+    if ( rot )
+        vel_impl = std::make_shared< RotationFreePrecImpl< Viscous, VectorQ1Vec< double, 3 > > >(
+            vel_impl, rot, domains[velocity_level], mask_data[velocity_level] );
     VelPrecHandle vel_prec( vel_impl );
     PrecStokes prec_stokes( K_op.block_11(), pmass, K_op.block_12(), tri_tmp, vel_prec, prec_schur );
 
@@ -2044,8 +2083,13 @@ RunResult run_stokes_in_precision( int    min_level,
 
     using VelPrecM = linalg::solvers::VelocityPrecHandle< ViscousM >;
     VecM b_scaled( "b_scaled_m", domains[velocity_level], mask_data[velocity_level] );
-    VelPrecM vel_prec( std::make_shared< VCyclePrecImpl< ViscousM, typename LowPrecABlock< M, M, GeomM >::MGM, VecM > >(
-        hierarchy.mg(), b_scaled ) );
+    std::shared_ptr< typename VelPrecM::Impl > vel_impl =
+        std::make_shared< VCyclePrecImpl< ViscousM, typename LowPrecABlock< M, M, GeomM >::MGM, VecM > >(
+            hierarchy.mg(), b_scaled );
+    if ( rot )
+        vel_impl = std::make_shared< RotationFreePrecImpl< ViscousM, VecM > >( vel_impl, rot, domains[velocity_level],
+                                                                              mask_data[velocity_level] );
+    VelPrecM vel_prec( vel_impl );
 
     using PrecStokesM = linalg::solvers::BlockTriangularPreconditioner2x2< StokesM, ViscousM, PressureMassM,
                                                                            GradientM, VelPrecM, PrecSchurM >;
