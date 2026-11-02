@@ -293,6 +293,9 @@ static assess_solution::Visc   g_assess_visc;
 // --penalty-eps: strength of the fs/fs rotation null-space penalty on every A-block operator
 // (default 1 = the operator default; it pollutes the Chebyshev eigenvalue bound at high levels).
 static double g_penalty_eps = 1.0;
+// --rot-proj 0|1: for free-slip/free-slip, remove the rigid-rotation content of the RHS and
+// measure the error modulo rigid rotations (the null space of the viscous operator).
+static int g_rot_proj = 1;
 static std::string fmt_g( double v ) { std::ostringstream o; o << v; return o.str(); }
 
 inline std::string assess_describe()
@@ -904,13 +907,80 @@ void widen( const VectorQ1IsoQ2Q1< S >& src, VectorQ1IsoQ2Q1< double >& dst )
 // and iterating further only polishes digits the discretization does not have --
 // solve to discretization error, not further. An error climbing back above twice its
 // best value (a reduced precision drifting off its floor) ends it too, as does NaN.
+// The three rigid rotations e_k x X on the velocity nodes, orthonormal in the owned-node
+// Euclidean inner product: the null space of the free-slip/free-slip viscous operator
+// (tangential on every shell, zero strain). The discrete RHS carries an O(h^2) component
+// along them (quadrature of the forcing), which the rotation penalty eps turns into a rigid
+// rotation of size (m.f)/eps in the solution -- invisible to the residual, dominant for a
+// weak penalty. So the RHS is made consistent (f -= sum_k (r_k.f) r_k) and the error is
+// reported modulo rigid rotations (the solution is only defined up to them).
+// Fills v with the rigid rotation e_k x X (a free function: nvcc rejects a device lambda
+// inside a constructor).
+inline void fill_rigid_rotation( int k, VectorQ1Vec< double, 3 >& v, const DistributedDomain& dom,
+                                 const Grid3DDataVec< double, 3 >& coords, const Grid2DDataScalar< double >& radii )
+{
+    auto d = v.grid_data();
+    Kokkos::parallel_for(
+        "rigid_rotation_fill", local_domain_md_range_policy_nodes( dom ),
+        KOKKOS_LAMBDA( const int sd, const int x, const int y, const int r ) {
+            const auto   p  = grid::shell::coords( sd, x, y, r, coords, radii );
+            const double px = p( 0 ), py = p( 1 ), pz = p( 2 );
+            d( sd, x, y, r, 0 ) = ( k == 0 ) ? 0.0 : ( k == 1 ) ? pz : -py;
+            d( sd, x, y, r, 1 ) = ( k == 0 ) ? -pz : ( k == 1 ) ? 0.0 : px;
+            d( sd, x, y, r, 2 ) = ( k == 0 ) ? py : ( k == 1 ) ? -px : 0.0;
+        } );
+    Kokkos::fence();
+}
+
+class RigidRotations
+{
+  public:
+    using Vec = VectorQ1Vec< double, 3 >;
+
+    RigidRotations( const DistributedDomain& dom, const Grid4DDataScalar< grid::NodeOwnershipFlag >& mask,
+                    const Grid3DDataVec< double, 3 >& coords, const Grid2DDataScalar< double >& radii )
+    {
+        for ( int k = 0; k < 3; ++k )
+        {
+            modes_.emplace_back( "rigid_rotation_" + std::to_string( k ), dom, mask );
+            fill_rigid_rotation( k, modes_.back(), dom, coords, radii );
+            // Gram-Schmidt against the previous modes, then normalize.
+            for ( int j = 0; j < k; ++j )
+            {
+                const double c = static_cast< double >( linalg::dot( modes_[j], modes_[k] ) );
+                linalg::lincomb( modes_[k], { 1.0, -c }, { modes_[k], modes_[j] } );
+            }
+            const double n = std::sqrt( static_cast< double >( linalg::dot( modes_[k], modes_[k] ) ) );
+            linalg::lincomb( modes_[k], { 1.0 / n }, { modes_[k] } );
+        }
+    }
+
+    /// v -= sum_k (r_k . v) r_k; returns the Euclidean norm of the removed part.
+    double project( Vec& v ) const
+    {
+        double a[3], sq = 0.0;
+        for ( int k = 0; k < 3; ++k )
+        {
+            a[k] = static_cast< double >( linalg::dot( modes_[k], v ) );
+            sq += a[k] * a[k];
+        }
+        for ( int k = 0; k < 3; ++k ) // lincomb takes at most three vectors
+            linalg::lincomb( v, { 1.0, -a[k] }, { v, modes_[k] } );
+        return std::sqrt( sq );
+    }
+
+  private:
+    std::vector< Vec > modes_;
+};
+
 class ErrorMonitor
 {
   public:
     ErrorMonitor( const VectorQ1IsoQ2Q1< double >& exact, const VectorQ1IsoQ2Q1< double >& tmp,
                   const VectorQ1IsoQ2Q1< double >& err, long ndof_v, long ndof_p, double stall_frac,
-                  std::shared_ptr< util::Table > table )
+                  std::shared_ptr< util::Table > table, std::shared_ptr< RigidRotations > rot = nullptr )
     : exact_( exact )
+    , rot_( std::move( rot ) )
     , tmp_( tmp )
     , err_( err )
     , ndof_v_( static_cast< double >( ndof_v ) )
@@ -931,6 +1001,8 @@ class ErrorMonitor
         widen( x, tmp_ );
         remove_mean_pressure( tmp_ );
         linalg::lincomb( err_, { 1.0, -1.0 }, { tmp_, exact_ } );
+        // Free-slip/free-slip: the error modulo rigid rotations; the removed part is reported too.
+        const double ev_rot = rot_ ? rot_->project( err_.block_1() ) / std::sqrt( ndof_v_ ) / norm_v_ : 0.0;
         const double ev =
             std::sqrt( static_cast< double >( linalg::dot( err_.block_1(), err_.block_1() ) ) / ndof_v_ ) / norm_v_;
         const double ep =
@@ -943,7 +1015,8 @@ class ErrorMonitor
                            { "relative_residual", rel_residual },
                            { "err_vel", ev },
                            { "err_pre", ep },
-                           { "err_vel_inf", ev_inf } } );
+                           { "err_vel_inf", ev_inf },
+                           { "err_vel_rot", ev_rot } } );
         final_vel_ = ev;
         final_pre_ = ep;
         final_it_  = iteration;
@@ -995,7 +1068,7 @@ class ErrorMonitor
     void print( const std::string& label ) const
     {
         table_->query_rows_equals( "tag", "error" )
-            .select_columns( { "iteration", "elapsed_s", "relative_residual", "err_vel", "err_pre", "err_vel_inf" } )
+            .select_columns( { "iteration", "elapsed_s", "relative_residual", "err_vel", "err_pre", "err_vel_inf", "err_vel_rot" } )
             .print_pretty();
         util::logroot << "[assess] " << label << ": best relative velocity error " << best_vel_ << " (pressure "
                       << best_pre_ << ") at iteration " << best_it_ << "; final " << final_vel_ << " (pressure "
@@ -1012,6 +1085,7 @@ class ErrorMonitor
     }
 
     VectorQ1IsoQ2Q1< double >      exact_;
+    std::shared_ptr< RigidRotations > rot_;
     VectorQ1IsoQ2Q1< double >      tmp_;
     VectorQ1IsoQ2Q1< double >      err_;
     double                         ndof_v_, ndof_p_, norm_v_ = 1.0, norm_p_ = 1.0;
@@ -1026,6 +1100,25 @@ class ErrorMonitor
     int                            stalls_    = 0;
 };
 
+// Free-slip/free-slip assess problem: the rigid rotations of the velocity level, with the
+// RHS velocity block made consistent (nullptr otherwise).
+template < typename VecT >
+std::shared_ptr< RigidRotations > make_rigid_rotations( Problem problem, const BCKind& bc, VecT& f_vel,
+                                                        const DistributedDomain& dom,
+                                                        const Grid4DDataScalar< grid::NodeOwnershipFlag >& mask,
+                                                        const Grid3DDataVec< double, 3 >& coords,
+                                                        const Grid2DDataScalar< double >& radii )
+{
+    if ( problem != Problem::ASSESS || !g_rot_proj || bc.cmb != FREESLIP || bc.surface != FREESLIP )
+        return nullptr;
+    auto         rot     = std::make_shared< RigidRotations >( dom, mask, coords, radii );
+    const double fn      = std::sqrt( static_cast< double >( linalg::dot( f_vel, f_vel ) ) );
+    const double removed = rot->project( f_vel );
+    util::logroot << "[assess] rigid-rotation content removed from the RHS: " << removed / fn
+                  << " of |f| (the error is measured modulo rigid rotations)" << std::endl;
+    return rot;
+}
+
 // Builds the monitor for the assess problem (nullptr for a7): exact solution, DoF counts.
 inline std::unique_ptr< ErrorMonitor > make_error_monitor( Problem problem, const BCKind& bc, double stall_frac,
                                                            const DistributedDomain& dom_v,
@@ -1035,7 +1128,8 @@ inline std::unique_ptr< ErrorMonitor > make_error_monitor( Problem problem, cons
                                                            const Grid3DDataVec< double, 3 >& coords_p,
                                                            const Grid2DDataScalar< double >& radii_p,
                                                            const Grid4DDataScalar< grid::NodeOwnershipFlag >& mask_v,
-                                                           const Grid4DDataScalar< grid::NodeOwnershipFlag >& mask_p )
+                                                           const Grid4DDataScalar< grid::NodeOwnershipFlag >& mask_p,
+                                                           std::shared_ptr< RigidRotations > rot = nullptr )
 {
     if ( problem != Problem::ASSESS )
         return nullptr;
@@ -1048,7 +1142,7 @@ inline std::unique_ptr< ErrorMonitor > make_error_monitor( Problem problem, cons
     VectorQ1IsoQ2Q1< double > tmp( "assess_tmp", dom_v, dom_p, mask_v, mask_p );
     VectorQ1IsoQ2Q1< double > err( "assess_err", dom_v, dom_p, mask_v, mask_p );
     return std::make_unique< ErrorMonitor >( exact, tmp, err, ndof_v, ndof_p, stall_frac,
-                                             std::make_shared< util::Table >() );
+                                             std::make_shared< util::Table >(), std::move( rot ) );
 }
 
 // Delta family: the load on the shell r' as a lumped nodal surface load, RHS_i += s(x_i) r_hat A_i
@@ -1392,13 +1486,15 @@ RunResult run_ablock_mg( int    min_level,
     add_assess_surface_load( problem, M, f_full.block_1(), domains[velocity_level], mask_data[velocity_level],
                              coords_shell[velocity_level], coords_radii[velocity_level], max_level );
     enforce_rhs_bcs( bc, f_full, coords_shell[velocity_level], boundary_mask_data[velocity_level] );
+    auto rot = make_rigid_rotations( problem, bc, f_full.block_1(), domains[velocity_level], mask_data[velocity_level],
+                                     coords_shell[velocity_level], coords_radii[velocity_level] );
 
     // --problem assess: the error against the analytic solution, recorded per restart
     // cycle / IR step; it ends the solve at discretization accuracy.
     auto monitor = make_error_monitor( problem, bc, stall_frac, domains[velocity_level], domains[pressure_level],
                                        coords_shell[velocity_level], coords_radii[velocity_level],
                                        coords_shell[pressure_level], coords_radii[pressure_level],
-                                       mask_data[velocity_level], mask_data[pressure_level] );
+                                       mask_data[velocity_level], mask_data[pressure_level], rot );
     const auto t_solve0 = std::chrono::steady_clock::now();
     auto       solve_elapsed = [&]() {
         return std::chrono::duration< double >( std::chrono::steady_clock::now() - t_solve0 ).count();
@@ -1897,11 +1993,13 @@ RunResult run_stokes_in_precision( int    min_level,
     add_assess_surface_load( problem, Mv, f_d.block_1(), domains[velocity_level], mask_data[velocity_level],
                              coords_shell[velocity_level], coords_radii[velocity_level], max_level );
     enforce_rhs_bcs( bc, f_d, coords_shell[velocity_level], boundary_mask_data[velocity_level] );
+    auto rot = make_rigid_rotations( problem, bc, f_d.block_1(), domains[velocity_level], mask_data[velocity_level],
+                                     coords_shell[velocity_level], coords_radii[velocity_level] );
 
     auto monitor = make_error_monitor( problem, bc, stall_frac, domains[velocity_level], domains[pressure_level],
                                        coords_shell[velocity_level], coords_radii[velocity_level],
                                        coords_shell[pressure_level], coords_radii[pressure_level],
-                                       mask_data[velocity_level], mask_data[pressure_level] );
+                                       mask_data[velocity_level], mask_data[pressure_level], rot );
     const auto t_solve0 = std::chrono::steady_clock::now();
     auto       solve_elapsed = [&]() {
         return std::chrono::duration< double >( std::chrono::steady_clock::now() - t_solve0 ).count();
@@ -2454,6 +2552,7 @@ int main( int argc, char** argv )
         }
         else if ( a == "--hourglass" )      hourglass_c = std::atof( argv[i + 1] );
         else if ( a == "--penalty-eps" )    g_penalty_eps = std::atof( argv[i + 1] );
+        else if ( a == "--rot-proj" )       g_rot_proj = std::atoi( argv[i + 1] );
         else if ( a == "--outer-tol" )      outer_tol   = std::atof( argv[i + 1] );
         else if ( a == "--outer-restart" )  outer_restart_in = std::atoi( argv[i + 1] );
         else if ( a == "--ablock-arith" )
@@ -2566,6 +2665,7 @@ int main( int argc, char** argv )
                                            + ", A-block geom = " + ablock_geom_name( ablock_geom )
                                            + ", hourglass = " + std::to_string( hourglass_c )
                                            + ", penalty eps = " + fmt_g( g_penalty_eps )
+                                           + ", rot-proj = " + std::to_string( g_rot_proj )
                                            + ", outer tol = " + std::to_string( outer_tol )
                                            + ", outer restart = "
                                            + std::to_string( outer_restart_in > 0 ? outer_restart_in : 50 )
