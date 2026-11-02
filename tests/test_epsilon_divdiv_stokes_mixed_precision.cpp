@@ -40,6 +40,7 @@
 // (Ra=7e3, free-slip both shells, Y_3^2 perturbation), same as the contrast
 // test -- only the contrast rmu is swept here instead of fixed at 1e5.
 
+#include "assess_stokes_solution.hpp"
 #include <cstring>
 
 #include "../src/terra/communication/shell/communication.hpp"
@@ -89,6 +90,7 @@
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -201,11 +203,18 @@ struct FrankKamenetskiiViscosityInterpolator
     grid::Grid4DDataScalar< double > data_;
     double                           rmu_;
     double                           perturb_amp_;
+    assess_solution::Visc            assess_       = {}; // --problem assess: the same law without the clamp,
+    bool                             manufactured_ = false; // shared with the manufactured body force
 
     KOKKOS_INLINE_FUNCTION
     void operator()( const int sd, const int x, const int y, const int r ) const
     {
         const dense::Vec< double, 3 > c = grid::shell::coords( sd, x, y, r, grid_, radii_ );
+        if ( manufactured_ )
+        {
+            data_( sd, x, y, r ) = assess_solution::viscosity( assess_, c( 0 ), c( 1 ), c( 2 ) );
+            return;
+        }
         const double T = a7_initial_temperature( c( 0 ), c( 1 ), c( 2 ), perturb_amp_ );
         data_( sd, x, y, r ) = Kokkos::pow( rmu_, 0.5 - T );
     }
@@ -275,119 +284,44 @@ struct RadialBuoyancyRHSInterpolator
 // =============================================================================
 enum class Problem { A7, ASSESS };
 
-namespace assess_solution
-{
-// Poloidal potential P = Pl(r) Y_22 with Pl(r) = A r^2 + B r^-3 + C r^4 + D r^-1 + E r^5,
-// pressure p = (G r^2 + H r^-3 + K r^3) Y_22. The coefficients are the package's
-// output for (l, m, k) = (2, 2, 2), Rp = 2.22, Rm = 1.22, nu = 1, g = 1.
-struct Coeffs
-{
-    double A, B, C, D, E, G, H, K;
-};
-// SphericalStokesSolutionSmoothZeroSlip: no-slip on both shells.
-constexpr Coeffs kZeroSlip = { 1.21730989234782628616e-02, 1.77096899185784292796e-02, -5.20909146306425870770e-03,
-                               -2.45704394205095918990e-02, 1.40906672438203942922e-03, 2.18781841448698860519e-01,
-                               2.94845273046115075033e-01, -1.35270405540675792144e-01 };
-// SphericalStokesSolutionSmoothFreeSlip: free-slip on both shells. The solution is
-// poloidal, so it carries no rigid rotation and the operator's rotation penalty
-// leaves it unchanged.
-constexpr Coeffs kFreeSlip = { 1.43802541280018732900e-02, 1.03597000853293194633e-02, -5.66961372969629427004e-03,
-                               -2.23954586666666663475e-02, 1.40906672438203942922e-03, 2.38123776647244350668e-01,
-                               2.68745503999999968414e-01, -1.35270405540675792144e-01 };
-constexpr int    l_deg   = 2;
-constexpr double gravity = 1.0;
+// --assess-forcing smooth|delta, --assess-l/m/k, --assess-rp: the analytic problem; the coefficients
+// are computed once in main() (the boundary-condition set is taken from --bc), and --rmu > 1 with
+// --perturb-amp turns it into the manufactured variable-viscosity problem (see the header).
+static assess_solution::Params g_assess;
+static assess_solution::Coeffs g_assess_coeffs;
+static assess_solution::Visc   g_assess_visc;
 
-// Y_22(theta, phi) = sqrt(15/(32 pi)) sin^2(theta) cos(2 phi) and its derivatives.
-KOKKOS_INLINE_FUNCTION double Y22( const double theta, const double phi )
+inline std::string assess_describe()
 {
-    constexpr double c  = 0.38627420202318958;
-    const double     st = Kokkos::sin( theta );
-    return c * st * st * Kokkos::cos( 2.0 * phi );
+    std::ostringstream o;
+    const bool smooth = ( g_assess.forcing == assess_solution::Forcing::SMOOTH );
+    o << ( g_assess.freeslip ? "free-slip" : "no-slip" ) << " analytic solution, " << ( smooth ? "smooth" : "delta" )
+      << " forcing, l = " << g_assess.l << ", m = " << g_assess.m;
+    if ( smooth )
+        o << ", k = " << g_assess.k;
+    else
+        o << ", r' = " << g_assess.rp;
+    if ( g_assess_visc.rmu != 1.0 )
+        o << ", manufactured viscosity rmu = " << g_assess_visc.rmu << " (lateral amp " << g_assess_visc.amp << ")";
+    else
+        o << ", viscosity 1";
+    return o.str();
 }
-KOKKOS_INLINE_FUNCTION double dY22_dtheta( const double theta, const double phi )
-{
-    constexpr double c = 0.38627420202318958;
-    return c * 2.0 * Kokkos::sin( theta ) * Kokkos::cos( theta ) * Kokkos::cos( 2.0 * phi );
-}
-KOKKOS_INLINE_FUNCTION double dY22_dphi( const double theta, const double phi )
-{
-    constexpr double c  = 0.38627420202318958;
-    const double     st = Kokkos::sin( theta );
-    return c * st * st * ( -2.0 * Kokkos::sin( 2.0 * phi ) );
-}
-KOKKOS_INLINE_FUNCTION double Pl( const Coeffs& c, const double r )
-{
-    const double r2 = r * r, r4 = r2 * r2, inv_r = 1.0 / r;
-    return c.A * r2 + c.B * inv_r * inv_r * inv_r + c.C * r4 + c.D * inv_r + c.E * r4 * r;
-}
-KOKKOS_INLINE_FUNCTION double dPldr( const Coeffs& c, const double r )
-{
-    const double r2 = r * r, r3 = r2 * r, inv_r2 = 1.0 / r2;
-    return 2.0 * c.A * r - 3.0 * c.B * inv_r2 * inv_r2 + 4.0 * c.C * r3 - c.D * inv_r2 + 5.0 * c.E * r2 * r2;
-}
-KOKKOS_INLINE_FUNCTION void to_spherical( const double cx, const double cy, const double cz, double& r, double& theta,
-                                          double& phi )
-{
-    r     = Kokkos::sqrt( cx * cx + cy * cy + cz * cz );
-    theta = Kokkos::acos( cz / r );
-    phi   = Kokkos::atan2( cy, cx );
-}
-// u_r = -l(l+1) Pl Y / r,  u_theta = -(Pl/r + Pl') dY/dtheta,  u_phi = -(Pl/r + Pl') / sin(theta) dY/dphi.
-KOKKOS_INLINE_FUNCTION void velocity_cartesian( const Coeffs& c, const double cx, const double cy, const double cz,
-                                                double& ux, double& uy, double& uz )
-{
-    double r, theta, phi;
-    to_spherical( cx, cy, cz, r, theta, phi );
-    const double st = Kokkos::sin( theta ), ct = Kokkos::cos( theta );
-    const double P = Pl( c, r ), dP = dPldr( c, r );
-    const double u_r     = -static_cast< double >( l_deg * ( l_deg + 1 ) ) * P * Y22( theta, phi ) / r;
-    const double radial  = P / r + dP;
-    const double u_theta = -radial * dY22_dtheta( theta, phi );
-    const double req     = Kokkos::sqrt( cx * cx + cy * cy );
-    if ( req < 1.0e-14 * r )
-    {
-        ux = uy = uz = 0.0; // Y_22 and its derivatives vanish at the poles
-        return;
-    }
-    const double u_phi   = -radial / st * dY22_dphi( theta, phi );
-    const double inv_req = 1.0 / req;
-    ux = cx / r * u_r + cx * inv_req * ct * u_theta - cy * inv_req * u_phi;
-    uy = cy / r * u_r + cy * inv_req * ct * u_theta + cx * inv_req * u_phi;
-    uz = cz / r * u_r - st * u_theta;
-}
-KOKKOS_INLINE_FUNCTION double pressure_cartesian( const Coeffs& c, const double cx, const double cy, const double cz )
-{
-    double r, theta, phi;
-    to_spherical( cx, cy, cz, r, theta, phi );
-    const double r2 = r * r, r3 = r2 * r;
-    return ( c.G * r2 + c.H / r3 + c.K * r3 ) * Y22( theta, phi );
-}
-// Body force f = -g (r/Rp)^2 Y_22 r_hat (the same for both boundary condition sets).
-KOKKOS_INLINE_FUNCTION void body_force_cartesian( const double cx, const double cy, const double cz, double& fx,
-                                                  double& fy, double& fz )
-{
-    double r, theta, phi;
-    to_spherical( cx, cy, cz, r, theta, phi );
-    const double rho      = ( r / kRp ) * ( r / kRp ) * Y22( theta, phi );
-    const double f_radial = -gravity * rho / r;
-    fx = f_radial * cx;
-    fy = f_radial * cy;
-    fz = f_radial * cz;
-}
-} // namespace assess_solution
 
 struct AssessBodyForceInterpolator
 {
     Grid3DDataVec< double, 3 >       grid_;
     Grid2DDataScalar< double >       radii_;
     grid::Grid4DDataVec< double, 3 > data_;
+    assess_solution::Coeffs          c_;
+    assess_solution::Visc            v_;
 
     KOKKOS_INLINE_FUNCTION
     void operator()( const int sd, const int x, const int y, const int r ) const
     {
         const dense::Vec< double, 3 > c = grid::shell::coords( sd, x, y, r, grid_, radii_ );
         double                        fx, fy, fz;
-        assess_solution::body_force_cartesian( c( 0 ), c( 1 ), c( 2 ), fx, fy, fz );
+        assess_solution::manufactured_body_force( c_, v_, c( 0 ), c( 1 ), c( 2 ), fx, fy, fz );
         data_( sd, x, y, r, 0 ) = fx;
         data_( sd, x, y, r, 1 ) = fy;
         data_( sd, x, y, r, 2 ) = fz;
@@ -424,7 +358,7 @@ struct AssessPressureInterpolator
     void operator()( const int sd, const int x, const int y, const int r ) const
     {
         const dense::Vec< double, 3 > c = grid::shell::coords( sd, x, y, r, grid_, radii_ );
-        data_( sd, x, y, r )            = assess_solution::pressure_cartesian( c_, c( 0 ), c( 1 ), c( 2 ) );
+        data_( sd, x, y, r )            = assess_solution::nodal_pressure( c_, c( 0 ), c( 1 ), c( 2 ) );
     }
 };
 
@@ -907,9 +841,9 @@ inline BCKind parse_bc( const std::string& s )
 // per diamond (at most 10 ranks).
 static int g_subdomain_level = 0;
 
-inline const assess_solution::Coeffs& assess_coeffs( const BCKind& bc )
+inline const assess_solution::Coeffs& assess_coeffs( const BCKind& )
 {
-    return ( bc.cmb == FREESLIP && bc.surface == FREESLIP ) ? assess_solution::kFreeSlip : assess_solution::kZeroSlip;
+    return g_assess_coeffs;
 }
 
 inline bool assess_supports( const BCKind& bc )
@@ -924,7 +858,7 @@ inline void fill_body_force( Problem problem, const DistributedDomain& dom, cons
 {
     if ( problem == Problem::ASSESS )
         Kokkos::parallel_for( "assess_body_force", local_domain_md_range_policy_nodes( dom ),
-                              AssessBodyForceInterpolator{ coords, radii, data } );
+                              AssessBodyForceInterpolator{ coords, radii, data, g_assess_coeffs, g_assess_visc } );
     else
         Kokkos::parallel_for( "radial_buoyancy_rhs", local_domain_md_range_policy_nodes( dom ),
                               RadialBuoyancyRHSInterpolator{ coords, radii, data, kRayleigh, perturb_amp } );
@@ -1030,7 +964,10 @@ class ErrorMonitor
                               << "): discretization error reached at iteration " << iteration << std::endl;
                 stop = true;
             }
-            if ( ev > 2.0 * best_vel_ )
+            // A reduced precision that has lost the solution shows as an error climbing well above
+            // its best; the first restart cycles of a variable-viscosity solve may overshoot too,
+            // so the rule only applies once the solver has had a few cycles.
+            if ( ev > 2.0 * best_vel_ && iteration >= 15 )
             {
                 util::logroot << "[assess] velocity error " << ev << " is above twice its best " << best_vel_
                               << " (iteration " << best_it_ << "); stopping at iteration " << iteration << std::endl;
@@ -1100,13 +1037,55 @@ inline std::unique_ptr< ErrorMonitor > make_error_monitor( Problem problem, cons
     interpolate_exact_solution( bc, dom_v, dom_p, coords_v, radii_v, coords_p, radii_p, exact );
     const long ndof_v = 3 * kernels::common::count_masked< long >( mask_v, grid::NodeOwnershipFlag::OWNED );
     const long ndof_p = kernels::common::count_masked< long >( mask_p, grid::NodeOwnershipFlag::OWNED );
-    util::logroot << "[assess] " << ( assess_coeffs( bc ).A == assess_solution::kFreeSlip.A ? "free-slip" : "no-slip" )
-                  << " analytic solution (l = 2, m = 2, k = 2) on " << mpi::num_processes() << " rank(s), subdomain level "
+    util::logroot << "[assess] " << assess_describe() << " on " << mpi::num_processes() << " rank(s), subdomain level "
                   << g_subdomain_level << "; velocity DoFs " << ndof_v << ", pressure DoFs " << ndof_p << std::endl;
     VectorQ1IsoQ2Q1< double > tmp( "assess_tmp", dom_v, dom_p, mask_v, mask_p );
     VectorQ1IsoQ2Q1< double > err( "assess_err", dom_v, dom_p, mask_v, mask_p );
     return std::make_unique< ErrorMonitor >( exact, tmp, err, ndof_v, ndof_p, stall_frac,
                                              std::make_shared< util::Table >() );
+}
+
+// Delta family: the load on the shell r' as a lumped nodal surface load, RHS_i += s(x_i) r_hat A_i
+// with A_i = (M 1)_i / (h (1 + h^2 / (6 r'^2))) the node's share of the shell area (the Q1 hat
+// integrates to A_i h (1 + h^2/(6 r'^2)) over the radial layer of width 2h; the radii are uniform).
+// r' must be a mesh shell of the level, which the uniform radii guarantee for r' = (Rm + Rp)/2.
+template < typename MassT, typename VecT, typename MaskT, typename CoordsT, typename RadiiT >
+void add_assess_surface_load( Problem problem, MassT& M, VecT& f, const DistributedDomain& dom, const MaskT& mask,
+                              const CoordsT& coords, const RadiiT& radii, int level )
+{
+    if ( problem != Problem::ASSESS || g_assess.forcing != assess_solution::Forcing::DELTA )
+        return;
+    VecT ones( "assess_ones", dom, mask ), lumped( "assess_lumped", dom, mask );
+    linalg::assign( ones, 1.0 );
+    linalg::apply( M, ones, lumped );
+    const double h    = ( kRp - kRm ) / static_cast< double >( 1 << level );
+    const double norm = h * ( 1.0 + h * h / ( 6.0 * g_assess.rp * g_assess.rp ) );
+    auto         fd   = f.grid_data();
+    auto         ld   = lumped.grid_data();
+    const auto   c    = g_assess_coeffs;
+    const auto   v    = g_assess_visc;
+    using VT          = std::remove_cv_t< std::remove_reference_t< decltype( fd( 0, 0, 0, 0, 0 ) ) > >;
+    long on_shell     = 0;
+    Kokkos::parallel_reduce(
+        "assess_surface_load", local_domain_md_range_policy_nodes( dom ),
+        KOKKOS_LAMBDA( const int sd, const int x, const int y, const int r, long& acc ) {
+            const auto   p   = grid::shell::coords( sd, x, y, r, coords, radii );
+            const double px = p( 0 ), py = p( 1 ), pz = p( 2 );
+            const double rad = Kokkos::sqrt( px * px + py * py + pz * pz );
+            if ( !assess_solution::on_interface( c, rad ) )
+                return;
+            const double s = assess_solution::surface_load( c, v, px, py, pz ) * static_cast< double >( ld( sd, x, y, r, 0 ) ) / norm;
+            fd( sd, x, y, r, 0 ) += static_cast< VT >( s * px / rad );
+            fd( sd, x, y, r, 1 ) += static_cast< VT >( s * py / rad );
+            fd( sd, x, y, r, 2 ) += static_cast< VT >( s * pz / rad );
+            acc += ( mask( sd, x, y, r ) == grid::NodeOwnershipFlag::OWNED ) ? 1 : 0;
+        },
+        on_shell );
+    Kokkos::fence();
+    util::logroot << "[assess] delta surface load on r' = " << g_assess.rp << ": " << on_shell
+                  << " owned velocity nodes on the shell (rank 0), h = " << h << std::endl;
+    if ( on_shell == 0 && mpi::rank() == 0 )
+        throw std::runtime_error( "assess delta forcing: no mesh shell at r' on this level" );
 }
 
 struct RunResult
@@ -1229,7 +1208,7 @@ RunResult run_ablock_mg( int    min_level,
                 "fk_viscosity_level_" + std::to_string( level ),
                 local_domain_md_range_policy_nodes( domains[level] ),
                 FrankKamenetskiiViscosityInterpolator{
-                    coords_shell[level], coords_radii[level], eta[level].grid_data(), rmu, perturb_amp } );
+                    coords_shell[level], coords_radii[level], eta[level].grid_data(), rmu, perturb_amp, g_assess_visc, problem == Problem::ASSESS } );
         }
         Kokkos::fence();
     }
@@ -1401,6 +1380,8 @@ RunResult run_ablock_mg( int    min_level,
                      tmp_full.block_1().grid_data(), perturb_amp );
 
     linalg::apply( M, tmp_full.block_1(), f_full.block_1() );
+    add_assess_surface_load( problem, M, f_full.block_1(), domains[velocity_level], mask_data[velocity_level],
+                             coords_shell[velocity_level], coords_radii[velocity_level], max_level );
     enforce_rhs_bcs( bc, f_full, coords_shell[velocity_level], boundary_mask_data[velocity_level] );
 
     // --problem assess: the error against the analytic solution, recorded per restart
@@ -1872,7 +1853,7 @@ RunResult run_stokes_in_precision( int    min_level,
         else
             Kokkos::parallel_for( "fk_viscosity", local_domain_md_range_policy_nodes( domains[level] ),
                                   FrankKamenetskiiViscosityInterpolator{ coords_shell[level], coords_radii[level],
-                                                                         eta[level].grid_data(), rmu, perturb_amp } );
+                                                                         eta[level].grid_data(), rmu, perturb_amp, g_assess_visc, problem == Problem::ASSESS } );
         Kokkos::fence();
     }
 
@@ -1902,6 +1883,8 @@ RunResult run_stokes_in_precision( int    min_level,
     fill_body_force( problem, domains[velocity_level], coords_shell[velocity_level], coords_radii[velocity_level],
                      tmp_d.block_1().grid_data(), perturb_amp );
     linalg::apply( Mv, tmp_d.block_1(), f_d.block_1() );
+    add_assess_surface_load( problem, Mv, f_d.block_1(), domains[velocity_level], mask_data[velocity_level],
+                             coords_shell[velocity_level], coords_radii[velocity_level], max_level );
     enforce_rhs_bcs( bc, f_d, coords_shell[velocity_level], boundary_mask_data[velocity_level] );
 
     auto monitor = make_error_monitor( problem, bc, stall_frac, domains[velocity_level], domains[pressure_level],
@@ -2425,6 +2408,13 @@ int main( int argc, char** argv )
         else if ( a == "--rmu" )            single_rmu  = std::atof( argv[i + 1] );
         else if ( a == "--bc" )
             bc = parse_bc( argv[i + 1] );
+        else if ( a == "--assess-forcing" )
+            g_assess.forcing = ( std::string( argv[i + 1] ) == "delta" ) ? assess_solution::Forcing::DELTA
+                                                                         : assess_solution::Forcing::SMOOTH;
+        else if ( a == "--assess-l" )       g_assess.l  = std::atoi( argv[i + 1] );
+        else if ( a == "--assess-m" )       g_assess.m  = std::atoi( argv[i + 1] );
+        else if ( a == "--assess-k" )       g_assess.k  = std::atoi( argv[i + 1] );
+        else if ( a == "--assess-rp" )      g_assess.rp = std::atof( argv[i + 1] );
         else if ( a == "--gca-interp" )
             single_interp = ( std::string( argv[i + 1] ) == "linear" ) ? InterpolationMode::Linear
                                                                        : InterpolationMode::Constant;
@@ -2513,14 +2503,21 @@ int main( int argc, char** argv )
     {
         // The analytic solution has constant viscosity and exists for no-slip/no-slip
         // and free-slip/free-slip; it needs the full saddle-point solve.
-        if ( !assess_supports( bc ) || !full_stokes || ablock_outer || visc_profile != 0 )
+        if ( !assess_supports( bc ) || !full_stokes || ablock_outer || visc_profile != 0 ||
+             !assess_solution::valid( g_assess ) )
         {
-            util::logroot << "--problem assess needs --solve stokes, --bc dirichlet or --bc freeslip and the "
-                             "Frank-Kamenetskii viscosity (constant at rmu 1).\n";
+            util::logroot << "--problem assess needs --solve stokes, --bc dirichlet or --bc freeslip, the "
+                             "Frank-Kamenetskii viscosity law (rmu 1 = the analytic constant-viscosity problem, "
+                             "rmu > 1 = manufactured forcing) and valid --assess-l/m/k/rp.\n";
             return 1;
         }
-        rmus = { 1.0 };
-        util::logroot << "problem = assess (analytic l=2 m=2 k=2 solution, " << bc_name
+        rmus              = { single_rmu > 0.0 ? single_rmu : 1.0 };
+        g_assess.freeslip = ( bc.cmb == FREESLIP );
+        g_assess.Rp       = kRp;
+        g_assess.Rm       = kRm;
+        g_assess_coeffs   = assess_solution::make_coeffs( g_assess );
+        g_assess_visc     = { rmus[0], perturb_amp, kRp, kRm };
+        util::logroot << "problem = assess (" << assess_describe() << ", " << bc_name
                       << "), stop rule: velocity error gain below " << stall_frac
                       << " per cycle twice in a row; subdomain level " << g_subdomain_level << " on "
                       << mpi::num_processes() << " rank(s)\n";
