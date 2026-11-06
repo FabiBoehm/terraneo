@@ -330,6 +330,19 @@ struct PerimeterBuffer
     }
 };
 
+/// Entry (s, x, y, r[, d]) of scalar or vector 4-D grid data, so a device lambda can
+/// use one expression for both (nvcc: an extended lambda cannot first-capture a
+/// variable inside an if constexpr).
+template < typename GridData >
+KOKKOS_INLINE_FUNCTION typename GridData::value_type&
+    entry( const GridData& g, const int s, const int x, const int y, const int r, const int d )
+{
+    if constexpr ( grid::grid_data_vec_dim< GridData >() == 1 )
+        return g( s, x, y, r );
+    else
+        return g( s, x, y, r, d );
+}
+
 /// Phase 2: add the slots to the perimeter nodes in a fixed order. `replace` resets
 /// the nodes no owner lane stores (x == hex_lat or y == hex_lat); the others start
 /// from the owner's value. Scalar and vector 4-D grid data.
@@ -355,11 +368,7 @@ void perimeter_reduce( GridData dst, const PerimeterBuffer< AccT >& pb, const bo
             const bool two = ( halves > 1 ) && rb > 0 && r > 0 && r < nr - 1 && ( r % rb == 0 );
             for ( int d = 0; d < VecDim; ++d )
             {
-                AccT v;
-                if constexpr ( VecDim == 1 )
-                    v = ( owner || !replace ) ? static_cast< AccT >( dst( sub, x, y, r ) ) : AccT( 0 );
-                else
-                    v = ( owner || !replace ) ? static_cast< AccT >( dst( sub, x, y, r, d ) ) : AccT( 0 );
+                AccT v = ( owner || !replace ) ? static_cast< AccT >( entry( dst, sub, x, y, r, d ) ) : AccT( 0 );
                 if ( s1 )
                     v += pb.slot( sub, 0, 1, d, col, r );
                 if ( s2 )
@@ -375,10 +384,7 @@ void perimeter_reduce( GridData dst, const PerimeterBuffer< AccT >& pb, const bo
                     if ( s3 )
                         v += pb.slot( sub, 1, 3, d, col, r );
                 }
-                if constexpr ( VecDim == 1 )
-                    dst( sub, x, y, r ) = static_cast< S >( v );
-                else
-                    dst( sub, x, y, r, d ) = static_cast< S >( v );
+                entry( dst, sub, x, y, r, d ) = static_cast< S >( v );
             }
         } );
 }
@@ -404,11 +410,8 @@ void slab_reduce( GridData dst, const PerimeterBuffer< AccT >& pb )
             const int r   = ( k + 1 ) * rb;
             for ( int d = 0; d < VecDim; ++d )
             {
-                if constexpr ( VecDim == 1 )
-                    dst( sub, x, y, r ) = static_cast< S >( static_cast< AccT >( dst( sub, x, y, r ) ) + pb.slab( sub, d, x, y, r ) );
-                else
-                    dst( sub, x, y, r, d ) =
-                        static_cast< S >( static_cast< AccT >( dst( sub, x, y, r, d ) ) + pb.slab( sub, d, x, y, r ) );
+                S& e = entry( dst, sub, x, y, r, d );
+                e    = static_cast< S >( static_cast< AccT >( e ) + pb.slab( sub, d, x, y, r ) );
             }
         } );
 }
