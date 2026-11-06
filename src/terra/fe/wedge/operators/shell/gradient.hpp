@@ -91,6 +91,9 @@ class Gradient
     warp_tile::Tiling tiling_;
     bool              fast_enabled_ = true;
     int               min_blocks_   = warp_min_blocks;
+    /// Two-phase deterministic scatter (warp_tile.hpp): TERRA_DETERMINISTIC_SCATTER=1.
+    bool                               det_ = warp_tile::deterministic_scatter_requested();
+    warp_tile::PerimeterBuffer< AccT > pb_;
     int               cmb_mode_     = 0; ///< 0 none/Neumann, 1 Dirichlet, 2 free-slip
     int               surf_mode_    = 0;
 
@@ -159,6 +162,8 @@ class Gradient
 
     /// Switch between the warp path and the per-cell path (for tests and measurements).
     void set_fast_path( const bool on ) { fast_enabled_ = on; }
+    void set_deterministic_scatter( const bool on ) { det_ = on; }
+    bool deterministic_scatter_runs() const { return det_ && fast_path_runs(); }
 
     /// Whether the next apply runs the warp-owner kernel.
     bool fast_path_runs() const
@@ -174,14 +179,21 @@ class Gradient
         util::Timer timer_apply( "gradient_apply" );
 
         const bool fast = fast_path_runs();
+        const bool det  = fast && det_;
 
         if ( operator_apply_mode_ == linalg::OperatorApplyMode::Replace )
         {
-            if ( fast )
+            if ( det )
+            {
+                // Every owned node is stored, the rest reset by perimeter_reduce.
+            }
+            else if ( fast )
                 warp_tile::zero_perimeter( dst.grid_data(), tiling_ );
             else
                 assign( dst, 0 );
         }
+        if ( det && !pb_.matches( warp_tile::lat, tiling_.nsub, tiling_.hex_lat, tiling_.hex_rad, 3 ) )
+            pb_ = warp_tile::PerimeterBuffer< AccT >( warp_tile::lat, tiling_.nsub, tiling_.hex_lat, tiling_.hex_rad, 3, 1, 0 );
 
         src_ = src.grid_data();
         dst_ = dst.grid_data();
@@ -193,6 +205,8 @@ class Gradient
                 tiling_.r_block == 16 ? launch_warp< 17, 16 >() : launch_warp< 9, 16 >();
             else
                 tiling_.r_block == 16 ? launch_warp< 17, 8 >() : launch_warp< 9, 8 >();
+            if ( det )
+                warp_tile::perimeter_reduce( dst_, pb_, operator_apply_mode_ == linalg::OperatorApplyMode::Replace );
         }
         else
         {
@@ -331,7 +345,15 @@ class Gradient
         auto emit    = [&]( const int ddx, const int ddy, const int d, const AccT val, const bool owned ) {
             const int   rr = r0 - 1 + s_flush;
             ScalarType* p  = &dst_( sub, x_cell + ddx, y_cell + ddy, rr, d );
-            if ( owned && interior )
+            if ( det_ )
+            {
+                // Two-phase scatter: owners store, edges go to the side buffer.
+                if ( owned )
+                    *p = static_cast< ScalarType >( replace_mode ? val : static_cast< AccT >( *p ) + val );
+                else
+                    pb_.put_edge( sub, 0, ddx, ddy, d, x_cell, y_cell, rr, val );
+            }
+            else if ( owned && interior )
                 *p = static_cast< ScalarType >( replace_mode ? val : static_cast< AccT >( *p ) + val );
             else if ( val != AccT( 0 ) )
                 wt::global_add( p, val );

@@ -91,6 +91,7 @@ add_terra_test(test_epsilon_divdiv_stored_vs_matrixfree)
 add_terra_test(test_gradient_divergence_fast_vs_slow)
 add_terra_test(test_supg_fast_vs_slow)
 add_terra_test(test_stokes_fast_vs_slow_all_bcs)
+add_terra_test(test_deterministic_scatter)
 add_terra_test(test_xdmf_writer)
 
 # Adding target for all the tests.

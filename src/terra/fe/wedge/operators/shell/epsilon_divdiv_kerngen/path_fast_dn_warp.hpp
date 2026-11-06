@@ -325,7 +325,30 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
             }
         }
 
-        if ( cell_active && rr <= hex_rad_ )
+        if ( cell_active && rr <= hex_rad_ && det_scatter_ )
+        {
+            // Two-phase scatter: the owner stores its node, the outward edge
+            // contributions go to the side buffer (one writer per slot), and
+            // perimeter_reduce adds them afterwards in a fixed order.
+#pragma unroll
+            for ( int d = 0; d < 3; ++d )
+            {
+                ScalarType* p = &dst_( local_subdomain_id, x_cell, y_cell, rr, d );
+                *p = static_cast< ScalarType >( replace_mode ? own[d] : static_cast< AccT >( *p ) + own[d] );
+                if ( ltx == PW - 1 )
+                {
+                    pb_.put_edge( local_subdomain_id, 0, 1, 0, d, x_cell, y_cell, rr, v[1][d] );
+                    pb_.put_edge( local_subdomain_id, 0, 1, 1, d, x_cell, y_cell, rr, v[3][d] );
+                }
+                if ( lty == PH - 1 && wy == NW - 1 )
+                {
+                    pb_.put_edge( local_subdomain_id, 0, 0, 1, d, x_cell, y_cell, rr, v[2][d] );
+                    if ( ltx != PW - 1 )
+                        pb_.put_edge( local_subdomain_id, 0, 1, 1, d, x_cell, y_cell, rr, v[3][d] );
+                }
+            }
+        }
+        else if ( cell_active && rr <= hex_rad_ )
         {
             // Interior node of the tile: only this team touches it, and inside the
             // team only this lane.

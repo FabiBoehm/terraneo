@@ -17,6 +17,7 @@
 #include "linalg/vector_q1.hpp"
 #include "util/floating_point.hpp"
 #include "util/timer.hpp"
+#include "warp_tile.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -178,6 +179,12 @@ class EpsilonDivDivKerngen
 
     bool diagonal_; ///< If true, apply diagonal-only action
     int tile_scatter_ = default_tile_scatter; ///< Fast DN path scatter mode (see default_tile_scatter)
+    /// Two-phase deterministic scatter of the warp-owner path (warp_tile.hpp): no
+    /// global atomics, the perimeter contributions go through a side buffer that a
+    /// second kernel reduces in a fixed order. Scatter mode 3, or the environment's
+    /// TERRA_DETERMINISTIC_SCATTER=1 for every operator at once.
+    bool                                det_scatter_ = warp_tile::deterministic_scatter_requested();
+    warp_tile::PerimeterBuffer< AccT >  pb_;
 
     /// Hourglass (rank-6 gamma) stabilization coefficient; 0 disables it entirely.
     /// One-point quadrature on the wedge leaves two zero-energy modes per element,
@@ -635,6 +642,11 @@ class EpsilonDivDivKerngen
     /// a measurement switch as much as a setting. Call before the first apply().
     void set_tile_scatter( int mode )
     {
+        if ( mode == 3 )
+        {
+            det_scatter_ = true;
+            mode         = 2;
+        }
         tile_scatter_ = mode;
         if ( mode == 2 && !warp_scatter_available() )
         {
@@ -666,6 +678,11 @@ class EpsilonDivDivKerngen
         }
     }
     int tile_scatter() const { return tile_scatter_; }
+
+    /// The two-phase deterministic scatter (see det_scatter_); takes effect when the
+    /// warp-owner path runs.
+    void set_deterministic_scatter( const bool on ) { det_scatter_ = on; }
+    bool deterministic_scatter_runs() const { return det_scatter_ && warp_path_runs(); }
 
     static constexpr bool warp_scatter_available() { return warp_scatter_backend; }
 
@@ -905,13 +922,21 @@ class EpsilonDivDivKerngen
     {
         util::Timer timer_apply( "epsilon_divdiv_apply" );
 
+        const bool det = deterministic_scatter_runs();
         if ( operator_apply_mode_ == linalg::OperatorApplyMode::Replace )
         {
-            if ( warp_path_runs() )
+            // The deterministic scatter stores every owned node and resets the rest
+            // in its second phase: nothing to zero.
+            if ( det )
+            {
+            }
+            else if ( warp_path_runs() )
                 zero_warp_perimeter( dst.grid_data() );
             else
                 assign( dst, 0 );
         }
+        if ( det && !pb_.matches( lat_tile_, local_subdomains_, hex_lat_, hex_rad_, VecDim ) )
+            pb_ = warp_tile::PerimeterBuffer< AccT >( lat_tile_, local_subdomains_, hex_lat_, hex_rad_, VecDim, 1, 0 );
 
         dst_ = dst.grid_data();
         src_ = src.grid_data();
@@ -1003,6 +1028,8 @@ class EpsilonDivDivKerngen
                 Kokkos::TeamPolicy< Kokkos::LaunchBounds< 64, warp_min_blocks > > warp_policy( blocks_, team_size_ );
                 warp_policy.set_scratch_size( 0, Kokkos::PerTeam( team_shmem_size_dn( team_size_ ) ) );
                 launch_fast_dn_warp( warp_policy );
+                if ( det )
+                    warp_tile::perimeter_reduce( dst_, pb_, operator_apply_mode_ == linalg::OperatorApplyMode::Replace );
             }
             else
                 tile_buffer ? launch_fast_dirichlet_neumann< false, true >( dn_policy )

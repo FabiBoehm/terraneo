@@ -89,6 +89,9 @@ class Divergence
     warp_tile::Tiling tiling_;
     bool              fast_enabled_ = true;
     int               min_blocks_   = warp_min_blocks;
+    /// Two-phase deterministic scatter (warp_tile.hpp): TERRA_DETERMINISTIC_SCATTER=1.
+    bool                               det_ = warp_tile::deterministic_scatter_requested();
+    warp_tile::PerimeterBuffer< AccT > pb_;
     int               cmb_mode_     = 0; ///< 0 none/Neumann, 1 Dirichlet, 2 free-slip
     int               surf_mode_    = 0;
 
@@ -155,6 +158,8 @@ class Divergence
     }
 
     void set_fast_path( const bool on ) { fast_enabled_ = on; }
+    void set_deterministic_scatter( const bool on ) { det_ = on; }
+    bool deterministic_scatter_runs() const { return det_ && fast_path_runs(); }
 
     /// Whether the next apply runs the warp-owner kernel. The coarse owner logic
     /// needs whole coarse cells per run (an even run length) and a lateral tile of
@@ -183,6 +188,14 @@ class Divergence
         src_ = src.grid_data();
         dst_ = dst.grid_data();
 
+        // The two-phase scatter on the coarse grid: coarse tiles of lat / 2 cells, and
+        // since the runs are not level-complete (no halo cell), two edge halves and
+        // the slab of the team below's owner values at every run-boundary level.
+        const bool det = fast && det_;
+        if ( det && !pb_.matches( warp_tile::lat / 2, tiling_.nsub, tiling_.hex_lat / 2, tiling_.hex_rad / 2, 1 ) )
+            pb_ = warp_tile::PerimeterBuffer< AccT >(
+                warp_tile::lat / 2, tiling_.nsub, tiling_.hex_lat / 2, tiling_.hex_rad / 2, 1, 2, tiling_.r_block / 2 );
+
         util::Timer timer_kernel( "divergence_kernel" );
         if ( fast )
         {
@@ -190,6 +203,12 @@ class Divergence
                 tiling_.r_block == 16 ? launch_warp< 17, 16 >() : launch_warp< 9, 16 >();
             else
                 tiling_.r_block == 16 ? launch_warp< 17, 8 >() : launch_warp< 9, 8 >();
+            if ( det )
+            {
+                // dst was zeroed (Replace) or holds the previous value (Add): always the base.
+                warp_tile::slab_reduce( dst_, pb_ );
+                warp_tile::perimeter_reduce( dst_, pb_, false );
+            }
         }
         else
         {
@@ -387,7 +406,21 @@ class Divergence
             {
                 auto emit = [&]( const int ddx, const int ddy, const AccT val, const bool owned ) {
                     ScalarType* p = &dst_( sub, X0 + CX + ddx, Y0 + CY + ddy, R );
-                    if ( owned && complete && CX > 0 && CY > 0 )
+                    if ( det_ )
+                    {
+                        // Two-phase scatter. The team whose run contains the level
+                        // owns it (its bottom level included); the top flush of a
+                        // run another team continues is "below": its owner value
+                        // goes to the slab, its edges to the second half.
+                        const bool below = !complete && R != R0;
+                        if ( owned && !below )
+                            *p = static_cast< ScalarType >( replace_mode ? val : static_cast< AccT >( *p ) + val );
+                        else if ( owned )
+                            pb_.slab( sub, 0, X0 + CX, Y0 + CY, R ) = val;
+                        else
+                            pb_.put_edge( sub, below ? 1 : 0, ddx, ddy, 0, X0 + CX, Y0 + CY, R, val );
+                    }
+                    else if ( owned && complete && CX > 0 && CY > 0 )
                         *p = static_cast< ScalarType >( replace_mode ? val : static_cast< AccT >( *p ) + val );
                     else if ( val != AccT( 0 ) )
                         wt::global_add( p, val );

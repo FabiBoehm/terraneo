@@ -27,6 +27,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 
 /// Shared memory per SM the launch bounds' minimum blocks must fit in (bytes): H100 228 KiB.
 #ifndef TERRA_EPSDIVDIV_SM_SHMEM
@@ -186,6 +187,230 @@ void zero_perimeter( GridData dst, const Tiling& t )
                     dst( s, xi, yi, r, d ) = S( 0 );
             } );
     }
+}
+
+// ---- deterministic two-phase scatter ----
+//
+// The warp-owner kernels store every node only their own team touches and reduce
+// the rest -- the columns on the tiles' perimeters -- with global atomics, whose
+// arrival order differs from launch to launch, so two applies of the same operator
+// on the same input differ in the last bit. With the two-phase scatter nothing is
+// reduced in phase 1: the owner lane stores its node (all of them, perimeter or
+// not), and the three outward edge contributions of a perimeter node -- the
+// (1,0), (0,1) and (1,1) corners from the tile to its left, below it and diagonally
+// below -- go into their own slot of a side buffer, one writer per slot. Phase 2
+// adds the slots to the owner's value in a fixed order. Deterministic for a given
+// tiling, at the cost of the side buffer's traffic (26 % of the nodes at lat 8).
+//
+// Requested for all operators with TERRA_DETERMINISTIC_SCATTER=1.
+
+/// Whether the environment asks for the deterministic scatter.
+inline bool deterministic_scatter_requested()
+{
+    static const bool v = []() {
+        const char* env = std::getenv( "TERRA_DETERMINISTIC_SCATTER" );
+        return env != nullptr && std::atoi( env ) != 0;
+    }();
+    return v;
+}
+
+/// One device workspace per element type, grown on demand and shared by every
+/// operator (applies are ordered on the default execution space). Freed at finalize.
+template < typename T >
+Kokkos::View< T* > perimeter_workspace( const size_t n )
+{
+    static Kokkos::View< T* >* ws = nullptr;
+    if ( ws == nullptr )
+    {
+        ws = new Kokkos::View< T* >( Kokkos::view_alloc( Kokkos::WithoutInitializing, "warp_tile_perimeter_ws" ), n );
+        Kokkos::push_finalize_hook( []() {
+            delete ws;
+            ws = nullptr;
+        } );
+    }
+    else if ( ws->extent( 0 ) < n )
+    {
+        *ws = Kokkos::View< T* >( Kokkos::view_alloc( Kokkos::WithoutInitializing, "warp_tile_perimeter_ws" ), n );
+    }
+    return *ws;
+}
+
+/// The side buffer of the two-phase scatter: the perimeter node columns of a grid
+/// tiled with `tile` x `tile` cell tiles (x or y a multiple of tile, the index map of
+/// zero_perimeter), all levels, NC components, three edge slots (1 = from the left,
+/// 2 = from below, 3 = diagonal, i.e. the corner ddx + 2 ddy the contribution came
+/// from), two halves (0 = the team whose run contains the level, 1 = the team below
+/// whose run ends there; kernels whose runs are level-complete use half 0 only) and
+/// an optional slab for kernels whose runs are not level-complete: the owner value
+/// of the team below for every column at every run-boundary level.
+template < typename AccT >
+struct PerimeterBuffer
+{
+    Kokkos::View< AccT* > buf;
+    int                   tile = 0, nsub = 0, hex_lat = 0, nx = 0, nr = 0, nc = 0;
+    int                   nmult = 0, ncols_x = 0, nx_rest = 0, ncols = 0;
+    int                   halves = 1;
+    int                   r_block = 0, nslab = 0; ///< slab: run length in cells and number of boundary levels
+    size_t                slab_off = 0;
+
+    PerimeterBuffer() = default;
+
+    /// @param halves_  1 for level-complete runs (EpsDivDiv, Gradient, SUPG), 2 otherwise
+    /// @param r_block_ run length in cells of the grid the buffer is on (0: no slab)
+    PerimeterBuffer( const int tile_, const int nsub_, const int hex_lat_, const int hex_rad, const int nc_, const int halves_, const int r_block_ )
+    : tile( tile_ )
+    , nsub( nsub_ )
+    , hex_lat( hex_lat_ )
+    , nx( hex_lat_ + 1 )
+    , nr( hex_rad + 1 )
+    , nc( nc_ )
+    , nmult( hex_lat_ / tile_ + 1 )
+    , ncols_x( ( hex_lat_ / tile_ + 1 ) * ( hex_lat_ + 1 ) )
+    , nx_rest( hex_lat_ + 1 - ( hex_lat_ / tile_ + 1 ) )
+    , ncols( ( hex_lat_ / tile_ + 1 ) * ( hex_lat_ + 1 ) + ( hex_lat_ / tile_ + 1 ) * ( hex_lat_ + 1 - ( hex_lat_ / tile_ + 1 ) ) )
+    , halves( halves_ )
+    , r_block( r_block_ )
+    {
+        // Run-boundary levels: r = k r_block, 0 < r < hex_rad.
+        nslab    = ( r_block_ > 0 ) ? ( hex_rad - 1 ) / r_block_ : 0;
+        slab_off = size_t( nsub ) * halves * 3 * nc * size_t( ncols ) * size_t( nr );
+        const size_t slab = size_t( nsub ) * nslab * nc * size_t( nx ) * size_t( nx );
+        buf               = perimeter_workspace< AccT >( slab_off + slab );
+    }
+
+    bool matches( const int tile_, const int nsub_, const int hex_lat_, const int hex_rad, const int nc_ ) const
+    {
+        return buf.extent( 0 ) > 0 && tile == tile_ && nsub == nsub_ && hex_lat == hex_lat_ && nr == hex_rad + 1 && nc == nc_;
+    }
+
+    /// Perimeter column index of node column (x, y); x % tile == 0 or y % tile == 0.
+    KOKKOS_INLINE_FUNCTION int col_of( const int x, const int y ) const
+    {
+        if ( x % tile == 0 )
+            return ( x / tile ) * nx + y;
+        return ncols_x + ( y / tile ) * nx_rest + ( x - 1 - x / tile );
+    }
+
+    /// Node column of perimeter column index col.
+    KOKKOS_INLINE_FUNCTION void node_of( const int col, int& x, int& y ) const
+    {
+        if ( col < ncols_x )
+        {
+            x = ( col / nx ) * tile;
+            y = col % nx;
+        }
+        else
+        {
+            const int c  = col - ncols_x;
+            const int xr = c % nx_rest;
+            y            = ( c / nx_rest ) * tile;
+            x            = xr + 1 + xr / ( tile - 1 );
+        }
+    }
+
+    /// Edge slot (1..3) of component d of perimeter column col at level r.
+    KOKKOS_INLINE_FUNCTION AccT& slot( const int sub, const int half, const int s, const int d, const int col, const int r ) const
+    {
+        return buf( ( ( ( size_t( sub ) * halves + half ) * 3 + ( s - 1 ) ) * nc + d ) * size_t( ncols ) * nr + size_t( col ) * nr + r );
+    }
+
+    /// Slab entry of component d of column (x, y) at run-boundary level r (r = k r_block, k >= 1).
+    KOKKOS_INLINE_FUNCTION AccT& slab( const int sub, const int d, const int x, const int y, const int r ) const
+    {
+        const int k = r / r_block - 1;
+        return buf( slab_off + ( ( size_t( sub ) * nslab + k ) * nc + d ) * size_t( nx ) * nx + size_t( x ) * nx + y );
+    }
+
+    /// Write the outward edge contributions of a lane at a flush: what the owner
+    /// kernels hand to their `emit` with owned = false, keyed by the corner.
+    KOKKOS_INLINE_FUNCTION void
+        put_edge( const int sub, const int half, const int ddx, const int ddy, const int d, const int x_cell, const int y_cell, const int r, const AccT v ) const
+    {
+        slot( sub, half, ddx + 2 * ddy, d, col_of( x_cell + ddx, y_cell + ddy ), r ) = v;
+    }
+};
+
+/// Phase 2: add the slots to the perimeter nodes in a fixed order. `replace` resets
+/// the nodes no owner lane stores (x == hex_lat or y == hex_lat); the others start
+/// from the owner's value. Scalar and vector 4-D grid data.
+template < typename GridData, typename AccT >
+void perimeter_reduce( GridData dst, const PerimeterBuffer< AccT >& pb, const bool replace )
+{
+    constexpr int VecDim = grid::grid_data_vec_dim< GridData >();
+    using S              = typename GridData::value_type;
+    const int tile = pb.tile, hex_lat = pb.hex_lat, nr = pb.nr, ncols = pb.ncols, halves = pb.halves, rb = pb.r_block;
+    const Kokkos::RangePolicy<> policy( 0, size_t( pb.nsub ) * size_t( ncols ) * size_t( nr ) );
+    Kokkos::parallel_for(
+        "warp_tile_perimeter_reduce", policy, KOKKOS_LAMBDA( const size_t i ) {
+            const int r   = int( i % size_t( nr ) );
+            const int col = int( ( i / size_t( nr ) ) % size_t( ncols ) );
+            const int sub = int( i / size_t( nr ) / size_t( ncols ) );
+            int       x, y;
+            pb.node_of( col, x, y );
+            const bool owner = ( x < hex_lat ) && ( y < hex_lat );
+            const bool s1    = ( x % tile == 0 ) && x > 0 && y < hex_lat;
+            const bool s2    = ( y % tile == 0 ) && y > 0 && x < hex_lat;
+            const bool s3    = x > 0 && y > 0;
+            // A level a run below ends at has a second set of edges, from that team.
+            const bool two = ( halves > 1 ) && rb > 0 && r > 0 && r < nr - 1 && ( r % rb == 0 );
+            for ( int d = 0; d < VecDim; ++d )
+            {
+                AccT v;
+                if constexpr ( VecDim == 1 )
+                    v = ( owner || !replace ) ? static_cast< AccT >( dst( sub, x, y, r ) ) : AccT( 0 );
+                else
+                    v = ( owner || !replace ) ? static_cast< AccT >( dst( sub, x, y, r, d ) ) : AccT( 0 );
+                if ( s1 )
+                    v += pb.slot( sub, 0, 1, d, col, r );
+                if ( s2 )
+                    v += pb.slot( sub, 0, 2, d, col, r );
+                if ( s3 )
+                    v += pb.slot( sub, 0, 3, d, col, r );
+                if ( two )
+                {
+                    if ( s1 )
+                        v += pb.slot( sub, 1, 1, d, col, r );
+                    if ( s2 )
+                        v += pb.slot( sub, 1, 2, d, col, r );
+                    if ( s3 )
+                        v += pb.slot( sub, 1, 3, d, col, r );
+                }
+                if constexpr ( VecDim == 1 )
+                    dst( sub, x, y, r ) = static_cast< S >( v );
+                else
+                    dst( sub, x, y, r, d ) = static_cast< S >( v );
+            }
+        } );
+}
+
+/// Phase 2 for runs that are not level-complete: add the team-below owner values of
+/// the slab to every column (x, y < hex_lat) of every run-boundary level. Runs before
+/// perimeter_reduce, so a perimeter column at such a level gets slab, then edges.
+template < typename GridData, typename AccT >
+void slab_reduce( GridData dst, const PerimeterBuffer< AccT >& pb )
+{
+    constexpr int VecDim = grid::grid_data_vec_dim< GridData >();
+    using S              = typename GridData::value_type;
+    if ( pb.nslab == 0 )
+        return;
+    const int hex_lat = pb.hex_lat, nslab = pb.nslab, rb = pb.r_block;
+    const Kokkos::RangePolicy<> policy( 0, size_t( pb.nsub ) * size_t( nslab ) * size_t( hex_lat ) * size_t( hex_lat ) );
+    Kokkos::parallel_for(
+        "warp_tile_slab_reduce", policy, KOKKOS_LAMBDA( const size_t i ) {
+            const int y   = int( i % size_t( hex_lat ) );
+            const int x   = int( ( i / size_t( hex_lat ) ) % size_t( hex_lat ) );
+            const int k   = int( ( i / size_t( hex_lat ) / size_t( hex_lat ) ) % size_t( nslab ) );
+            const int sub = int( i / size_t( hex_lat ) / size_t( hex_lat ) / size_t( nslab ) );
+            const int r   = ( k + 1 ) * rb;
+            for ( int d = 0; d < VecDim; ++d )
+            {
+                if constexpr ( VecDim == 1 )
+                    dst( sub, x, y, r ) = static_cast< S >( static_cast< AccT >( dst( sub, x, y, r ) ) + pb.slab( sub, d, x, y, r ) );
+                else
+                    dst( sub, x, y, r, d ) =
+                        static_cast< S >( static_cast< AccT >( dst( sub, x, y, r, d ) ) + pb.slab( sub, d, x, y, r ) );
+            }
+        } );
 }
 
 /// Shared-memory seam between the warps of a team: the top row of warp w hands its

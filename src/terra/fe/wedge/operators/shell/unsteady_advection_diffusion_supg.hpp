@@ -195,6 +195,9 @@ class UnsteadyAdvectionDiffusionSUPG
     // Warp path.
     warp_tile::Tiling tiling_;
     bool              fast_enabled_ = true;
+    /// Two-phase deterministic scatter (warp_tile.hpp): TERRA_DETERMINISTIC_SCATTER=1.
+    bool                               det_ = warp_tile::deterministic_scatter_requested();
+    warp_tile::PerimeterBuffer< AccT > pb_;
 
   public:
     UnsteadyAdvectionDiffusionSUPG(
@@ -250,6 +253,8 @@ class UnsteadyAdvectionDiffusionSUPG
     }
 
     void set_fast_path( const bool on ) { fast_enabled_ = on; }
+    void set_deterministic_scatter( const bool on ) { det_ = on; }
+    bool deterministic_scatter_runs() const { return det_ && fast_path_runs(); }
 
     bool fast_path_runs() const
     {
@@ -264,14 +269,21 @@ class UnsteadyAdvectionDiffusionSUPG
         util::Timer timer_apply( "ad_supg_apply" );
 
         const bool fast = fast_path_runs();
+        const bool det  = fast && det_;
 
         if ( operator_apply_mode_ == linalg::OperatorApplyMode::Replace )
         {
-            if ( fast )
+            if ( det )
+            {
+                // Every owned node is stored, the rest reset by perimeter_reduce.
+            }
+            else if ( fast )
                 warp_tile::zero_perimeter( dst.grid_data(), tiling_ );
             else
                 assign( dst, 0 );
         }
+        if ( det && !pb_.matches( warp_tile::lat, tiling_.nsub, tiling_.hex_lat, tiling_.hex_rad, 1 ) )
+            pb_ = warp_tile::PerimeterBuffer< AccT >( warp_tile::lat, tiling_.nsub, tiling_.hex_lat, tiling_.hex_rad, 1, 1, 0 );
 
         src_      = src.grid_data();
         dst_      = dst.grid_data();
@@ -284,6 +296,8 @@ class UnsteadyAdvectionDiffusionSUPG
                 launch_warp< 17 >();
             else
                 launch_warp< 9 >();
+            if ( det )
+                warp_tile::perimeter_reduce( dst_, pb_, operator_apply_mode_ == linalg::OperatorApplyMode::Replace );
         }
         else
         {
@@ -446,7 +460,15 @@ class UnsteadyAdvectionDiffusionSUPG
         auto emit    = [&]( const int ddx, const int ddy, const int /*d*/, const AccT val, const bool owned ) {
             const int   rr = r0 - 1 + s_flush;
             ScalarType* p  = &dst_( sub, x_cell + ddx, y_cell + ddy, rr );
-            if ( owned && interior )
+            if ( det_ )
+            {
+                // Two-phase scatter: owners store, edges go to the side buffer.
+                if ( owned )
+                    *p = static_cast< ScalarType >( replace_mode ? val : static_cast< AccT >( *p ) + val );
+                else
+                    pb_.put_edge( sub, 0, ddx, ddy, 0, x_cell, y_cell, rr, val );
+            }
+            else if ( owned && interior )
                 *p = static_cast< ScalarType >( replace_mode ? val : static_cast< AccT >( *p ) + val );
             else if ( val != AccT( 0 ) )
                 wt::global_add( p, val );
