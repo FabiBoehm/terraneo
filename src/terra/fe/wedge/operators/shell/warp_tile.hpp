@@ -243,6 +243,17 @@ Kokkos::View< T* > perimeter_workspace( const size_t n )
 /// whose run ends there; kernels whose runs are level-complete use half 0 only) and
 /// an optional slab for kernels whose runs are not level-complete: the owner value
 /// of the team below for every column at every run-boundary level.
+///
+/// Layout: one plane per writer, so that a warp fills every 32 B sector it touches
+/// at one level (sectors shared between teams were evicted half-written and cost
+/// 1.6x the DRAM writes of the atomic kernel). Plane A holds what the right column
+/// of a tile writes, keyed by the boundary node column x % tile == 0: slot 1 of node
+/// (x, y) and slot 3 of node (x, y + 1), i.e. the record of (x, y) at level r is
+/// [s1 of (x, y)][s3 of (x, y)], written by the lanes (x - 1, y) and (x - 1, y - 1)
+/// of the same warp. Plane B holds what the top row writes, keyed by y % tile == 0:
+/// [s2 of (x, y)][s3 of (x, y)] from the lanes (x, y - 1) and (x - 1, y - 1). Slot 3
+/// of a node on a boundary column always comes from a right-column lane, so it is in
+/// plane A exactly when x % tile == 0.
 template < typename AccT >
 struct PerimeterBuffer
 {
@@ -252,6 +263,8 @@ struct PerimeterBuffer
     int                   halves = 1;
     int                   r_block = 0, nslab = 0; ///< slab: run length in cells and number of boundary levels
     int                   tshift = 0, rshift = 0; ///< log2 of tile and r_block (both powers of two)
+    int                   ncols_p = 0;             ///< columns per plane: nmult * nx
+    size_t                plane   = 0;             ///< elements per (plane, half, sub)
     size_t                slab_off = 0;
 
     PerimeterBuffer() = default;
@@ -280,7 +293,9 @@ struct PerimeterBuffer
             ++rshift;
         // Run-boundary levels: r = k r_block, 0 < r < hex_rad.
         nslab    = ( r_block_ > 0 ) ? ( hex_rad - 1 ) / r_block_ : 0;
-        slab_off = size_t( nsub ) * halves * 3 * nc * size_t( ncols ) * size_t( nr );
+        ncols_p  = nmult * nx;
+        plane    = size_t( ncols_p ) * size_t( nr ) * size_t( 2 * nc );
+        slab_off = 2 * size_t( halves ) * size_t( nsub ) * plane;
         const size_t slab = size_t( nsub ) * nslab * nc * size_t( nx ) * size_t( nx );
         buf               = perimeter_workspace< AccT >( slab_off + slab );
     }
@@ -315,15 +330,16 @@ struct PerimeterBuffer
         }
     }
 
-    /// Edge slot (1..3) of component d of perimeter column col at level r. Slot and
-    /// component are the innermost indices: the up-to-six edge values a lane writes
-    /// at one level are contiguous, and so are consecutive levels, so the 32 B
-    /// sectors fill within a level or two instead of being evicted half-written
-    /// (planes per slot and component cost 2x the DRAM writes of the whole kernel).
-    KOKKOS_INLINE_FUNCTION AccT& slot( const int sub, const int half, const int s, const int d, const int col, const int r ) const
+    /// Entry k (0, 1) of component d of plane p (0 = A, 1 = B) for plane column col
+    /// at level r.
+    KOKKOS_INLINE_FUNCTION AccT& edge( const int p, const int half, const int sub, const int col, const int r, const int k, const int d ) const
     {
-        return buf( ( ( ( size_t( sub ) * halves + half ) * size_t( ncols ) + col ) * nr + r ) * ( 3 * nc ) + ( s - 1 ) * nc + d );
+        return buf( ( ( size_t( p ) * halves + half ) * nsub + sub ) * plane + ( size_t( col ) * nr + r ) * ( 2 * nc ) + k * nc + d );
     }
+    /// Plane A column of boundary node column (x, y), x % tile == 0.
+    KOKKOS_INLINE_FUNCTION int col_a( const int x, const int y ) const { return ( x >> tshift ) * nx + y; }
+    /// Plane B column of boundary node column (x, y), y % tile == 0.
+    KOKKOS_INLINE_FUNCTION int col_b( const int x, const int y ) const { return ( y >> tshift ) * nx + x; }
 
     /// Slab entry of component d of column (x, y) at run-boundary level r (r = k r_block, k >= 1).
     KOKKOS_INLINE_FUNCTION AccT& slab( const int sub, const int d, const int x, const int y, const int r ) const
@@ -337,7 +353,15 @@ struct PerimeterBuffer
     KOKKOS_INLINE_FUNCTION void
         put_edge( const int sub, const int half, const int ddx, const int ddy, const int d, const int x_cell, const int y_cell, const int r, const AccT v ) const
     {
-        slot( sub, half, ddx + 2 * ddy, d, col_of( x_cell + ddx, y_cell + ddy ), r ) = v;
+        const int x = x_cell + ddx, y = y_cell + ddy;
+        if ( ddy == 0 )
+            edge( 0, half, sub, col_a( x, y ), r, 0, d ) = v; // (1,0): slot 1, plane A
+        else if ( ddx == 0 )
+            edge( 1, half, sub, col_b( x, y ), r, 0, d ) = v; // (0,1): slot 2, plane B
+        else if ( ( x & ( tile - 1 ) ) == 0 )
+            edge( 0, half, sub, col_a( x, y ), r, 1, d ) = v; // (1,1) from a right-column lane
+        else
+            edge( 1, half, sub, col_b( x, y ), r, 1, d ) = v; // (1,1) from a top-row lane
     }
 };
 
@@ -372,28 +396,24 @@ void perimeter_reduce( GridData dst, const PerimeterBuffer< AccT >& pb, const bo
             int       x, y;
             pb.node_of( col, x, y );
             const bool owner = ( x < hex_lat ) && ( y < hex_lat );
-            const bool s1    = ( ( x & ( tile - 1 ) ) == 0 ) && x > 0 && y < hex_lat;
+            const bool bx    = ( x & ( tile - 1 ) ) == 0; // boundary column: plane A
+            const bool s1    = bx && x > 0 && y < hex_lat;
             const bool s2    = ( ( y & ( tile - 1 ) ) == 0 ) && y > 0 && x < hex_lat;
             const bool s3    = x > 0 && y > 0;
+            const int  ca    = pb.col_a( x, y ), cb = pb.col_b( x, y );
             // A level a run below ends at has a second set of edges, from that team.
             const bool two = ( halves > 1 ) && rb > 0 && r > 0 && r < nr - 1 && ( ( r & ( rb - 1 ) ) == 0 );
             for ( int d = 0; d < VecDim; ++d )
             {
                 AccT v = ( owner || !replace ) ? static_cast< AccT >( entry( dst, sub, x, y, r, d ) ) : AccT( 0 );
-                if ( s1 )
-                    v += pb.slot( sub, 0, 1, d, col, r );
-                if ( s2 )
-                    v += pb.slot( sub, 0, 2, d, col, r );
-                if ( s3 )
-                    v += pb.slot( sub, 0, 3, d, col, r );
-                if ( two )
+                for ( int h = 0; h < ( two ? 2 : 1 ); ++h )
                 {
                     if ( s1 )
-                        v += pb.slot( sub, 1, 1, d, col, r );
+                        v += pb.edge( 0, h, sub, ca, r, 0, d );
                     if ( s2 )
-                        v += pb.slot( sub, 1, 2, d, col, r );
+                        v += pb.edge( 1, h, sub, cb, r, 0, d );
                     if ( s3 )
-                        v += pb.slot( sub, 1, 3, d, col, r );
+                        v += bx ? pb.edge( 0, h, sub, ca, r, 1, d ) : pb.edge( 1, h, sub, cb, r, 1, d );
                 }
                 entry( dst, sub, x, y, r, d ) = static_cast< S >( v );
             }
