@@ -251,6 +251,7 @@ struct PerimeterBuffer
     int                   nmult = 0, ncols_x = 0, nx_rest = 0, ncols = 0;
     int                   halves = 1;
     int                   r_block = 0, nslab = 0; ///< slab: run length in cells and number of boundary levels
+    int                   tshift = 0, rshift = 0; ///< log2 of tile and r_block (both powers of two)
     size_t                slab_off = 0;
 
     PerimeterBuffer() = default;
@@ -271,6 +272,12 @@ struct PerimeterBuffer
     , halves( halves_ )
     , r_block( r_block_ )
     {
+        if ( ( tile_ & ( tile_ - 1 ) ) != 0 || ( r_block_ & ( r_block_ - 1 ) ) != 0 )
+            Kokkos::abort( "PerimeterBuffer: tile and r_block must be powers of two" );
+        while ( ( 1 << tshift ) < tile_ )
+            ++tshift;
+        while ( ( 1 << rshift ) < r_block_ )
+            ++rshift;
         // Run-boundary levels: r = k r_block, 0 < r < hex_rad.
         nslab    = ( r_block_ > 0 ) ? ( hex_rad - 1 ) / r_block_ : 0;
         slab_off = size_t( nsub ) * halves * 3 * nc * size_t( ncols ) * size_t( nr );
@@ -286,9 +293,9 @@ struct PerimeterBuffer
     /// Perimeter column index of node column (x, y); x % tile == 0 or y % tile == 0.
     KOKKOS_INLINE_FUNCTION int col_of( const int x, const int y ) const
     {
-        if ( x % tile == 0 )
-            return ( x / tile ) * nx + y;
-        return ncols_x + ( y / tile ) * nx_rest + ( x - 1 - x / tile );
+        if ( ( x & ( tile - 1 ) ) == 0 )
+            return ( x >> tshift ) * nx + y;
+        return ncols_x + ( y >> tshift ) * nx_rest + ( x - 1 - ( x >> tshift ) );
     }
 
     /// Node column of perimeter column index col.
@@ -308,16 +315,20 @@ struct PerimeterBuffer
         }
     }
 
-    /// Edge slot (1..3) of component d of perimeter column col at level r.
+    /// Edge slot (1..3) of component d of perimeter column col at level r. Slot and
+    /// component are the innermost indices: the up-to-six edge values a lane writes
+    /// at one level are contiguous, and so are consecutive levels, so the 32 B
+    /// sectors fill within a level or two instead of being evicted half-written
+    /// (planes per slot and component cost 2x the DRAM writes of the whole kernel).
     KOKKOS_INLINE_FUNCTION AccT& slot( const int sub, const int half, const int s, const int d, const int col, const int r ) const
     {
-        return buf( ( ( ( size_t( sub ) * halves + half ) * 3 + ( s - 1 ) ) * nc + d ) * size_t( ncols ) * nr + size_t( col ) * nr + r );
+        return buf( ( ( ( size_t( sub ) * halves + half ) * size_t( ncols ) + col ) * nr + r ) * ( 3 * nc ) + ( s - 1 ) * nc + d );
     }
 
     /// Slab entry of component d of column (x, y) at run-boundary level r (r = k r_block, k >= 1).
     KOKKOS_INLINE_FUNCTION AccT& slab( const int sub, const int d, const int x, const int y, const int r ) const
     {
-        const int k = r / r_block - 1;
+        const int k = ( r >> rshift ) - 1;
         return buf( slab_off + ( ( size_t( sub ) * nslab + k ) * nc + d ) * size_t( nx ) * nx + size_t( x ) * nx + y );
     }
 
@@ -361,11 +372,11 @@ void perimeter_reduce( GridData dst, const PerimeterBuffer< AccT >& pb, const bo
             int       x, y;
             pb.node_of( col, x, y );
             const bool owner = ( x < hex_lat ) && ( y < hex_lat );
-            const bool s1    = ( x % tile == 0 ) && x > 0 && y < hex_lat;
-            const bool s2    = ( y % tile == 0 ) && y > 0 && x < hex_lat;
+            const bool s1    = ( ( x & ( tile - 1 ) ) == 0 ) && x > 0 && y < hex_lat;
+            const bool s2    = ( ( y & ( tile - 1 ) ) == 0 ) && y > 0 && x < hex_lat;
             const bool s3    = x > 0 && y > 0;
             // A level a run below ends at has a second set of edges, from that team.
-            const bool two = ( halves > 1 ) && rb > 0 && r > 0 && r < nr - 1 && ( r % rb == 0 );
+            const bool two = ( halves > 1 ) && rb > 0 && r > 0 && r < nr - 1 && ( ( r & ( rb - 1 ) ) == 0 );
             for ( int d = 0; d < VecDim; ++d )
             {
                 AccT v = ( owner || !replace ) ? static_cast< AccT >( entry( dst, sub, x, y, r, d ) ) : AccT( 0 );
