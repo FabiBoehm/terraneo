@@ -765,8 +765,10 @@ class EpsilonDivDivKerngen
     }
     /// Warp teams launch with LaunchBounds< 64, warp_min_blocks >. Measured for 16-bit
     /// storage: 10 blocks (102 registers) ran 5 % slower than 8 (128), the cap costs
-    /// more than the two extra teams per SM buy.
-    static constexpr int    warp_min_blocks = 8;
+    /// more than the two extra teams per SM buy. Double storage takes 7: its 8/1/8
+    /// slab (28.7 KB) is 300 B past what eight teams share on an H100's 228 KiB, and
+    /// Kokkos refuses the launch rather than dropping to seven teams.
+    static constexpr int    warp_min_blocks = ( sizeof( ScalarType ) <= 4 ) ? 8 : 7;
     static constexpr size_t warp_shmem_limit() { return kokkos_shmem_limit( 64, warp_min_blocks ); }
     double hourglass_coefficient() const { return stab_c_; }
 
