@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 #include "grid/grid_types.hpp"
 #include "kokkos/kokkos_wrapper.hpp"
 #include "mpi/mpi.hpp"
@@ -899,20 +901,35 @@ void cast( const grid::Grid4DDataScalar< ScalarTypeDst >& dst, const grid::Grid4
     Kokkos::fence();
 }
 
+/// splitmix64 finaliser of (seed, idx), scaled to [0, 1): a reproducible stand-in
+/// for a random draw per grid node.
+KOKKOS_INLINE_FUNCTION double hash_to_unit( uint64_t seed, uint64_t idx )
+{
+    uint64_t z = seed * 0x9E3779B97F4A7C15ull + idx * 0xBF58476D1CE4E5B9ull;
+    z          = ( z ^ ( z >> 30 ) ) * 0xBF58476D1CE4E5B9ull;
+    z          = ( z ^ ( z >> 27 ) ) * 0x94D049BB133111EBull;
+    z          = z ^ ( z >> 31 );
+    return double( z >> 11 ) * ( 1.0 / 9007199254740992.0 );
+}
+
 template < typename ScalarTypeDst >
 void rand( const grid::Grid4DDataScalar< ScalarTypeDst >& dst )
 {
     static_assert( util::FloatingPoint< ScalarTypeDst >,
                    "Random integers not implemented. But can be done easily below." );
 
-    Kokkos::Random_XorShift64_Pool<> random_pool( /*seed=*/12345 );
+    // A hash of the node index, not a Kokkos random pool: the pool's generator
+    // states are handed to threads in arrival order, so the field it fills differs
+    // from run to run (and the power iteration seeded from it, with it every Stokes
+    // residual). The hash is splitmix64; every node gets the same value in every run.
+    const uint64_t e1 = dst.extent( 1 ), e2 = dst.extent( 2 ), e3 = dst.extent( 3 );
     Kokkos::parallel_for(
         "rand",
         Kokkos::MDRangePolicy( { 0, 0, 0, 0 }, { dst.extent( 0 ), dst.extent( 1 ), dst.extent( 2 ), dst.extent( 3 ) } ),
         KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k ) {
-            auto generator                  = random_pool.get_state();
-            dst( local_subdomain, i, j, k ) = static_cast< ScalarTypeDst >( generator.drand() );
-            random_pool.free_state( generator );
+            const uint64_t idx = ( ( uint64_t( local_subdomain ) * e1 + uint64_t( i ) ) * e2 + uint64_t( j ) ) * e3 +
+                                 uint64_t( k );
+            dst( local_subdomain, i, j, k ) = static_cast< ScalarTypeDst >( hash_to_unit( 12345u, idx ) );
         } );
 
     Kokkos::fence();

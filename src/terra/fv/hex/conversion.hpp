@@ -5,6 +5,7 @@
 #include "fe/wedge/kernel_helpers.hpp"
 #include "fe/wedge/operators/shell/mass.hpp"
 #include "fe/wedge/quadrature/quadrature.hpp"
+#include "fe/wedge/deterministic.hpp"
 #include "linalg/solvers/pcg.hpp"
 #include "linalg/vector.hpp"
 #include "linalg/vector_fv.hpp"
@@ -148,6 +149,14 @@ void l2_project_fv_to_fe(
     grid::Grid4DDataScalar< ScalarType > fv_grid = src.grid_data();
     grid::Grid4DDataScalar< ScalarType > b_grid  = b.grid_data();
 
+    // The cells scatter into shared nodes with atomics; under TERRA_DETERMINISTIC_SCATTER
+    // the assembly runs once per cell parity (eight launches), so that no two cells of
+    // a launch share a node (fe/wedge/deterministic.hpp).
+    namespace det = fe::wedge::det;
+    const int ncolours = det::requested() ? 8 : 1;
+    for ( int c = 0; c < ncolours; ++c )
+    {
+    const int colour = det::requested() ? c : -1;
     Kokkos::parallel_for(
         "l2_project_fv_to_fe_rhs_assembly",
         Kokkos::MDRangePolicy(
@@ -158,6 +167,8 @@ void l2_project_fv_to_fe(
             const auto hex_cell_x_no_gl = hex_cell_x - 1;
             const auto hex_cell_y_no_gl = hex_cell_y - 1;
             const auto hex_cell_r_no_gl = hex_cell_r - 1;
+            if ( det::skip( colour, hex_cell_x_no_gl, hex_cell_y_no_gl, hex_cell_r_no_gl ) )
+                return;
 
             constexpr auto              num_quad_points = fe::wedge::quadrature::quad_felippa_3x2_num_quad_points;
             dense::Vec< ScalarType, 3 > quad_points[num_quad_points];
@@ -198,6 +209,7 @@ void l2_project_fv_to_fe(
             fe::wedge::atomically_add_local_wedge_scalar_coefficients(
                 b_grid, local_subdomain_id, hex_cell_x_no_gl, hex_cell_y_no_gl, hex_cell_r_no_gl, b_local );
         } );
+    }
 
     communication::shell::send_recv( domain, b_grid );
 
