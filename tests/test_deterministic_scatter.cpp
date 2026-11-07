@@ -226,6 +226,10 @@ void run_level( const int level, const int repeats, BoundaryConditions bcs, cons
     {
         Eps op( dom_f, coords, radii, bmask_f, k.grid_data(), bcs, false );
         op.set_hourglass_coefficient( 0.3 );
+        // Double storage defaults to direct atomics; the two-phase scatter needs the
+        // warp-owner path, so both arms run it (8/1/8 in double, 8/1/16 otherwise).
+        if ( !op.warp_path_runs() )
+            op.set_tile_scatter( 2 );
         VectorQ1Vec< S > y0( "y0", dom_f, mask_f ), y( "y", dom_f, mask_f ), ya0( "ya0", dom_f, mask_f ),
             ya( "ya", dom_f, mask_f ), diff( "diff", dom_f, mask_f ), ydet( "ydet", dom_f, mask_f );
         check( "epsdivdiv", op, u, y0, y, ya0, ya, diff, ydet, repeats, op.warp_path_runs(), tol );

@@ -387,6 +387,12 @@ class EpsilonDivDivKerngen
         // its own shapes); applied here, once the kernel path is known.
         set_tile_scatter( tile_scatter_ );
 
+        // The deterministic scatter needs the warp-owner path; double storage defaults
+        // to direct atomics (mode 0, 18 vs 13 GDoF/s at level 8 on an H100), so the
+        // request switches it to the warp path (8/1/8: 8/1/16 does not fit the scratch).
+        if ( det_scatter_ && tile_scatter_ != 2 && warp_scatter_available() )
+            set_tile_scatter( 3 );
+
         // Measurement switch without a code change: TERRA_EPSDIVDIV_TILE_SCATTER=0|1|2.
         if ( const char* env = std::getenv( "TERRA_EPSDIVDIV_TILE_SCATTER" ) )
         {
@@ -770,7 +776,7 @@ class EpsilonDivDivKerngen
         // Recompute host-side dispatch mode whenever BCs change, and with it the
         // scatter mode and tile (the warp-owner path exists for the fast DN kernel only).
         update_kernel_path_flag_host_only();
-        set_tile_scatter( tile_scatter_ == 1 && default_tile_scatter == 2 ? 2 : tile_scatter_ );
+        set_tile_scatter( tile_scatter_ == 1 && ( default_tile_scatter == 2 || det_scatter_ ) ? 2 : tile_scatter_ );
     }
 
     // ---- Stored-local-matrix path --------------------------------------------------
