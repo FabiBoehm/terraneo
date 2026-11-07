@@ -678,7 +678,15 @@ class EpsilonDivDivKerngen
             // Re-validate the current tile under the warp path's limits (shape, scratch);
             // one that does not pass is replaced by 8/1/16, or 8/1/8 if that does not fit.
             const bool keep = warp_shape_ok() && set_tiling( lat_tile_, r_tile_, r_passes_, false );
-            if ( !keep && ( hex_lat_ < 8 || ( !set_tiling( 8, 1, 16, false ) && !set_tiling( 8, 1, 8, false ) ) ) )
+            // Two-phase float runs 8/1/8 faster than 8/1/16 (30.7 vs 27.3 GDoF/s at level 8
+            // on an H100: the side buffer, not the slab, is the cost); 16-bit storage and
+            // the atomic scatter prefer 8/1/16.
+            const bool eight_first = det_scatter_ && sizeof( ScalarType ) == 4;
+            const auto try_tiles   = [&]() {
+                return eight_first ? ( set_tiling( 8, 1, 8, false ) || set_tiling( 8, 1, 16, false ) ) :
+                                     ( set_tiling( 8, 1, 16, false ) || set_tiling( 8, 1, 8, false ) );
+            };
+            if ( !keep && ( hex_lat_ < 8 || !try_tiles() ) )
             {
                 util::logroot << "[EpsilonDivDiv] warp-owner scatter: no usable tile at this size; using the tile buffer"
                               << std::endl;
