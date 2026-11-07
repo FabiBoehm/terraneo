@@ -20,6 +20,7 @@
 #include "warp_tile.hpp"
 
 #include <algorithm>
+#include <stdexcept>
 #include <cstdlib>
 #include <string>
 
@@ -185,6 +186,8 @@ class EpsilonDivDivKerngen
     /// TERRA_DETERMINISTIC_SCATTER=1 for every operator at once.
     bool                                det_scatter_ = warp_tile::deterministic_scatter_requested();
     warp_tile::PerimeterBuffer< AccT >  pb_;
+    /// Lateral colour of the deterministic column launches (-1: none), see apply_impl.
+    int colour_lat_ = -1;
 
     /// Hourglass (rank-6 gamma) stabilization coefficient; 0 disables it entirely.
     /// One-point quadrature on the wedge leaves two zero-energy modes per element,
@@ -951,24 +954,43 @@ class EpsilonDivDivKerngen
         Kokkos::TeamPolicy<> policy( blocks_, team_size_ );
 
         // Deterministic request on a configuration without the warp-owner path (a
-        // coarse level, the diagonal, free-slip): the per-cell slow path, coloured
-        // (fe/wedge/deterministic.hpp), so every node gets one contribution per launch.
-        const bool slow_coloured = det_scatter_ && !det;
-        if ( slow_coloured )
+        // coarse level, the diagonal, free-slip): the fast kernels unchanged (hourglass
+        // term, boundary conditions), but on a 1 x 1 x hex_rad tiling -- one thread per
+        // column, its cells in sequence -- launched four times by lateral parity
+        // (fe/wedge/deterministic.hpp). No two threads of a launch share a node and
+        // the cells of a column add in the thread's order. Slow, so only for what the
+        // warp path cannot do.
+        const bool column_coloured = det_scatter_ && !det && kernel_path_ != KernelPath::Slow &&
+                                     !( kernel_path_ == KernelPath::StoredLocalMatrices && !diagonal_ );
+        if ( column_coloured )
         {
-            const int nsub = local_subdomains_, nl = hex_lat_, nrad = hex_rad_;
-            det::for_each_colour( true, [&]( const int c ) {
-                Kokkos::parallel_for(
-                    "epsilon_divdiv_apply_kernel_slow_coloured",
-                    Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >( { 0, 0, 0, 0 }, { nsub, nl, nl, nrad } ),
-                    KOKKOS_CLASS_LAMBDA( const int s, const int x, const int y, const int r ) {
-                        if ( det::skip( c, x, y, r ) )
-                            return;
-                        const bool at_cmb     = this->has_flag( s, x, y, r, CMB );
-                        const bool at_surface = this->has_flag( s, x, y, r + 1, SURFACE );
-                        this->operator_slow_path( s, 0, 0, 0, 0, 0, 0, x, y, r, at_cmb, at_surface );
+            const int saved_lat = lat_tile_, saved_r = r_tile_, saved_p = r_passes_, saved_scatter = tile_scatter_;
+            tile_scatter_ = 0;
+            if ( !set_tiling( 1, 1, hex_rad_, false ) )
+                throw std::runtime_error( "EpsilonDivDiv: the deterministic column tiling does not fit the scratch" );
+            Kokkos::TeamPolicy< Kokkos::LaunchBounds< TERRA_EPSDIVDIV_MAX_TEAM, TERRA_EPSDIVDIV_MIN_WAVES > > col_policy( blocks_, team_size_ );
+            const bool fs = ( matrix_free_kernel_path() == KernelPath::FastFreeslip );
+            col_policy.set_scratch_size( 0, Kokkos::PerTeam( fs ? team_shmem_size( team_size_ ) : team_shmem_size_dn( team_size_ ) ) );
+            for ( int c = 0; c < 4; ++c )
+            {
+                colour_lat_ = c;
+                if ( fs && diagonal_ )
+                    Kokkos::parallel_for( "epsilon_divdiv_apply_kernel_fs_diag_coloured", col_policy, KOKKOS_CLASS_LAMBDA( const Team& team ) {
+                        this->template run_team_fast_freeslip< true >( team );
                     } );
-            } );
+                else if ( fs )
+                    Kokkos::parallel_for( "epsilon_divdiv_apply_kernel_fs_matvec_coloured", col_policy, KOKKOS_CLASS_LAMBDA( const Team& team ) {
+                        this->template run_team_fast_freeslip< false >( team );
+                    } );
+                else if ( diagonal_ )
+                    launch_fast_dirichlet_neumann< true, false >( col_policy );
+                else
+                    launch_fast_dirichlet_neumann< false, false >( col_policy );
+            }
+            Kokkos::fence();
+            colour_lat_   = -1;
+            tile_scatter_ = saved_scatter;
+            set_tiling( saved_lat, saved_r, saved_p, false );
         }
         else
         {
@@ -1397,7 +1419,7 @@ class EpsilonDivDivKerngen
         int local_subdomain_id, x0, y0, r0, tx, ty, tr, x_cell, y_cell, r_cell;
         decode_team_indices( team, local_subdomain_id, x0, y0, r0, tx, ty, tr, x_cell, y_cell, r_cell );
 
-        if ( tr >= r_tile_ )
+        if ( tr >= r_tile_ || det::skip_lat( colour_lat_, x_cell, y_cell ) )
             return;
 
         operator_fast_dirichlet_neumann_path< Diagonal, TileScatter, LatTileC, NlevC >(
@@ -1417,7 +1439,7 @@ class EpsilonDivDivKerngen
         int local_subdomain_id, x0, y0, r0, tx, ty, tr, x_cell, y_cell, r_cell;
         decode_team_indices( team, local_subdomain_id, x0, y0, r0, tx, ty, tr, x_cell, y_cell, r_cell );
 
-        if ( tr >= r_tile_ )
+        if ( tr >= r_tile_ || det::skip_lat( colour_lat_, x_cell, y_cell ) )
             return;
 
         operator_fast_freeslip_path< Diagonal >(

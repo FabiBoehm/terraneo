@@ -216,7 +216,7 @@ class Divergence
             det::for_each_colour( det_, [&]( const int c ) {
             colour_ = c;
             Kokkos::parallel_for( "matvec", grid::shell::local_domain_md_range_policy_cells( domain_fine_ ), *this );
-        } );
+        }, 2 );
         }
         Kokkos::fence();
         timer_kernel.stop();
@@ -542,7 +542,7 @@ class Divergence
     KOKKOS_INLINE_FUNCTION void
         operator()( const int local_subdomain_id, const int x_cell, const int y_cell, const int r_cell ) const
     {
-        if ( det::skip( colour_, x_cell, y_cell, r_cell ) )
+        if ( det::skip( colour_, x_cell, y_cell, r_cell, 2 ) ) // coarse nodes: x, y, r mod 4
             return;
         // Gather surface points for each wedge.
         // Geometry and quadrature in GeomT (the stored coordinate precision).

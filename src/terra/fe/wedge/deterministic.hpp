@@ -52,22 +52,32 @@ inline void set_requested( const bool on )
     detail::override_value() = on;
 }
 
-constexpr int ncolours = 8;
-
 /// Whether cell (x, y, r) is not of `colour` (-1: no colouring, nothing is skipped).
-KOKKOS_INLINE_FUNCTION bool skip( const int colour, const int x, const int y, const int r )
+/// `bits` = 1: parity colouring, 8 colours, for a kernel whose cells scatter to their
+/// own nodes; 2: x, y, r mod 4, 64 colours, for a fine-cell kernel that scatters to
+/// the coarse nodes (the two fine cells of a coarse cell share them, and so do the
+/// fine cells of neighbouring coarse cells).
+KOKKOS_INLINE_FUNCTION bool skip( const int colour, const int x, const int y, const int r, const int bits = 1 )
 {
-    return colour >= 0 && ( ( x & 1 ) | ( ( y & 1 ) << 1 ) | ( ( r & 1 ) << 2 ) ) != colour;
+    const int m = ( 1 << bits ) - 1;
+    return colour >= 0 && ( ( x & m ) | ( ( y & m ) << bits ) | ( ( r & m ) << ( 2 * bits ) ) ) != colour;
+}
+
+/// Lateral parity colouring (4 colours) for a kernel whose thread handles a whole
+/// column of cells in sequence.
+KOKKOS_INLINE_FUNCTION bool skip_lat( const int colour, const int x, const int y )
+{
+    return colour >= 0 && ( ( x & 1 ) | ( ( y & 1 ) << 1 ) ) != colour;
 }
 
 /// Run launch(-1) once, or, when deterministic, launch(c) for every colour c.
 template < typename F >
-void for_each_colour( const bool deterministic, F&& launch )
+void for_each_colour( const bool deterministic, F&& launch, const int bits = 1 )
 {
     if ( !deterministic )
         launch( -1 );
     else
-        for ( int c = 0; c < ncolours; ++c )
+        for ( int c = 0; c < ( 1 << ( 3 * bits ) ); ++c )
             launch( c );
 }
 
