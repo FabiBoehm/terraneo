@@ -188,6 +188,9 @@ class EpsilonDivDivKerngen
     warp_tile::PerimeterBuffer< AccT >  pb_;
     /// Lateral colour of the deterministic column launches (-1: none), see apply_impl.
     int colour_lat_ = -1;
+    /// Cell parity colour of the running launch for the per-cell paths (slow, stored
+    /// local matrices): the deterministic request runs them once per colour.
+    int colour_cell_ = -1;
 
     /// Hourglass (rank-6 gamma) stabilization coefficient; 0 disables it entirely.
     /// One-point quadrature on the wedge leaves two zero-energy modes per element,
@@ -1018,22 +1021,36 @@ class EpsilonDivDivKerngen
         }
 
         // Host-side dispatch => no per-team path branching in device code
+        // The per-cell paths scatter with atomics; the deterministic request runs them
+        // once per cell parity (eight launches, fe/wedge/deterministic.hpp). The slow
+        // path is also what the Galerkin-coarsened levels run (stored GCA elements).
+        const int ncolours = det_scatter_ ? 8 : 1;
         if ( stored )
         {
             if ( !stored_matrices_valid_ )
                 precompute_stored_local_matrices();
 
-            Kokkos::parallel_for(
-                "epsilon_divdiv_apply_kernel_stored_local_matrices",
-                Kokkos::RangePolicy<>( 0, num_cells() ),
-                KOKKOS_CLASS_LAMBDA( const int cell ) { this->run_stored_local_matrices( cell ); } );
+            for ( int c = 0; c < ncolours; ++c )
+            {
+                colour_cell_ = det_scatter_ ? c : -1;
+                Kokkos::parallel_for(
+                    "epsilon_divdiv_apply_kernel_stored_local_matrices",
+                    Kokkos::RangePolicy<>( 0, num_cells() ),
+                    KOKKOS_CLASS_LAMBDA( const int cell ) { this->run_stored_local_matrices( cell ); } );
+            }
+            colour_cell_ = -1;
         }
         else if ( path == KernelPath::Slow )
         {
-            Kokkos::parallel_for(
-                "epsilon_divdiv_apply_kernel_slow", policy, KOKKOS_CLASS_LAMBDA( const Team& team ) {
-                    this->run_team_slow( team );
-                } );
+            for ( int c = 0; c < ncolours; ++c )
+            {
+                colour_cell_ = det_scatter_ ? c : -1;
+                Kokkos::parallel_for(
+                    "epsilon_divdiv_apply_kernel_slow", policy, KOKKOS_CLASS_LAMBDA( const Team& team ) {
+                        this->run_team_slow( team );
+                    } );
+            }
+            colour_cell_ = -1;
         }
         else if ( path == KernelPath::FastFreeslip )
         {

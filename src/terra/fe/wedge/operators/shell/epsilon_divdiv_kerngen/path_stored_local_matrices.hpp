@@ -272,6 +272,8 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
 {
     int local_subdomain_id, x_cell, y_cell, r_cell;
     decode_cell_index( cell, local_subdomain_id, x_cell, y_cell, r_cell );
+    if ( det::skip( colour_cell_, x_cell, y_cell, r_cell ) )
+        return;
 
     // DIMENSIONWISE local vectors, node + 6 * component, as the assembly orders them.
     ArithT x[num_wedges_per_hex_cell][LocalMatrixDim];
