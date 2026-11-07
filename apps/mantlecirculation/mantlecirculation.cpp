@@ -398,7 +398,8 @@ Result<> run( const Parameters& prm )
     // Setting up the (adaptive) Galerkin coarse grid approximation (AGCA / GCA)
     // Determine AGCA elements.
     VectorQ1Scalar< ScalarType > GCAElements( "GCAElements", domains[0], ownership_mask_data[0] );
-    int                          gca = 1;
+    // 0: matrix-free coarse levels (default), 1: GCA on all elements, 2: adaptive GCA.
+    const int gca = prm.stokes_solver_parameters.viscous_pc_gca;
     if ( gca == 2 )
     {
         linalg::assign( GCAElements, 0 );

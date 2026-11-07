@@ -59,6 +59,9 @@ struct StokesSolverParameters
     int viscous_pc_chebyshev_order             = 2;
     int viscous_pc_num_smoothing_steps_prepost = 2;
     int viscous_pc_num_power_iterations        = 10;
+    /// Galerkin coarse grid approximation on the coarse levels of the viscous block
+    /// preconditioner: 0 matrix-free (default), 1 GCA on all elements, 2 adaptive GCA.
+    int viscous_pc_gca = 0;
 };
 
 struct EnergySolverParameters
@@ -260,6 +263,8 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
         app,
         "--stokes-viscous-pc-num-power-iterations",
         parameters.stokes_solver_parameters.viscous_pc_num_power_iterations )
+        ->group( "Stokes Solver" );
+    add_option_with_default( app, "--stokes-viscous-pc-gca", parameters.stokes_solver_parameters.viscous_pc_gca )
         ->group( "Stokes Solver" );
 
     /////////////////////
