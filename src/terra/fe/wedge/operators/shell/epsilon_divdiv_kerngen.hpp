@@ -188,9 +188,8 @@ class EpsilonDivDivKerngen
     warp_tile::PerimeterBuffer< AccT >  pb_;
     /// Lateral colour of the deterministic column launches (-1: none), see apply_impl.
     int colour_lat_ = -1;
-    /// Cell parity colour of the running launch for the per-cell paths (slow, stored
-    /// local matrices): the deterministic request runs them once per colour.
-    int colour_cell_ = -1;
+    /// Tests: run the slow per-cell path (what the Galerkin-coarsened levels run).
+    bool force_slow_path_ = false;
 
     /// Hourglass (rank-6 gamma) stabilization coefficient; 0 disables it entirely.
     /// One-point quadrature on the wedge leaves two zero-energy modes per element,
@@ -322,7 +321,7 @@ class EpsilonDivDivKerngen
     {
         const bool has_stored_matrices = ( operator_stored_matrix_mode_ != linalg::OperatorStoredMatrixMode::Off );
 
-        if ( has_stored_matrices )
+        if ( has_stored_matrices || force_slow_path_ )
             kernel_path_ = KernelPath::Slow;
         else if ( use_stored_matrices_ )
             kernel_path_ = KernelPath::StoredLocalMatrices;
@@ -704,6 +703,13 @@ class EpsilonDivDivKerngen
     void set_deterministic_scatter( const bool on ) { det_scatter_ = on; }
     bool deterministic_scatter_runs() const { return det_scatter_ && warp_path_runs(); }
 
+    /// Run the slow per-cell path regardless of the configuration (tests).
+    void set_force_slow_path( const bool on )
+    {
+        force_slow_path_ = on;
+        update_kernel_path_flag_host_only();
+    }
+
     static constexpr bool warp_scatter_available() { return warp_scatter_backend; }
 
     /// True when the next apply runs the warp-owner kernel. Its owner lanes store every
@@ -854,7 +860,7 @@ class EpsilonDivDivKerngen
         int local_subdomain_id, int x_cell, int y_cell, int r_cell, int wedge, bool at_cmb, bool at_surface ) const;
 
     KOKKOS_INLINE_FUNCTION
-    void run_stored_local_matrices( int cell ) const;
+    void run_stored_local_matrices( int local_subdomain_id, int x_cell, int y_cell, int r_cell ) const;
 
     const grid::Grid4DDataScalar< ScalarType >& k_grid_data() { return k_; }
     const grid::shell::DistributedDomain&       get_domain() const { return domain_; }
@@ -1022,35 +1028,35 @@ class EpsilonDivDivKerngen
 
         // Host-side dispatch => no per-team path branching in device code
         // The per-cell paths scatter with atomics; the deterministic request runs them
-        // once per cell parity (eight launches, fe/wedge/deterministic.hpp). The slow
-        // path is also what the Galerkin-coarsened levels run (stored GCA elements).
-        const int ncolours = det_scatter_ ? 8 : 1;
+        // once per cell parity, each launch over the compact index space of its colour
+        // (launch_coloured_cells, fe/wedge/deterministic.hpp). The slow path is also what
+        // the Galerkin-coarsened levels run (stored GCA elements).
         if ( stored )
         {
             if ( !stored_matrices_valid_ )
                 precompute_stored_local_matrices();
 
-            for ( int c = 0; c < ncolours; ++c )
-            {
-                colour_cell_ = det_scatter_ ? c : -1;
+            if ( det_scatter_ )
+                launch_coloured_cells< true >();
+            else
                 Kokkos::parallel_for(
                     "epsilon_divdiv_apply_kernel_stored_local_matrices",
                     Kokkos::RangePolicy<>( 0, num_cells() ),
-                    KOKKOS_CLASS_LAMBDA( const int cell ) { this->run_stored_local_matrices( cell ); } );
-            }
-            colour_cell_ = -1;
+                    KOKKOS_CLASS_LAMBDA( const int cell ) {
+                        int local_subdomain_id, x_cell, y_cell, r_cell;
+                        this->decode_cell_index( cell, local_subdomain_id, x_cell, y_cell, r_cell );
+                        this->run_stored_local_matrices( local_subdomain_id, x_cell, y_cell, r_cell );
+                    } );
         }
         else if ( path == KernelPath::Slow )
         {
-            for ( int c = 0; c < ncolours; ++c )
-            {
-                colour_cell_ = det_scatter_ ? c : -1;
+            if ( det_scatter_ )
+                launch_coloured_cells< false >();
+            else
                 Kokkos::parallel_for(
                     "epsilon_divdiv_apply_kernel_slow", policy, KOKKOS_CLASS_LAMBDA( const Team& team ) {
                         this->run_team_slow( team );
                     } );
-            }
-            colour_cell_ = -1;
         }
         else if ( path == KernelPath::FastFreeslip )
         {
@@ -1351,7 +1357,54 @@ class EpsilonDivDivKerngen
         }
     }
 
+    /// One cell of the slow path (the coloured launches).
+    KOKKOS_INLINE_FUNCTION
+    void run_cell_slow( const int local_subdomain_id, const int x_cell, const int y_cell, const int r_cell ) const
+    {
+        const bool at_cmb     = has_flag( local_subdomain_id, x_cell, y_cell, r_cell, CMB );
+        const bool at_surface = has_flag( local_subdomain_id, x_cell, y_cell, r_cell + 1, SURFACE );
+        operator_slow_path( local_subdomain_id, 0, 0, 0, 0, 0, 0, x_cell, y_cell, r_cell, at_cmb, at_surface );
+    }
+
   public:
+    /// Public only because nvcc requires the function enclosing an extended lambda
+    /// to be; not part of the interface. The per-cell paths under the deterministic
+    /// scatter: eight launches, one per cell parity colour, each over the cells of
+    /// that colour only (a launch over all cells that skips seven eighths costs as
+    /// much as the full one: the lanes of a warp wait for the one that works). The
+    /// cells of a launch are numbered r fastest, like the stored matrices.
+    template < bool Stored >
+    void launch_coloured_cells()
+    {
+        for ( int c = 0; c < 8; ++c )
+        {
+            const int cx = c & 1, cy = ( c >> 1 ) & 1, cr = ( c >> 2 ) & 1;
+            const int ex = int( det::colour_extent( hex_lat_, cx ) );
+            const int ey = int( det::colour_extent( hex_lat_, cy ) );
+            const int er = int( det::colour_extent( hex_rad_, cr ) );
+            const int n  = local_subdomains_ * ex * ey * er;
+            if ( n == 0 )
+                continue;
+            Kokkos::parallel_for(
+                Stored ? "epsilon_divdiv_apply_kernel_stored_local_matrices_coloured" :
+                         "epsilon_divdiv_apply_kernel_slow_coloured",
+                Kokkos::RangePolicy<>( 0, n ),
+                KOKKOS_CLASS_LAMBDA( const int i ) {
+                    int       t      = i;
+                    const int r_cell = 2 * ( t % er ) + cr;
+                    t /= er;
+                    const int y_cell = 2 * ( t % ey ) + cy;
+                    t /= ey;
+                    const int x_cell             = 2 * ( t % ex ) + cx;
+                    const int local_subdomain_id = t / ex;
+                    if constexpr ( Stored )
+                        this->run_stored_local_matrices( local_subdomain_id, x_cell, y_cell, r_cell );
+                    else
+                        this->run_cell_slow( local_subdomain_id, x_cell, y_cell, r_cell );
+                } );
+        }
+    }
+
     /// Public only because nvcc requires the function enclosing an extended lambda
     /// to be; not part of the interface.
     template < bool Diagonal, bool TileScatter, int LatTileC, int NlevC, typename Policy >

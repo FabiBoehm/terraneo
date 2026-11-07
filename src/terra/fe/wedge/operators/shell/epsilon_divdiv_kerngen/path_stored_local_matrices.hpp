@@ -268,12 +268,13 @@ void EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixSc
 template < typename ScalarT, int VecDim, typename CoordScalarT, typename ArithScalarT, typename MatrixScalarT >
 KOKKOS_INLINE_FUNCTION void
 EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT >::run_stored_local_matrices(
-    const int cell ) const
+    const int local_subdomain_id,
+    const int x_cell,
+    const int y_cell,
+    const int r_cell ) const
 {
-    int local_subdomain_id, x_cell, y_cell, r_cell;
-    decode_cell_index( cell, local_subdomain_id, x_cell, y_cell, r_cell );
-    if ( det::skip( colour_cell_, x_cell, y_cell, r_cell ) )
-        return;
+    // The stored matrices' cell numbering (decode_cell_index): r fastest.
+    const int cell = ( ( local_subdomain_id * hex_lat_ + x_cell ) * hex_lat_ + y_cell ) * hex_rad_ + r_cell;
 
     // DIMENSIONWISE local vectors, node + 6 * component, as the assembly orders them.
     ArithT x[num_wedges_per_hex_cell][LocalMatrixDim];

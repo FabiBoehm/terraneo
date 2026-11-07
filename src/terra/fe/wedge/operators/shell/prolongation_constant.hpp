@@ -56,9 +56,7 @@ class ProlongationConstant
         }
 
         // Looping over the coarse grid.
-        det::for_each_colour( det::requested(), [&]( const int c ) {
-            colour_ = c;
-            Kokkos::parallel_for(
+        det::for_cells(
                 "matvec",
                 Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >(
                     { 0, 0, 0, 0 },
@@ -68,21 +66,15 @@ class ProlongationConstant
                         src_.extent( 2 ),
                         src_.extent( 3 ),
                     } ),
+                det::requested(),
                 *this );
-        } );
 
         Kokkos::fence();
     }
 
-    /// Deterministic colouring (fe/wedge/deterministic.hpp): the launch only scatters
-    /// the cells of this parity colour, -1 all of them.
-    int colour_ = -1;
-
     KOKKOS_INLINE_FUNCTION void
         operator()( const int local_subdomain_id, const int x_coarse, const int y_coarse, const int r_coarse ) const
     {
-        if ( det::skip( colour_, x_coarse, y_coarse, r_coarse ) )
-            return;
         const auto x_fine = 2 * x_coarse;
         const auto y_fine = 2 * y_coarse;
         const auto r_fine = 2 * r_coarse;
@@ -154,9 +146,7 @@ class ProlongationVecConstant
         }
 
         // Looping over the coarse grid.
-        det::for_each_colour( det::requested(), [&]( const int c ) {
-            colour_ = c;
-            Kokkos::parallel_for(
+        det::for_cells(
                 "matvec",
                 Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >(
                     { 0, 0, 0, 0 },
@@ -166,21 +156,15 @@ class ProlongationVecConstant
                         src_.extent( 2 ),
                         src_.extent( 3 ),
                     } ),
+                det::requested(),
                 *this );
-        } );
 
         Kokkos::fence();
     }
 
-    /// Deterministic colouring (fe/wedge/deterministic.hpp): the launch only scatters
-    /// the cells of this parity colour, -1 all of them.
-    int colour_ = -1;
-
     KOKKOS_INLINE_FUNCTION void
         operator()( const int local_subdomain_id, const int x_coarse, const int y_coarse, const int r_coarse ) const
     {
-        if ( det::skip( colour_, x_coarse, y_coarse, r_coarse ) )
-            return;
         const auto x_fine = 2 * x_coarse;
         const auto y_fine = 2 * y_coarse;
         const auto r_fine = 2 * r_coarse;

@@ -132,8 +132,7 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
     (void) ty;
     (void) tr;
 
-    if ( x_cell >= hex_lat_ || y_cell >= hex_lat_ || r_cell >= hex_rad_ ||
-         det::skip( colour_cell_, x_cell, y_cell, r_cell ) )
+    if ( x_cell >= hex_lat_ || y_cell >= hex_lat_ || r_cell >= hex_rad_ )
         return;
 
     dense::Mat< ScalarT, LocalMatrixDim, LocalMatrixDim > A[num_wedges_per_hex_cell] = { 0 };

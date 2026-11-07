@@ -260,6 +260,23 @@ void run_level( const int level, const int repeats, BoundaryConditions bcs, cons
             ya( "ya", dom_f, mask_f ), diff( "diff", dom_f, mask_f ), ydet( "ydet", dom_f, mask_f );
         check( "epsdivdiv", op, u, y0, y, ya0, ya, diff, ydet, repeats, op.warp_path_runs() ? "warp" : "colour", tol );
     }
+    // The per-cell EpsDivDiv paths scatter with atomics and are coloured when
+    // deterministic: the slow path (what the Galerkin-coarsened levels run) and the
+    // stored local matrices.
+    {
+        Eps op( dom_f, coords, radii, bmask_f, k.grid_data(), bcs, false );
+        op.set_force_slow_path( true );
+        VectorQ1Vec< S > y0( "y0", dom_f, mask_f ), y( "y", dom_f, mask_f ), ya0( "ya0", dom_f, mask_f ),
+            ya( "ya", dom_f, mask_f ), diff( "diff", dom_f, mask_f ), ydet( "ydet", dom_f, mask_f );
+        check( "eps slow", op, u, y0, y, ya0, ya, diff, ydet, repeats, "colour", tol );
+    }
+    {
+        Eps op( dom_f, coords, radii, bmask_f, k.grid_data(), bcs, false );
+        op.set_stored_local_matrices( true );
+        VectorQ1Vec< S > y0( "y0", dom_f, mask_f ), y( "y", dom_f, mask_f ), ya0( "ya0", dom_f, mask_f ),
+            ya( "ya", dom_f, mask_f ), diff( "diff", dom_f, mask_f ), ydet( "ydet", dom_f, mask_f );
+        check( "eps stored", op, u, y0, y, ya0, ya, diff, ydet, repeats, "colour", tol );
+    }
     {
         // The diagonal has no warp-owner variant: the coloured slow path.
         Eps op( dom_f, coords, radii, bmask_f, k.grid_data(), bcs, true );

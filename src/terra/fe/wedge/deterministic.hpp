@@ -9,13 +9,16 @@
 // once per parity colour (x, y, r mod 2) of the cell, and a launch skips the cells
 // of the other colours. No two cells of one colour share a node, so each node gets
 // exactly one contribution per launch and the sum is accumulated in colour order:
-// reproducible, at the cost of eight launches over the whole grid (the kernels that
-// take this path are the coarse levels, the mass operators and the grid transfers,
-// all cheap). The warp-owner kernels have their own two-phase scatter (warp_tile.hpp).
+// reproducible. Each launch iterates the cells of its colour only (for_cells): a
+// launch over the whole grid that skips seven eighths of the cells costs as much as
+// the full launch on a GPU, the lanes of a warp wait for the one that works, which
+// made the slow EpsDivDiv path of the Galerkin-coarsened levels eight times slower.
+// The warp-owner kernels have their own two-phase scatter (warp_tile.hpp).
 
 #include <Kokkos_Core.hpp>
 
 #include <cstdlib>
+#include <string>
 
 namespace terra::fe::wedge::det {
 
@@ -70,15 +73,57 @@ KOKKOS_INLINE_FUNCTION bool skip_lat( const int colour, const int x, const int y
     return colour >= 0 && ( ( x & 1 ) | ( ( y & 1 ) << 1 ) ) != colour;
 }
 
-/// Run launch(-1) once, or, when deterministic, launch(c) for every colour c.
+/// Number of indices in [0, n) congruent to `rem` modulo 2^bits.
+inline long long colour_extent( const long long n, const int rem, const int bits = 1 )
+{
+    const long long s = 1 << bits;
+    return n > rem ? ( n - rem + s - 1 ) / s : 0;
+}
+
+/// A cell functor f( subdomain, x, y, r ) over the compact index space of one colour:
+/// index i along x stands for the cell x0 + (i << bits).
 template < typename F >
-void for_each_colour( const bool deterministic, F&& launch, const int bits = 1 )
+struct ColouredCells
+{
+    F   f;
+    int s0, x0, y0, r0, bits;
+
+    KOKKOS_INLINE_FUNCTION void operator()( const int s, const int xi, const int yi, const int ri ) const
+    {
+        f( s0 + s, x0 + ( xi << bits ), y0 + ( yi << bits ), r0 + ( ri << bits ) );
+    }
+};
+
+/// Run f( subdomain, x, y, r ) over the cells of `cells` (a rank-4 MDRangePolicy,
+/// subdomain first), or, when deterministic, once per colour over the cells of that
+/// colour (parity relative to the policy's lower bound), in colour order.
+template < typename Policy, typename F >
+void for_cells( const std::string& name, const Policy& cells, const bool deterministic, const F& f, const int bits = 1 )
 {
     if ( !deterministic )
-        launch( -1 );
-    else
-        for ( int c = 0; c < ( 1 << ( 3 * bits ) ); ++c )
-            launch( c );
+    {
+        Kokkos::parallel_for( name, cells, f );
+        return;
+    }
+    const int  m  = ( 1 << bits ) - 1;
+    const auto lo = cells.m_lower;
+    const auto hi = cells.m_upper;
+    for ( int c = 0; c < ( 1 << ( 3 * bits ) ); ++c )
+    {
+        const int cx = c & m, cy = ( c >> bits ) & m, cr = ( c >> ( 2 * bits ) ) & m;
+        typename Policy::point_type l{}, u{};
+        u[0] = hi[0] - lo[0];
+        u[1] = colour_extent( hi[1] - lo[1], cx, bits );
+        u[2] = colour_extent( hi[2] - lo[2], cy, bits );
+        u[3] = colour_extent( hi[3] - lo[3], cr, bits );
+        if ( u[0] <= 0 || u[1] <= 0 || u[2] <= 0 || u[3] <= 0 )
+            continue;
+        Kokkos::parallel_for(
+            name,
+            Policy( l, u ),
+            ColouredCells< F >{
+                f, int( lo[0] ), int( lo[1] ) + cx, int( lo[2] ) + cy, int( lo[3] ) + cr, bits } );
+    }
 }
 
 } // namespace terra::fe::wedge::det

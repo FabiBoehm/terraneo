@@ -153,22 +153,20 @@ void l2_project_fv_to_fe(
     // the assembly runs once per cell parity (eight launches), so that no two cells of
     // a launch share a node (fe/wedge/deterministic.hpp).
     namespace det = fe::wedge::det;
-    const int ncolours = det::requested() ? 8 : 1;
-    for ( int c = 0; c < ncolours; ++c )
-    {
-    const int colour = det::requested() ? c : -1;
-    Kokkos::parallel_for(
+    det::for_cells(
         "l2_project_fv_to_fe_rhs_assembly",
-        Kokkos::MDRangePolicy(
+        Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >(
             { 0, 1, 1, 1 },
-            { fv_grid.extent( 0 ), fv_grid.extent( 1 ) - 1, fv_grid.extent( 2 ) - 1, fv_grid.extent( 3 ) - 1 } ),
+            { static_cast< long long >( fv_grid.extent( 0 ) ),
+              static_cast< long long >( fv_grid.extent( 1 ) ) - 1,
+              static_cast< long long >( fv_grid.extent( 2 ) ) - 1,
+              static_cast< long long >( fv_grid.extent( 3 ) ) - 1 } ),
+        det::requested(),
         KOKKOS_LAMBDA(
             const int local_subdomain_id, const int hex_cell_x, const int hex_cell_y, const int hex_cell_r ) {
             const auto hex_cell_x_no_gl = hex_cell_x - 1;
             const auto hex_cell_y_no_gl = hex_cell_y - 1;
             const auto hex_cell_r_no_gl = hex_cell_r - 1;
-            if ( det::skip( colour, hex_cell_x_no_gl, hex_cell_y_no_gl, hex_cell_r_no_gl ) )
-                return;
 
             constexpr auto              num_quad_points = fe::wedge::quadrature::quad_felippa_3x2_num_quad_points;
             dense::Vec< ScalarType, 3 > quad_points[num_quad_points];
@@ -209,7 +207,6 @@ void l2_project_fv_to_fe(
             fe::wedge::atomically_add_local_wedge_scalar_coefficients(
                 b_grid, local_subdomain_id, hex_cell_x_no_gl, hex_cell_y_no_gl, hex_cell_r_no_gl, b_local );
         } );
-    }
 
     communication::shell::send_recv( domain, b_grid );
 

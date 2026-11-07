@@ -73,9 +73,7 @@ class RestrictionConstant
         }
 
         // Looping over the coarse grid.
-        det::for_each_colour( det::requested(), [&]( const int c ) {
-            colour_ = c;
-            Kokkos::parallel_for(
+        det::for_cells(
                 "matvec",
                 Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >(
                     { 0, 0, 0, 0 },
@@ -85,8 +83,8 @@ class RestrictionConstant
                         dst_.extent( 2 ),
                         dst_.extent( 3 ),
                     } ),
+                det::requested(),
                 *this );
-        } );
 
         Kokkos::fence();
 
@@ -97,15 +95,9 @@ class RestrictionConstant
         communication::shell::unpack_and_reduce_local_subdomain_boundaries( domain_coarse_, dst_, recv_buffers_ );
     }
 
-    /// Deterministic colouring (fe/wedge/deterministic.hpp): the launch only scatters
-    /// the cells of this parity colour, -1 all of them.
-    int colour_ = -1;
-
     KOKKOS_INLINE_FUNCTION void
         operator()( const int local_subdomain_id, const int x_coarse, const int y_coarse, const int r_coarse ) const
     {
-        if ( det::skip( colour_, x_coarse, y_coarse, r_coarse ) )
-            return;
         const auto x_fine = 2 * x_coarse;
         const auto y_fine = 2 * y_coarse;
         const auto r_fine = 2 * r_coarse;
@@ -197,9 +189,7 @@ class RestrictionVecConstant
         }
 
         // Looping over the coarse grid.
-        det::for_each_colour( det::requested(), [&]( const int c ) {
-            colour_ = c;
-            Kokkos::parallel_for(
+        det::for_cells(
                 "matvec",
                 Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >(
                     { 0, 0, 0, 0 },
@@ -209,8 +199,8 @@ class RestrictionVecConstant
                         dst_.extent( 2 ),
                         dst_.extent( 3 ),
                     } ),
+                det::requested(),
                 *this );
-        } );
 
         Kokkos::fence();
 
@@ -221,15 +211,9 @@ class RestrictionVecConstant
         communication::shell::unpack_and_reduce_local_subdomain_boundaries( domain_coarse_, dst_, recv_buffers_ );
     }
 
-    /// Deterministic colouring (fe/wedge/deterministic.hpp): the launch only scatters
-    /// the cells of this parity colour, -1 all of them.
-    int colour_ = -1;
-
     KOKKOS_INLINE_FUNCTION void
         operator()( const int local_subdomain_id, const int x_coarse, const int y_coarse, const int r_coarse ) const
     {
-        if ( det::skip( colour_, x_coarse, y_coarse, r_coarse ) )
-            return;
         const auto x_fine = 2 * x_coarse;
         const auto y_fine = 2 * y_coarse;
         const auto r_fine = 2 * r_coarse;
