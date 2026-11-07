@@ -950,6 +950,29 @@ class EpsilonDivDivKerngen
         util::Timer          timer_kernel( "epsilon_divdiv_kernel" );
         Kokkos::TeamPolicy<> policy( blocks_, team_size_ );
 
+        // Deterministic request on a configuration without the warp-owner path (a
+        // coarse level, the diagonal, free-slip): the per-cell slow path, coloured
+        // (fe/wedge/deterministic.hpp), so every node gets one contribution per launch.
+        const bool slow_coloured = det_scatter_ && !det;
+        if ( slow_coloured )
+        {
+            const int nsub = local_subdomains_, nl = hex_lat_, nrad = hex_rad_;
+            det::for_each_colour( true, [&]( const int c ) {
+                Kokkos::parallel_for(
+                    "epsilon_divdiv_apply_kernel_slow_coloured",
+                    Kokkos::MDRangePolicy< Kokkos::Rank< 4 > >( { 0, 0, 0, 0 }, { nsub, nl, nl, nrad } ),
+                    KOKKOS_CLASS_LAMBDA( const int s, const int x, const int y, const int r ) {
+                        if ( det::skip( c, x, y, r ) )
+                            return;
+                        const bool at_cmb     = this->has_flag( s, x, y, r, CMB );
+                        const bool at_surface = this->has_flag( s, x, y, r + 1, SURFACE );
+                        this->operator_slow_path( s, 0, 0, 0, 0, 0, 0, x, y, r, at_cmb, at_surface );
+                    } );
+            } );
+        }
+        else
+        {
+
         // The stored matrices serve the matvec; the diagonal is defined by the
         // matrix-free path and falls back to it.
         const bool       stored = ( kernel_path_ == KernelPath::StoredLocalMatrices ) && !diagonal_;
@@ -1040,6 +1063,8 @@ class EpsilonDivDivKerngen
             else
                 tile_buffer ? launch_fast_dirichlet_neumann< false, true >( dn_policy )
                             : launch_fast_dirichlet_neumann< false, false >( dn_policy );
+        }
+
         }
 
         Kokkos::fence();
@@ -1273,7 +1298,7 @@ class EpsilonDivDivKerngen
             const bool at_surface = has_flag( local_subdomain_id, x_cell, y_cell, r_cell_pass + 1, SURFACE );
 
             operator_slow_path(
-                team, local_subdomain_id, x0, y0, r0, tx, ty, tr, x_cell, y_cell, r_cell_pass, at_cmb, at_surface );
+                local_subdomain_id, x0, y0, r0, tx, ty, tr, x_cell, y_cell, r_cell_pass, at_cmb, at_surface );
         }
     }
 
@@ -1402,7 +1427,6 @@ class EpsilonDivDivKerngen
     // ===================== SLOW PATH (epsilon_divdiv_kerngen/path_slow.hpp) =====================
     KOKKOS_INLINE_FUNCTION
     void operator_slow_path(
-        const Team& team,
         const int   local_subdomain_id,
         const int   x0,
         const int   y0,
@@ -1576,7 +1600,7 @@ class EpsilonDivDivKerngen
                 const bool at_cmb     = has_flag( local_subdomain_id, x_cell, y_cell, r_cell_pass, CMB );
                 const bool at_surface = has_flag( local_subdomain_id, x_cell, y_cell, r_cell_pass + 1, SURFACE );
                 operator_slow_path(
-                    team, local_subdomain_id, x0, y0, r0, tx, ty, tr, x_cell, y_cell, r_cell_pass, at_cmb, at_surface );
+                    local_subdomain_id, x0, y0, r0, tx, ty, tr, x_cell, y_cell, r_cell_pass, at_cmb, at_surface );
             }
         }
         else if ( kernel_path_ == KernelPath::FastFreeslip )

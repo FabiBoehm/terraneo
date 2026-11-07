@@ -21,6 +21,7 @@
 
 #include "grid/grid_types.hpp"
 #include "grid/shell/spherical_shell.hpp"
+#include "fe/wedge/deterministic.hpp"
 #include "util/floating_point.hpp"
 
 #include <Kokkos_Core.hpp>
@@ -207,11 +208,7 @@ void zero_perimeter( GridData dst, const Tiling& t )
 /// Whether the environment asks for the deterministic scatter.
 inline bool deterministic_scatter_requested()
 {
-    static const bool v = []() {
-        const char* env = std::getenv( "TERRA_DETERMINISTIC_SCATTER" );
-        return env != nullptr && std::atoi( env ) != 0;
-    }();
-    return v;
+    return det::requested();
 }
 
 /// One device workspace per element type, grown on demand and shared by every

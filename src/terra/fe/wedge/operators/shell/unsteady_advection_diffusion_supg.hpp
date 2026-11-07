@@ -5,6 +5,7 @@
 #include "communication/shell/communication_plan.hpp"
 #include "dense/vec.hpp"
 #include "fe/wedge/integrands.hpp"
+#include "fe/wedge/deterministic.hpp"
 #include "fe/wedge/kernel_helpers.hpp"
 #include "grid/shell/spherical_shell.hpp"
 #include "linalg/operator.hpp"
@@ -301,7 +302,10 @@ class UnsteadyAdvectionDiffusionSUPG
         }
         else
         {
+            det::for_each_colour( det_, [&]( const int c ) {
+            colour_ = c;
             Kokkos::parallel_for( "matvec", grid::shell::local_domain_md_range_policy_cells( domain_ ), *this );
+        } );
         }
         Kokkos::fence();
         timer_kernel.stop();
@@ -661,9 +665,15 @@ class UnsteadyAdvectionDiffusionSUPG
 
     // ------------------------------------------------------------------ per-cell path
 
+    /// Deterministic colouring (fe/wedge/deterministic.hpp): the launch only scatters
+    /// the cells of this parity colour, -1 all of them.
+    int colour_ = -1;
+
     KOKKOS_INLINE_FUNCTION void
         operator()( const int local_subdomain_id, const int x_cell, const int y_cell, const int r_cell ) const
     {
+        if ( det::skip( colour_, x_cell, y_cell, r_cell ) )
+            return;
         // Geometry, quadrature and the local matrices in GeomT (the stored coordinate
         // precision); the fields are read in ScalarT and widened, the result narrowed.
         using T = GeomT;

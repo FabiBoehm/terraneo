@@ -112,7 +112,6 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
 template < typename ScalarT, int VecDim, typename CoordScalarT, typename ArithScalarT, typename MatrixScalarT >
 KOKKOS_INLINE_FUNCTION void
 EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT >::operator_slow_path(
-    const Team& team,
     const int   local_subdomain_id,
     const int   x0,
     const int   y0,
@@ -126,7 +125,6 @@ EpsilonDivDivKerngen< ScalarT, VecDim, CoordScalarT, ArithScalarT, MatrixScalarT
     const bool  at_cmb,
     const bool  at_surface ) const
 {
-    (void) team;
     (void) x0;
     (void) y0;
     (void) r0;

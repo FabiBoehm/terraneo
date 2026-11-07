@@ -4,6 +4,7 @@
 #include "communication/shell/communication.hpp"
 #include "dense/vec.hpp"
 #include "fe/wedge/integrands.hpp"
+#include "fe/wedge/deterministic.hpp"
 #include "fe/wedge/kernel_helpers.hpp"
 #include "fe/wedge/quadrature/quadrature.hpp"
 #include "grid/shell/spherical_shell.hpp"
@@ -87,7 +88,10 @@ class Mass
         src_ = src.grid_data();
         dst_ = dst.grid_data();
 
-        Kokkos::parallel_for( "matvec", grid::shell::local_domain_md_range_policy_cells( domain_ ), *this );
+        det::for_each_colour( det::requested(), [&]( const int c ) {
+            colour_ = c;
+            Kokkos::parallel_for( "matvec", grid::shell::local_domain_md_range_policy_cells( domain_ ), *this );
+        } );
 
         Kokkos::fence();
 
@@ -107,9 +111,15 @@ class Mass
         }
     }
 
+    /// Deterministic colouring (fe/wedge/deterministic.hpp): the launch only scatters
+    /// the cells of this parity colour, -1 all of them.
+    int colour_ = -1;
+
     KOKKOS_INLINE_FUNCTION void
         operator()( const int local_subdomain_id, const int x_cell, const int y_cell, const int r_cell ) const
     {
+        if ( det::skip( colour_, x_cell, y_cell, r_cell ) )
+            return;
         // First all the r-independent stuff.
         // Gather surface points for each wedge.
 

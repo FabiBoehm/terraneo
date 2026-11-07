@@ -1,7 +1,8 @@
-// Run-to-run reproducibility of the warp-owner operators: EpsDivDiv, Gradient,
-// Divergence and the SUPG energy operator, with the atomic scatter (default) and
-// with the two-phase deterministic scatter (TERRA_DETERMINISTIC_SCATTER=1 or
-// set_deterministic_scatter(true)).
+// Run-to-run reproducibility of the operators of the mantle circulation app:
+// EpsDivDiv (matvec and diagonal), Gradient, Divergence, the SUPG energy operator,
+// the mass operators and the constant grid transfers, with the atomic scatter
+// (default) and with the deterministic scatter (TERRA_DETERMINISTIC_SCATTER=1): the
+// two-phase scatter of the warp-owner kernels, cell colouring for the per-cell ones.
 //
 // Every operator is applied to the same input several times; the max norm of the
 // difference to the first apply is reported. With the deterministic scatter it must
@@ -15,7 +16,13 @@
 #include "fe/wedge/integrands.hpp"
 #include "fe/wedge/operators/shell/divergence.hpp"
 #include "fe/wedge/operators/shell/epsilon_divdiv_kerngen.hpp"
+#include "fe/wedge/deterministic.hpp"
 #include "fe/wedge/operators/shell/gradient.hpp"
+#include "fe/wedge/operators/shell/kmass.hpp"
+#include "fe/wedge/operators/shell/mass.hpp"
+#include "fe/wedge/operators/shell/prolongation_constant.hpp"
+#include "fe/wedge/operators/shell/restriction_constant.hpp"
+#include "fe/wedge/operators/shell/vector_mass.hpp"
 #include "fe/wedge/operators/shell/unsteady_advection_diffusion_supg.hpp"
 #include "linalg/vector_q1.hpp"
 #include "terra/grid/grid_types.hpp"
@@ -147,24 +154,31 @@ Row< Op, Src, Dst > run_row( Op& op, const Src& src, Dst& y0, Dst& y, Dst& ya0, 
 /// Both scatters of one operator: report and check.
 template < typename Op, typename Src, typename Dst >
 void check( const char* name, Op& op, const Src& src, Dst& y0, Dst& y, Dst& ya0, Dst& ya, Dst& diff, Dst& ydet,
-            const int repeats, const bool warp_runs, const double tol )
+            const int repeats, const char* path, const double tol )
 {
     using SS   = typename Dst::ScalarType;
     using Comm = linalg::OperatorCommunicationMode;
+    // The deterministic scatter: the environment switch for the coloured per-cell
+    // kernels, the operator's own switch where it has one (the warp-owner kernels).
+    auto set_det = [&]( const bool on ) {
+        fe::wedge::det::set_requested( on );
+        if constexpr ( requires { op.set_deterministic_scatter( on ); } )
+            op.set_deterministic_scatter( on );
+    };
     for ( const auto& [comm, cname] : { std::pair{ Comm::CommunicateAdditively, "comm" }, std::pair{ Comm::SkipCommunication, "nocomm" } } )
     {
-        op.set_deterministic_scatter( false );
+        set_det( false );
         const auto a = run_row( op, src, y0, y, ya0, ya, diff, repeats, comm );
         linalg::assign( ydet, y0 ); // the atomic result
-        op.set_deterministic_scatter( true );
+        set_det( true );
         const auto d = run_row( op, src, y0, y, ya0, ya, diff, repeats, comm );
         linalg::lincomb( ydet, { SS( 1 ), SS( -1 ) }, { ydet, y0 } );
         const double cross = static_cast< double >( linalg::norm_inf( ydet ) ) / d.ref_inf;
 
         const bool det_ok   = ( d.rep_diff == 0.0 ) && ( d.add_diff == 0.0 );
         const bool cross_ok = std::isfinite( cross ) && cross <= tol;
-        const bool ok       = !warp_runs || ( det_ok && cross_ok );
-        std::cout << "    " << std::setw( 10 ) << name << " " << std::setw( 6 ) << cname << ( warp_runs ? "  warp" : "  cell" )
+        const bool ok       = det_ok && cross_ok;
+        std::cout << "    " << std::setw( 10 ) << name << " " << std::setw( 6 ) << cname << "  " << std::setw( 6 ) << path
                   << std::scientific << std::setprecision( 2 ) << "   atomic: rep " << a.rep_diff / a.ref_inf << " add "
                   << a.add_diff / a.ref_inf << std::fixed << std::setprecision( 1 ) << " " << std::setw( 8 ) << a.us << " us"
                   << std::scientific << std::setprecision( 2 ) << "   two-phase: rep " << d.rep_diff / d.ref_inf << " add "
@@ -232,26 +246,67 @@ void run_level( const int level, const int repeats, BoundaryConditions bcs, cons
             op.set_tile_scatter( 2 );
         VectorQ1Vec< S > y0( "y0", dom_f, mask_f ), y( "y", dom_f, mask_f ), ya0( "ya0", dom_f, mask_f ),
             ya( "ya", dom_f, mask_f ), diff( "diff", dom_f, mask_f ), ydet( "ydet", dom_f, mask_f );
-        check( "epsdivdiv", op, u, y0, y, ya0, ya, diff, ydet, repeats, op.warp_path_runs(), tol );
+        check( "epsdivdiv", op, u, y0, y, ya0, ya, diff, ydet, repeats, op.warp_path_runs() ? "warp" : "colour", tol );
+    }
+    {
+        // The diagonal has no warp-owner variant: the coloured slow path.
+        Eps op( dom_f, coords, radii, bmask_f, k.grid_data(), bcs, true );
+        op.set_hourglass_coefficient( 0.3 );
+        VectorQ1Vec< S > y0( "y0", dom_f, mask_f ), y( "y", dom_f, mask_f ), ya0( "ya0", dom_f, mask_f ),
+            ya( "ya", dom_f, mask_f ), diff( "diff", dom_f, mask_f ), ydet( "ydet", dom_f, mask_f );
+        check( "eps diag", op, u, y0, y, ya0, ya, diff, ydet, repeats, "colour", tol );
     }
     {
         Grad op( dom_f, dom_c, coords, radii, bmask_f, bcs );
         VectorQ1Vec< S > y0( "y0", dom_f, mask_f ), y( "y", dom_f, mask_f ), ya0( "ya0", dom_f, mask_f ),
             ya( "ya", dom_f, mask_f ), diff( "diff", dom_f, mask_f ), ydet( "ydet", dom_f, mask_f );
-        check( "gradient", op, p, y0, y, ya0, ya, diff, ydet, repeats, op.fast_path_runs(), tol );
+        check( "gradient", op, p, y0, y, ya0, ya, diff, ydet, repeats, op.fast_path_runs() ? "warp" : "colour", tol );
     }
     {
         Div op( dom_f, dom_c, coords, radii, bmask_f, bcs );
         VectorQ1Scalar< S > y0( "y0", dom_c, mask_c ), y( "y", dom_c, mask_c ), ya0( "ya0", dom_c, mask_c ),
             ya( "ya", dom_c, mask_c ), diff( "diff", dom_c, mask_c ), ydet( "ydet", dom_c, mask_c );
-        check( "divergence", op, u, y0, y, ya0, ya, diff, ydet, repeats, op.fast_path_runs(), tol );
+        check( "divergence", op, u, y0, y, ya0, ya, diff, ydet, repeats, op.fast_path_runs() ? "warp" : "colour", tol );
     }
     {
         Supg op( dom_f, coords, radii, bmask_f, u, util::narrow< S >( 1e-3 ), util::narrow< S >( 1e-2 ), true, false,
                  util::narrow< S >( 1.5 ), false );
         VectorQ1Scalar< S > y0( "y0", dom_f, mask_f ), y( "y", dom_f, mask_f ), ya0( "ya0", dom_f, mask_f ),
             ya( "ya", dom_f, mask_f ), diff( "diff", dom_f, mask_f ), ydet( "ydet", dom_f, mask_f );
-        check( "supg", op, T, y0, y, ya0, ya, diff, ydet, repeats, op.fast_path_runs(), tol );
+        check( "supg", op, T, y0, y, ya0, ya, diff, ydet, repeats, op.fast_path_runs() ? "warp" : "colour", tol );
+    }
+    // The per-cell kernels of the app: mass operators and the constant grid transfers.
+    {
+        fe::wedge::operators::shell::Mass< S > op( dom_f, coords, radii );
+        VectorQ1Scalar< S > y0( "y0", dom_f, mask_f ), y( "y", dom_f, mask_f ), ya0( "ya0", dom_f, mask_f ),
+            ya( "ya", dom_f, mask_f ), diff( "diff", dom_f, mask_f ), ydet( "ydet", dom_f, mask_f );
+        check( "mass", op, T, y0, y, ya0, ya, diff, ydet, repeats, "colour", tol );
+    }
+    {
+        fe::wedge::operators::shell::KMass< S > op( dom_f, coords, radii, k.grid_data(), false );
+        VectorQ1Scalar< S > y0( "y0", dom_f, mask_f ), y( "y", dom_f, mask_f ), ya0( "ya0", dom_f, mask_f ),
+            ya( "ya", dom_f, mask_f ), diff( "diff", dom_f, mask_f ), ydet( "ydet", dom_f, mask_f );
+        check( "kmass", op, T, y0, y, ya0, ya, diff, ydet, repeats, "colour", tol );
+    }
+    {
+        fe::wedge::operators::shell::VectorMass< S > op( dom_f, coords, radii, false );
+        VectorQ1Vec< S > y0( "y0", dom_f, mask_f ), y( "y", dom_f, mask_f ), ya0( "ya0", dom_f, mask_f ),
+            ya( "ya", dom_f, mask_f ), diff( "diff", dom_f, mask_f ), ydet( "ydet", dom_f, mask_f );
+        check( "vecmass", op, u, y0, y, ya0, ya, diff, ydet, repeats, "colour", tol );
+    }
+    VectorQ1Vec< S > uc( "uc", dom_c, mask_c );
+    {
+        fe::wedge::operators::shell::RestrictionVecConstant< S > op( dom_c );
+        VectorQ1Vec< S > y0( "y0", dom_c, mask_c ), y( "y", dom_c, mask_c ), ya0( "ya0", dom_c, mask_c ),
+            ya( "ya", dom_c, mask_c ), diff( "diff", dom_c, mask_c ), ydet( "ydet", dom_c, mask_c );
+        check( "restrict", op, u, y0, y, ya0, ya, diff, ydet, repeats, "colour", tol );
+        linalg::assign( uc, y0 );
+    }
+    {
+        fe::wedge::operators::shell::ProlongationVecConstant< S > op;
+        VectorQ1Vec< S > y0( "y0", dom_f, mask_f ), y( "y", dom_f, mask_f ), ya0( "ya0", dom_f, mask_f ),
+            ya( "ya", dom_f, mask_f ), diff( "diff", dom_f, mask_f ), ydet( "ydet", dom_f, mask_f );
+        check( "prolong", op, uc, y0, y, ya0, ya, diff, ydet, repeats, "colour", tol );
     }
 }
 

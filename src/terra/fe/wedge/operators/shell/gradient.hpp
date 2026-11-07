@@ -5,6 +5,7 @@
 #include "communication/shell/communication_plan.hpp"
 #include "dense/vec.hpp"
 #include "fe/wedge/integrands.hpp"
+#include "fe/wedge/deterministic.hpp"
 #include "fe/wedge/kernel_helpers.hpp"
 #include "grid/shell/spherical_shell.hpp"
 #include "linalg/operator.hpp"
@@ -210,7 +211,10 @@ class Gradient
         }
         else
         {
+            det::for_each_colour( det_, [&]( const int c ) {
+            colour_ = c;
             Kokkos::parallel_for( "matvec", grid::shell::local_domain_md_range_policy_cells( domain_fine_ ), *this );
+        } );
         }
         Kokkos::fence();
         timer_kernel.stop();
@@ -459,9 +463,15 @@ class Gradient
 
     // ------------------------------------------------------------------ per-cell path
 
+    /// Deterministic colouring (fe/wedge/deterministic.hpp): the launch only scatters
+    /// the cells of this parity colour, -1 all of them.
+    int colour_ = -1;
+
     KOKKOS_INLINE_FUNCTION void
         operator()( const int local_subdomain_id, const int x_cell, const int y_cell, const int r_cell ) const
     {
+        if ( det::skip( colour_, x_cell, y_cell, r_cell ) )
+            return;
         // Gather surface points for each wedge.
         // Geometry and quadrature in GeomT (the stored coordinate precision).
         dense::Vec< GeomT, 3 > wedge_phy_surf[num_wedges_per_hex_cell][num_nodes_per_wedge_surface] = {};

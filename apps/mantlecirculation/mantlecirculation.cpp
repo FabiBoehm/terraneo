@@ -160,13 +160,24 @@ struct RHSVelocityInterpolator
     }
 };
 
+/// Stateless hash-based uniform number in [0, 1) (splitmix64 finalizer): depends on
+/// (seed, idx) only, so the initial noise is reproducible run to run on any backend
+/// (Kokkos' random pool hands out its states in thread-request order and is not).
+KOKKOS_INLINE_FUNCTION double hash_to_unit( const uint64_t seed, const uint64_t idx )
+{
+    uint64_t z = seed + 0x9E3779B97F4A7C15ULL * ( idx + 1 );
+    z          = ( z ^ ( z >> 30 ) ) * 0xBF58476D1CE4E5B9ULL;
+    z          = ( z ^ ( z >> 27 ) ) * 0x94D049BB133111EBULL;
+    z ^= z >> 31;
+    return double( z >> 11 ) * 0x1.0p-53;
+}
+
 struct NoiseAdder
 {
     Grid3DDataVec< ScalarType, 3 >              grid_;
     Grid2DDataScalar< ScalarType >              radii_;
     Grid4DDataScalar< ScalarType >              data_T_;
     Grid4DDataScalar< grid::NodeOwnershipFlag > mask_;
-    Kokkos::Random_XorShift64_Pool<>            rand_pool_;
 
     NoiseAdder(
         const Grid3DDataVec< ScalarType, 3 >&              grid,
@@ -177,16 +188,16 @@ struct NoiseAdder
     , radii_( radii )
     , data_T_( data_T )
     , mask_( mask )
-    , rand_pool_( 12345 )
     {}
 
     KOKKOS_INLINE_FUNCTION
     void operator()( const int local_subdomain_id, const int x, const int y, const int r ) const
     {
-        auto generator = rand_pool_.get_state();
-
+        const uint64_t idx = ( ( uint64_t( local_subdomain_id ) * data_T_.extent( 1 ) + x ) * data_T_.extent( 2 ) + y ) *
+                                 data_T_.extent( 3 ) +
+                             r;
         const ScalarType eps          = 1e-1;
-        const auto       perturbation = eps * ( 2.0 * generator.drand() - 1.0 );
+        const auto       perturbation = eps * ( 2.0 * hash_to_unit( 12345, idx ) - 1.0 );
 
         const auto process_ownes_point =
             util::has_flag( mask_( local_subdomain_id, x, y, r ), grid::NodeOwnershipFlag::OWNED );
@@ -200,8 +211,6 @@ struct NoiseAdder
         {
             data_T_( local_subdomain_id, x, y, r ) = 0.0;
         }
-
-        rand_pool_.free_state( generator );
     }
 };
 
@@ -231,17 +240,15 @@ struct FVInitialConditionInterpolator
 /// so no ownership mask is needed.
 struct FVNoiseAdder
 {
-    Grid4DDataScalar< ScalarType >   data_T_;
-    Kokkos::Random_XorShift64_Pool<> rand_pool_;
+    Grid4DDataScalar< ScalarType > data_T_;
 
     KOKKOS_INLINE_FUNCTION
     void operator()( const int id, const int x, const int y, const int r ) const
     {
-        auto             gen          = rand_pool_.get_state();
+        const uint64_t idx = ( ( uint64_t( id ) * data_T_.extent( 1 ) + x ) * data_T_.extent( 2 ) + y ) * data_T_.extent( 3 ) + r;
         const ScalarType eps          = 1e-1;
-        const ScalarType perturbation = eps * ( 2.0 * gen.drand() - 1.0 );
+        const ScalarType perturbation = eps * ( 2.0 * hash_to_unit( 12345, idx ) - 1.0 );
         data_T_( id, x, y, r )        = Kokkos::clamp( data_T_( id, x, y, r ) + perturbation, 0.0, 1.0 );
-        rand_pool_.free_state( gen );
     }
 };
 
@@ -809,7 +816,7 @@ Result<> run( const Parameters& prm )
     Kokkos::parallel_for(
         "adding noise to temp (FCT)",
         grid::shell::local_domain_md_range_policy_cells_fv_skip_ghost_layers( domains[velocity_level] ),
-        FVNoiseAdder{ T_fct.grid_data(), Kokkos::Random_XorShift64_Pool<>( 12345 ) } );
+        FVNoiseAdder{ T_fct.grid_data() } );
 
     Kokkos::fence();
 
