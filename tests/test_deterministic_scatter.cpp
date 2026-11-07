@@ -112,7 +112,11 @@ Row< Op, Src, Dst > run_row( Op& op, const Src& src, Dst& y0, Dst& y, Dst& ya0, 
 {
     using SS = typename Dst::ScalarType;
     Row< Op, Src, Dst > row;
-    op.set_operator_apply_and_communication_modes( linalg::OperatorApplyMode::Replace, comm );
+    // The mass operators and the grid transfers take their modes in the constructor
+    // (Replace, additive communication): no Add arm for them.
+    constexpr bool has_modes = requires { op.set_operator_apply_and_communication_modes( linalg::OperatorApplyMode::Replace, comm ); };
+    if constexpr ( has_modes )
+        op.set_operator_apply_and_communication_modes( linalg::OperatorApplyMode::Replace, comm );
     linalg::apply( op, src, y0 );
     Kokkos::fence();
     row.ref_inf = std::max( static_cast< double >( linalg::norm_inf( y0 ) ), 1e-300 );
@@ -125,21 +129,25 @@ Row< Op, Src, Dst > run_row( Op& op, const Src& src, Dst& y0, Dst& y, Dst& ya0, 
         row.rep_diff = std::max( row.rep_diff, static_cast< double >( linalg::norm_inf( diff ) ) );
     }
     // Add mode onto the same prefilled vector every time.
-    op.set_operator_apply_and_communication_modes( linalg::OperatorApplyMode::Add, comm );
-    linalg::assign( ya0, y0 );
-    linalg::apply( op, src, ya0 );
-    Kokkos::fence();
-    for ( int i = 1; i < repeats; ++i )
+    if constexpr ( has_modes )
     {
-        linalg::assign( ya, y0 );
-        linalg::apply( op, src, ya );
+        op.set_operator_apply_and_communication_modes( linalg::OperatorApplyMode::Add, comm );
+        linalg::assign( ya0, y0 );
+        linalg::apply( op, src, ya0 );
         Kokkos::fence();
-        linalg::assign( diff, ya );
-        linalg::lincomb( diff, { SS( 1 ), SS( -1 ) }, { diff, ya0 } );
-        row.add_diff = std::max( row.add_diff, static_cast< double >( linalg::norm_inf( diff ) ) );
+        for ( int i = 1; i < repeats; ++i )
+        {
+            linalg::assign( ya, y0 );
+            linalg::apply( op, src, ya );
+            Kokkos::fence();
+            linalg::assign( diff, ya );
+            linalg::lincomb( diff, { SS( 1 ), SS( -1 ) }, { diff, ya0 } );
+            row.add_diff = std::max( row.add_diff, static_cast< double >( linalg::norm_inf( diff ) ) );
+        }
     }
     // Time the Replace apply.
-    op.set_operator_apply_and_communication_modes( linalg::OperatorApplyMode::Replace, comm );
+    if constexpr ( has_modes )
+        op.set_operator_apply_and_communication_modes( linalg::OperatorApplyMode::Replace, comm );
     linalg::apply( op, src, y );
     Kokkos::fence();
     Kokkos::Timer timer;
@@ -165,8 +173,12 @@ void check( const char* name, Op& op, const Src& src, Dst& y0, Dst& y, Dst& ya0,
         if constexpr ( requires { op.set_deterministic_scatter( on ); } )
             op.set_deterministic_scatter( on );
     };
-    for ( const auto& [comm, cname] : { std::pair{ Comm::CommunicateAdditively, "comm" }, std::pair{ Comm::SkipCommunication, "nocomm" } } )
+    constexpr bool has_modes =
+        requires { op.set_operator_apply_and_communication_modes( linalg::OperatorApplyMode::Replace, Comm::SkipCommunication ); };
+    const std::pair< Comm, const char* > arms[] = { { Comm::CommunicateAdditively, "comm" }, { Comm::SkipCommunication, "nocomm" } };
+    for ( int arm = 0; arm < ( has_modes ? 2 : 1 ); ++arm )
     {
+        const auto& [comm, cname] = arms[arm];
         set_det( false );
         const auto a = run_row( op, src, y0, y, ya0, ya, diff, repeats, comm );
         linalg::assign( ydet, y0 ); // the atomic result
