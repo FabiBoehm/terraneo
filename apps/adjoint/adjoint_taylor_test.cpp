@@ -444,6 +444,7 @@ int run( const Parameters& prm )
     fopt.restart                     = restart;
     fopt.max_iterations              = 500;
     fopt.relative_residual_tolerance = prm.stokes_tol;
+    fopt.absolute_residual_tolerance = 1e-30; // the default 1e-6 stops the (tiny) adjoint Stokes solves at once
     linalg::solvers::FGMRES< Stokes, PrecStokes > fgmres( fgmres_tmp, fopt, table, prec_stokes );
 
     VectorW1IsoW2W1< Real > up( "up", dom, domains[pl], owner[vl], owner[pl] );
