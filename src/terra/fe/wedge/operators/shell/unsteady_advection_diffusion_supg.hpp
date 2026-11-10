@@ -160,6 +160,11 @@ class UnsteadyAdvectionDiffusionSUPG
     /// the explicit ∇·(ν_h ∇T^n) RHS contribution).
     bool    supg_enabled_ = true;
 
+    /// When true, apply the transpose of the assembled operator, (M + A)^T. Element by element this is the transpose
+    /// of the local 6x6 matrices; the mass, diffusion and boundary masking are symmetric, so only advection and the
+    /// streamline term change. Used for the discrete adjoint of the implicit energy step.
+    bool    transposed_ = false;
+
     linalg::OperatorApplyMode         operator_apply_mode_;
     linalg::OperatorCommunicationMode operator_communication_mode_;
 
@@ -211,6 +216,10 @@ class UnsteadyAdvectionDiffusionSUPG
     /// pure Galerkin advection-diffusion.
     void set_supg_enabled( bool on ) { supg_enabled_ = on; }
     bool supg_enabled() const { return supg_enabled_; }
+
+    /// Apply (M + A)^T instead of (M + A) (discrete adjoint of the energy step).
+    void set_transposed( bool on ) { transposed_ = on; }
+    bool transposed() const { return transposed_; }
 
     void apply_impl( const SrcVectorType& src, DstVectorType& dst )
     {
@@ -424,8 +433,16 @@ class UnsteadyAdvectionDiffusionSUPG
 
         dense::Vec< ScalarT, 6 > dst[num_wedges_per_hex_cell];
 
-        dst[0] = ( M[0] + A[0] ) * src[0];
-        dst[1] = ( M[1] + A[1] ) * src[1];
+        if ( transposed_ )
+        {
+            dst[0] = ( M[0] + A[0] ).transposed() * src[0];
+            dst[1] = ( M[1] + A[1] ).transposed() * src[1];
+        }
+        else
+        {
+            dst[0] = ( M[0] + A[0] ) * src[0];
+            dst[1] = ( M[1] + A[1] ) * src[1];
+        }
 
         atomically_add_local_wedge_scalar_coefficients( dst_, local_subdomain_id, x_cell, y_cell, r_cell, dst );
     }

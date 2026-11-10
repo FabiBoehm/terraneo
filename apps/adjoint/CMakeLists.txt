@@ -1,0 +1,7 @@
+add_executable(adjoint_taylor_test adjoint_taylor_test.cpp)
+if (MPI_FOUND)
+    target_link_libraries(adjoint_taylor_test terra MPI::MPI_CXX)
+else ()
+    target_link_libraries(adjoint_taylor_test terra)
+endif ()
+target_include_directories(adjoint_taylor_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
