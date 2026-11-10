@@ -41,6 +41,7 @@
 #include "fe/wedge/operators/shell/restriction_constant.hpp"
 #include "fe/wedge/operators/shell/unsteady_advection_diffusion_supg.hpp"
 #include "fe/wedge/operators/shell/vector_mass.hpp"
+#include "communication/shell/communication.hpp"
 #include "grid/shell/bit_masks.hpp"
 #include "linalg/solvers/block_preconditioner_2x2.hpp"
 #include "linalg/solvers/fgmres.hpp"
@@ -98,6 +99,8 @@ struct Parameters
     std::string dump_dir;          // if set: write fields for visualisation (raw float64, one file per field)
     int    dump_every     = 20;    // snapshot interval in time steps
     int    taylor         = 1;     // run the Taylor test
+    int    adjoint_stokes = 0;     // 1: include the buoyancy feedback (adjoint Stokes solve per step)
+    int    supg           = 1;     // 0: pure Galerkin energy step (then the coupled adjoint is exact)
 };
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -190,6 +193,126 @@ void divide_entries( const DistributedDomain& domain, VectorW1Scalar< Real >& a,
     Kokkos::parallel_for(
         "divide_entries", local_domain_md_range_policy_nodes( domain ),
         KOKKOS_LAMBDA( int s, int x, int y, int r ) { d( s, x, y, r ) /= m( s, x, y, r ); } );
+    Kokkos::fence();
+}
+
+namespace terra::fe::wedge::operators::shell {
+/// Velocity sensitivity of one implicit energy step, w = -(d r / d u)^T y, with r = (M + A(u)) T^{n+1} - M T^n the
+/// step residual on the interior rows and y the adjoint of that step (zero on the boundary). Per quadrature point
+///   y^T A(u) T = dt * w det [ y (u . grad T) + tau (u . grad y)(u . grad T) ]   (+ diffusion, independent of u),
+/// so d/d u_{k,d} = dt w det psi_k [ y d_d T + tau ( d_d y (u . grad T) + (u . grad y) d_d T ) ].
+/// tau is evaluated exactly as in UnsteadyAdvectionDiffusionSUPG but held fixed (its own u-dependence is dropped).
+struct VelocitySensitivity
+{
+    grid::Grid3DDataVec< Real, 3 >  grid_;
+    grid::Grid2DDataScalar< Real >  radii_;
+    grid::Grid4DDataScalar< Real >  y_, T_;
+    grid::Grid4DDataVec< Real, 3 >  vel_, w_;
+    Real                            dt_, kappa_;
+    bool                            supg_;
+
+    KOKKOS_INLINE_FUNCTION void operator()( const int sd, const int x_cell, const int y_cell, const int r_cell ) const
+    {
+        dense::Vec< Real, 3 > surf[num_wedges_per_hex_cell][num_nodes_per_wedge_surface] = {};
+        wedge_surface_physical_coords( surf, grid_, sd, x_cell, y_cell );
+        const Real r_1 = radii_( sd, r_cell ), r_2 = radii_( sd, r_cell + 1 );
+
+        constexpr auto nq = quadrature::quad_felippa_3x2_num_quad_points;
+        dense::Vec< Real, 3 > qp[nq];
+        Real                  qw[nq];
+        quadrature::quad_felippa_3x2_quad_points( qp );
+        quadrature::quad_felippa_3x2_quad_weights( qw );
+
+        dense::Vec< Real, 6 > yc[num_wedges_per_hex_cell], tc[num_wedges_per_hex_cell], vc[3][num_wedges_per_hex_cell];
+        extract_local_wedge_scalar_coefficients( yc, sd, x_cell, y_cell, r_cell, y_ );
+        extract_local_wedge_scalar_coefficients( tc, sd, x_cell, y_cell, r_cell, T_ );
+        for ( int d = 0; d < 3; ++d )
+            extract_local_wedge_vector_coefficients( vc[d], sd, x_cell, y_cell, r_cell, d, vel_ );
+
+        // tau per wedge, identical to the forward operator
+        const Real h = r_2 - r_1;
+        Real       tau[num_wedges_per_hex_cell];
+        for ( int wd = 0; wd < num_wedges_per_hex_cell; ++wd )
+        {
+            Real ta = 0, wa = 0;
+            for ( int q = 0; q < nq; ++q )
+            {
+                dense::Vec< Real, 3 > uq;
+                for ( int i = 0; i < num_nodes_per_wedge; ++i )
+                    for ( int d = 0; d < 3; ++d )
+                        uq( d ) += vc[d][wd]( i ) * shape( i, qp[q] );
+                ta += supg_tau< Real >( uq.norm(), kappa_, h, 1e-08 ) * qw[q];
+                wa += qw[q];
+            }
+            tau[wd] = supg_ ? ( ( wa > 0 ) ? ta / wa : Real( 0 ) ) : Real( 0 );
+        }
+
+        dense::Vec< Real, 6 > out[3][num_wedges_per_hex_cell] = {};
+        for ( int q = 0; q < nq; ++q )
+            for ( int wd = 0; wd < num_wedges_per_hex_cell; ++wd )
+            {
+                const auto J    = jac( surf[wd], r_1, r_2, qp[q] );
+                const auto det  = Kokkos::abs( J.det() );
+                const auto Jit  = J.inv().transposed();
+                dense::Vec< Real, 3 > uq, gy, gT;
+                Real                  yq = 0;
+                for ( int i = 0; i < num_nodes_per_wedge; ++i )
+                {
+                    const Real psi = shape( i, qp[q] );
+                    const auto g   = Jit * grad_shape( i, qp[q] );
+                    yq += yc[wd]( i ) * psi;
+                    for ( int d = 0; d < 3; ++d )
+                    {
+                        uq( d ) += vc[d][wd]( i ) * psi;
+                        gy( d ) += yc[wd]( i ) * g( d );
+                        gT( d ) += tc[wd]( i ) * g( d );
+                    }
+                }
+                const Real ugT = uq.dot( gT ), ugy = uq.dot( gy );
+                const Real f   = -dt_ * qw[q] * det;
+                for ( int k = 0; k < num_nodes_per_wedge; ++k )
+                {
+                    const Real psi = shape( k, qp[q] );
+                    for ( int d = 0; d < 3; ++d )
+                        out[d][wd]( k ) += f * psi * ( yq * gT( d ) + tau[wd] * ( gy( d ) * ugT + ugy * gT( d ) ) );
+                }
+            }
+        for ( int d = 0; d < 3; ++d )
+            atomically_add_local_wedge_vector_coefficients( w_, sd, x_cell, y_cell, r_cell, d, out[d] );
+    }
+};
+} // namespace terra::fe::wedge::operators::shell
+
+/// w <- -(d r/d u)^T y for one energy step (assembled and exchanged, so every node copy holds the full sum).
+void velocity_sensitivity( const DistributedDomain& domain, const Grid3DDataVec< Real, 3 >& coords,
+                           const Grid2DDataScalar< Real >& radii, const VectorW1Scalar< Real >& y,
+                           const VectorW1Scalar< Real >& T_new, const VectorW1Vec< Real >& vel, VectorW1Vec< Real >& w,
+                           Real dt, Real kappa, bool supg )
+{
+    linalg::assign( w, 0.0 );
+    fe::wedge::operators::shell::VelocitySensitivity k{ coords, radii, y.grid_data(), T_new.grid_data(), vel.grid_data(),
+                                                         w.grid_data(), dt, kappa, supg };
+    Kokkos::parallel_for( "velocity_sensitivity", grid::shell::local_domain_md_range_policy_cells( domain ), k );
+    Kokkos::fence();
+    communication::shell::SubdomainNeighborhoodSendRecvBuffer< Real, 3 > sb( domain ), rb( domain );
+    communication::shell::pack_send_and_recv_local_subdomain_boundaries( domain, w.grid_data(), sb, rb );
+    communication::shell::unpack_and_reduce_local_subdomain_boundaries( domain, w.grid_data(), rb );
+    Kokkos::fence();
+}
+
+/// out_j <- Ra r_hat_j . v_j  (transpose of the buoyancy map T -> Ra T r_hat, applied to a velocity dual vector).
+void radial_dot( const DistributedDomain& domain, const Grid3DDataVec< Real, 3 >& coords, const VectorW1Vec< Real >& v,
+                 VectorW1Scalar< Real >& out, Real Ra )
+{
+    auto vv = v.grid_data();
+    auto o  = out.grid_data();
+    Kokkos::parallel_for(
+        "radial_dot", local_domain_md_range_policy_nodes( domain ), KOKKOS_LAMBDA( int s, int x, int y, int r ) {
+            Real acc = 0;
+            for ( int d = 0; d < 3; ++d )
+                acc += coords( s, x, y, d ) * vv( s, x, y, r, d );
+            o( s, x, y, r ) = Ra * acc;
+        } );
     Kokkos::fence();
 }
 
@@ -345,6 +468,9 @@ int run( const Parameters& prm )
     Energy E_neu( dom, coords[vl], radii[vl], bmask[vl], vel, prm.kappa, prm.dt, false );          // no BC rows
     Energy E_neu_diag( dom, coords[vl], radii[vl], bmask[vl], vel, prm.kappa, prm.dt, false, true ); // diag
     Mass   M( dom, coords[vl], radii[vl], false );
+    E.set_supg_enabled( prm.supg != 0 );
+    E_neu.set_supg_enabled( prm.supg != 0 );
+    E_neu_diag.set_supg_enabled( prm.supg != 0 );
 
     VectorW1Scalar< Real > g_bc( "g_bc", dom, owner[vl] ), rhs( "rhs", dom, owner[vl] ), tmp( "tmp", dom, owner[vl] );
     temperature_boundary_values( g_bc, bmask[vl] );
@@ -365,7 +491,11 @@ int run( const Parameters& prm )
 
     /// lambda <- M L^-T lambda with Dirichlet entries removed (one step of the discrete adjoint).
     VectorW1Scalar< Real > y( "y", dom, owner[vl] );
-    auto adjoint_step = [&]( VectorW1Scalar< Real >& lambda ) {
+    VectorW1Vec< Real >    w_sens( "w_sens", dom, owner[vl] ), Mphi( "Mphi", dom, owner[vl] );
+    VectorW1Scalar< Real > feedback( "feedback", dom, owner[vl] );
+    /// One backward step n: lambda^n = M y + [adjoint Stokes feedback], y = L_n^{-T} lambda^{n+1}.
+    /// T_new = T^{n+1}; vel must hold u^n.
+    auto adjoint_step = [&]( VectorW1Scalar< Real >& lambda, const VectorW1Scalar< Real >& T_new ) {
         zero_on_boundary( lambda, bmask[vl] );
         E.set_transposed( true );
         linalg::assign( y, 0.0 );
@@ -373,6 +503,21 @@ int run( const Parameters& prm )
         E.set_transposed( false );
         zero_on_boundary( y, bmask[vl] );
         linalg::apply( M, y, lambda );
+        if ( prm.adjoint_stokes )
+        {
+            // w = -(d r/d u^n)^T y ; adjoint Stokes K phi = [w, 0] (K symmetric, u = 0 rows zeroed) ;
+            // lambda += F^T phi with F T = Z Mu (Ra T r_hat).
+            velocity_sensitivity( dom, coords[vl], radii[vl], y, T_new, vel, w_sens, prm.dt, prm.kappa, prm.supg != 0 );
+            linalg::assign( f_stokes.block_1(), w_sens );
+            linalg::assign( f_stokes.block_2(), 0.0 );
+            fe::strong_algebraic_homogeneous_velocity_dirichlet_enforcement_stokes_like( f_stokes, bmask[vl], BOUNDARY );
+            linalg::assign( up, 0.0 );
+            linalg::solvers::solve( fgmres, K, up, f_stokes );
+            kernels::common::assign_masked_else_keep_old( up.block_1().grid_data(), Real( 0 ), bmask[vl], BOUNDARY );
+            linalg::apply( Mu, up.block_1(), Mphi );
+            radial_dot( dom, coords[vl], Mphi, feedback, prm.Ra );
+            linalg::lincomb( lambda, { 1.0, 1.0 }, { lambda, feedback } );
+        }
         zero_on_boundary( lambda, bmask[vl] );
         table->clear();
     };
@@ -380,8 +525,11 @@ int run( const Parameters& prm )
     // --- storage of the forward trajectory ----------------------------------------------------------------------
     const int                             N = prm.steps;
     std::vector< VectorW1Vec< Real > >    u_store;
+    std::vector< VectorW1Scalar< Real > > T_store; // T^0..T^N (needed by the coupled adjoint)
     for ( int n = 0; n < N; ++n )
         u_store.emplace_back( "u" + std::to_string( n ), dom, owner[vl] );
+    for ( int n = 0; n <= N; ++n )
+        T_store.emplace_back( "Ts" + std::to_string( n ), dom, owner[vl] );
 
     /// Runs the forward model from T0 (T0 is overwritten with T^N). store: keep the velocities in u_store.
     /// frozen: do not solve Stokes, use u_store (filled by an earlier stored run) instead.
@@ -394,11 +542,16 @@ int run( const Parameters& prm )
             else
                 solve_stokes( T, vel ); // u^n = S(T^n)
             if ( store )
+            {
                 linalg::assign( u_store[n], vel );
+                linalg::assign( T_store[n], T );
+            }
             if ( snapshot && n % prm.dump_every == 0 )
                 snapshot( n, T, vel );
             energy_step( T ); // T^{n+1} = E(u^n) T^n
         }
+        if ( store )
+            linalg::assign( T_store[N], T );
         if ( snapshot )
             snapshot( N, T, vel );
     };
@@ -482,7 +635,7 @@ int run( const Parameters& prm )
     for ( int n = N - 1; n >= 0; --n )
     {
         linalg::assign( vel, u_store[n] );
-        adjoint_step( lam );
+        adjoint_step( lam, T_store[n + 1] );
         if ( n % prm.dump_every == 0 )
             dump_dual( "adj_" + std::to_string( n ), lam );
     }
@@ -508,6 +661,8 @@ int run( const Parameters& prm )
     util::logroot << "J(T^0) = " << J0 << ",  g . dT = " << gdT << ",  |g|_inf = " << linalg::norm_inf( lam ) << "\n";
 
     // 4) Taylor remainder test
+    util::logroot << "Adjoint: " << ( prm.adjoint_stokes ? "with adjoint Stokes (buoyancy feedback)" : "velocity held fixed" )
+                  << ", energy step " << ( prm.supg ? "SUPG (tau held fixed in the adjoint)" : "Galerkin" ) << "\n";
     util::logroot << "Taylor test, " << ( prm.frozen ? "perturbed runs reuse the base velocities (exact adjoint)"
                                                       : "perturbed runs re-solve Stokes (adjoint ignores buoyancy)" )
                   << "\n";
@@ -557,6 +712,9 @@ int main( int argc, char** argv )
     util::add_option_with_default( app, "--dump-dir", prm.dump_dir, "Write fields for visualisation into this directory." );
     util::add_option_with_default( app, "--dump-every", prm.dump_every, "Snapshot interval in time steps." );
     util::add_option_with_default( app, "--taylor", prm.taylor, "Run the Taylor test (0: only the fields)." );
+    util::add_option_with_default( app, "--adjoint-stokes", prm.adjoint_stokes,
+                                   "1: include the buoyancy feedback via an adjoint Stokes solve per step." );
+    util::add_option_with_default( app, "--supg", prm.supg, "1: SUPG energy step; 0: pure Galerkin." );
     CLI11_PARSE( app, argc, argv );
 
     return run( prm );
