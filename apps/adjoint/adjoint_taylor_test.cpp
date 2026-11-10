@@ -27,6 +27,8 @@
 
 #include <cmath>
 #include <cstdio>
+#include <fstream>
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -93,6 +95,9 @@ struct Parameters
     int    frozen         = 1;
     double stokes_tol     = 1e-10;
     double energy_tol     = 1e-13;
+    std::string dump_dir;          // if set: write fields for visualisation (raw float64, one file per field)
+    int    dump_every     = 20;    // snapshot interval in time steps
+    int    taylor         = 1;     // run the Taylor test
 };
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -153,6 +158,39 @@ void temperature_boundary_values( VectorW1Scalar< Real >& g, const Grid4DDataSca
 {
     linalg::assign( g, 0.0 );
     kernels::common::assign_masked_else_keep_old( g.grid_data(), Real( 1 ), bmask, CMB );
+}
+
+/// Node positions (x, y, z) for the field dumps.
+void node_positions( const DistributedDomain& domain, const Grid3DDataVec< Real, 3 >& coords,
+                     const Grid2DDataScalar< Real >& radii, VectorW1Vec< Real >& xyz )
+{
+    auto o = xyz.grid_data();
+    Kokkos::parallel_for(
+        "xyz", local_domain_md_range_policy_nodes( domain ), KOKKOS_LAMBDA( int s, int x, int y, int r ) {
+            const auto p = grid::shell::coords( s, x, y, r, coords, radii );
+            for ( int d = 0; d < 3; ++d )
+                o( s, x, y, r, d ) = p( d );
+        } );
+    Kokkos::fence();
+}
+
+/// Writes a scalar grid field as raw float64 (same node order for every field, incl. duplicated interface nodes).
+void write_raw( const std::string& path, const Grid4DDataScalar< Real >& v )
+{
+    auto          h = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace{}, v );
+    std::ofstream f( path, std::ios::binary );
+    f.write( reinterpret_cast< const char* >( h.data() ), static_cast< std::streamsize >( h.size() * sizeof( Real ) ) );
+}
+
+/// a <- a / b entrywise (dual vector -> density with the lumped mass).
+void divide_entries( const DistributedDomain& domain, VectorW1Scalar< Real >& a, const VectorW1Scalar< Real >& b )
+{
+    auto d = a.grid_data();
+    auto m = b.grid_data();
+    Kokkos::parallel_for(
+        "divide_entries", local_domain_md_range_policy_nodes( domain ),
+        KOKKOS_LAMBDA( int s, int x, int y, int r ) { d( s, x, y, r ) /= m( s, x, y, r ); } );
+    Kokkos::fence();
 }
 
 void zero_on_boundary( VectorW1Scalar< Real >& v, const Grid4DDataScalar< ShellBoundaryFlag >& bmask )
@@ -347,6 +385,7 @@ int run( const Parameters& prm )
 
     /// Runs the forward model from T0 (T0 is overwritten with T^N). store: keep the velocities in u_store.
     /// frozen: do not solve Stokes, use u_store (filled by an earlier stored run) instead.
+    std::function< void( int, const VectorW1Scalar< Real >&, const VectorW1Vec< Real >& ) > snapshot;
     auto forward = [&]( VectorW1Scalar< Real >& T, bool store, bool frozen ) {
         for ( int n = 0; n < N; ++n )
         {
@@ -356,8 +395,12 @@ int run( const Parameters& prm )
                 solve_stokes( T, vel ); // u^n = S(T^n)
             if ( store )
                 linalg::assign( u_store[n], vel );
+            if ( snapshot && n % prm.dump_every == 0 )
+                snapshot( n, T, vel );
             energy_step( T ); // T^{n+1} = E(u^n) T^n
         }
+        if ( snapshot )
+            snapshot( N, T, vel );
     };
 
     VectorW1Scalar< Real > T_obs( "T_obs", dom, owner[vl] ), T0( "T0", dom, owner[vl] ), T( "T", dom, owner[vl] ),
@@ -369,32 +412,99 @@ int run( const Parameters& prm )
         return 0.5 * linalg::dot( misfit, tmp );
     };
 
+    // --- optional dumps for visualisation ----------------------------------------------------------------------
+    int rank = 0;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    const std::string rsuf = "_r" + std::to_string( rank ) + ".bin";
+    VectorW1Scalar< Real > mlump( "mlump", dom, owner[vl] ), dens( "dens", dom, owner[vl] );
+    {
+        VectorW1Scalar< Real > ones( "ones_T", dom, owner[vl] );
+        linalg::assign( ones, 1.0 );
+        linalg::apply( M, ones, mlump ); // lumped mass: turns dual vectors (adjoint, gradient) into densities
+    }
+    auto dump = [&]( const std::string& name, const VectorW1Scalar< Real >& v ) {
+        if ( !prm.dump_dir.empty() )
+            write_raw( prm.dump_dir + "/" + name + rsuf, v.grid_data() );
+    };
+    auto dump_dual = [&]( const std::string& name, const VectorW1Scalar< Real >& v ) {
+        if ( prm.dump_dir.empty() )
+            return;
+        linalg::assign( dens, v );
+        divide_entries( dom, dens, mlump );
+        write_raw( prm.dump_dir + "/" + name + rsuf, dens.grid_data() );
+    };
+    auto dump_vec = [&]( const std::string& name, const VectorW1Vec< Real >& v ) {
+        if ( prm.dump_dir.empty() )
+            return;
+        for ( int d = 0; d < 3; ++d )
+            write_raw( prm.dump_dir + "/" + name + "_" + std::to_string( d ) + rsuf, v.grid_data().comp_[d] );
+    };
+    if ( !prm.dump_dir.empty() )
+    {
+        VectorW1Vec< Real > xyz( "xyz", dom, owner[vl] );
+        node_positions( dom, coords[vl], radii[vl], xyz );
+        dump_vec( "xyz", xyz );
+    }
+
     // 1) synthetic observation: T_obs = forward(T_true)
     initial_temperature( dom, coords[vl], radii[vl], T_obs, prm.r_min, prm.r_max );
     kernels::common::assign_masked_else_keep_old( T_obs.grid_data(), g_bc.grid_data(), bmask[vl], BOUNDARY );
     util::logroot << "Forward run from the true initial condition ...\n";
+    snapshot = [&]( int n, const VectorW1Scalar< Real >& Tn, const VectorW1Vec< Real >& un ) {
+        dump( "true_T_" + std::to_string( n ), Tn );
+        if ( n < N )
+            dump_vec( "true_u_" + std::to_string( n ), un );
+    };
     forward( T_obs, false, false );
+    dump( "T_obs", T_obs );
 
     // 2) base run from the guess T^0 = T_obs, storing the trajectory
     linalg::assign( T0, T_obs );
     linalg::assign( T, T0 );
     util::logroot << "Base forward run from T^0 = T_obs ...\n";
+    snapshot = [&]( int n, const VectorW1Scalar< Real >& Tn, const VectorW1Vec< Real >& un ) {
+        dump( "base_T_" + std::to_string( n ), Tn );
+        if ( n < N )
+            dump_vec( "base_u_" + std::to_string( n ), un );
+    };
     forward( T, true, false );
+    snapshot = nullptr;
     const double J0 = objective( T );
+    VectorW1Scalar< Real > TN_base( "TN_base", dom, owner[vl] );
+    linalg::assign( TN_base, T );
+    dump( "misfit", misfit );
 
     // 3) adjoint: lambda^N = M (T^N - T_obs), then N transposed steps backward through the stored velocities
     util::logroot << "Adjoint run ...\n";
     linalg::assign( lam, tmp ); // tmp = M (T^N - T_obs) from objective()
     zero_on_boundary( lam, bmask[vl] );
+    dump_dual( "adj_" + std::to_string( N ), lam );
     for ( int n = N - 1; n >= 0; --n )
     {
         linalg::assign( vel, u_store[n] );
         adjoint_step( lam );
+        if ( n % prm.dump_every == 0 )
+            dump_dual( "adj_" + std::to_string( n ), lam );
     }
     // lam = dJ/dT^0 (a dual vector: dJ = lam . dT)
 
     perturbation( dom, coords[vl], radii[vl], dT, prm.r_min, prm.r_max );
     const double gdT = linalg::dot( lam, dT );
+    dump( "dT", dT );
+    dump_dual( "gradient", lam );
+    if ( !prm.dump_dir.empty() )
+    {
+        // Response of the final temperature to the perturbation, (T^N(T0 + h dT) - T^N(T0)) / h, with the base
+        // velocities (what the adjoint sees) and with re-solved Stokes (the real model).
+        const double hv = 1e-3;
+        for ( int fr = 1; fr >= 0; --fr )
+        {
+            linalg::lincomb( T, { 1.0, hv }, { T0, dT } );
+            forward( T, false, fr == 1 );
+            linalg::lincomb( T, { 1.0 / hv, -1.0 / hv }, { T, TN_base } );
+            dump( fr ? "response_frozen" : "response_coupled", T );
+        }
+    }
     util::logroot << "J(T^0) = " << J0 << ",  g . dT = " << gdT << ",  |g|_inf = " << linalg::norm_inf( lam ) << "\n";
 
     // 4) Taylor remainder test
@@ -403,7 +513,7 @@ int run( const Parameters& prm )
                   << "\n";
     util::logroot << "      h            J(T0+h dT)        |dJ|           rate1   |dJ - h g.dT|   rate2\n";
     double h = prm.h0, prev1 = 0, prev2 = 0;
-    for ( int k = 0; k <= prm.halvings; ++k, h *= 0.5 )
+    for ( int k = 0; prm.taylor && k <= prm.halvings; ++k, h *= 0.5 )
     {
         linalg::lincomb( T, { 1.0, h }, { T0, dT } );
         forward( T, false, prm.frozen != 0 );
@@ -444,6 +554,9 @@ int main( int argc, char** argv )
                                    "1: perturbed runs reuse the base velocities; 0: they re-solve Stokes." );
     util::add_option_with_default( app, "--stokes-tol", prm.stokes_tol, "FGMRES relative tolerance." );
     util::add_option_with_default( app, "--energy-tol", prm.energy_tol, "BiCGStab relative tolerance." );
+    util::add_option_with_default( app, "--dump-dir", prm.dump_dir, "Write fields for visualisation into this directory." );
+    util::add_option_with_default( app, "--dump-every", prm.dump_every, "Snapshot interval in time steps." );
+    util::add_option_with_default( app, "--taylor", prm.taylor, "Run the Taylor test (0: only the fields)." );
     CLI11_PARSE( app, argc, argv );
 
     return run( prm );
