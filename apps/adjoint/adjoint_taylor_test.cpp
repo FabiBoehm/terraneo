@@ -202,7 +202,7 @@ int run( const Parameters& prm )
     auto table = std::make_shared< util::Table >();
 
     // --- Stokes operator and solver (as in tests/test_epsilon_divdiv_stokes.cpp, viscosity 1) ------------------
-    const BoundaryConditions bcs = { { CMB, DIRICHLET }, { SURFACE, DIRICHLET } };
+    BoundaryConditions bcs = { { CMB, DIRICHLET }, { SURFACE, DIRICHLET } }; // array type: must not be const
 
     VectorW1Scalar< Real > visc( "visc", dom, owner[vl] );
     linalg::assign( visc, 1.0 );
